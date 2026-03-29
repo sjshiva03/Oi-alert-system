@@ -2,7 +2,7 @@ import os
 import math
 import time
 import threading
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from fyers_apiv3 import fyersModel
@@ -60,6 +60,10 @@ def display_symbol_name(symbol):
 
 def get_today_str():
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def get_prev_day_str():
+    return (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
 def chunk_list(items, chunk_size):
@@ -297,14 +301,42 @@ def extract_underlying_ltp(resp):
     return 0.0
 
 
-def get_ltp_fallback(fyers, symbol):
-    today = get_today_str()
-    resp = fetch_history(fyers, symbol, "1", today, today)
-    candles = resp.get("candles") or resp.get("data", {}).get("candles") or []
+def extract_candles(resp):
+    if not isinstance(resp, dict):
+        return []
+    return resp.get("candles") or resp.get("data", {}).get("candles") or []
+
+
+def close_from_candles(candles):
     if candles:
         last = candles[-1]
         if isinstance(last, list) and len(last) >= 5:
             return safe_float(last[4], 0.0)
+    return 0.0
+
+
+def get_ltp_fallback(fyers, symbol):
+    today = get_today_str()
+    prev_start = get_prev_day_str()
+
+    # 1-minute fallback
+    resp = fetch_history(fyers, symbol, "1", today, today)
+    val = close_from_candles(extract_candles(resp))
+    if val > 0:
+        return val
+
+    # 5-minute fallback
+    resp = fetch_history(fyers, symbol, "5", today, today)
+    val = close_from_candles(extract_candles(resp))
+    if val > 0:
+        return val
+
+    # Daily fallback over wider range so previous candle is available after hours / holidays
+    resp = fetch_history(fyers, symbol, "D", prev_start, today)
+    val = close_from_candles(extract_candles(resp))
+    if val > 0:
+        return val
+
     return 0.0
 
 
