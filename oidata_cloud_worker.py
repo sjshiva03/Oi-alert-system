@@ -31,7 +31,7 @@ def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
 
     if not raw:
-        raw = "NSE:NIFTY50-INDEX,NSE:NIFTYBANK-INDEX"
+        raw = "NSE:NIFTY50-INDEX,NSE:NIFTYBANK-INDEX,NSE:ICICIBANK-EQ,NSE:HDFCBANK-EQ,NSE:RELIANCE-EQ,NSE:SBIN-EQ"
 
     items = []
     normalized = raw.replace("\n", ",").replace(";", ",")
