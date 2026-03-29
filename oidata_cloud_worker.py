@@ -14,14 +14,14 @@ from fyers_apiv3 import fyersModel
 RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 PORT = int(os.getenv("PORT", "8080"))
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
-BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2"))
+BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2.5"))
 
 RISK_FREE_RATE = 0.06
 
@@ -232,6 +232,8 @@ def fetch_quotes_map(fyers, symbols):
         resp = fyers.quotes(data=payload)
     except TypeError:
         resp = fyers.quotes(payload)
+    except Exception:
+        return {}
 
     out = {}
     if not isinstance(resp, dict):
@@ -262,15 +264,6 @@ def fetch_quotes_map(fyers, symbols):
         }
 
     return out
-
-
-def fetch_single_ltp(fyers, symbol):
-    q = fetch_quotes_map(fyers, [symbol])
-    if symbol in q:
-        return safe_float(q[symbol].get("ltp"), 0.0)
-    for _, vals in q.items():
-        return safe_float(vals.get("ltp"), 0.0)
-    return 0.0
 
 
 def fetch_history(fyers, symbol, resolution, date_from, date_to, cont_flag="1"):
@@ -623,9 +616,19 @@ def run_worker():
         for batch_no, batch_symbols in enumerate(batches, start=1):
             log(f"Processing batch {batch_no}/{len(batches)}: {[display_symbol_name(s) for s in batch_symbols]}")
 
+            # load-friendly batch LTP fetch
+            batch_quotes = fetch_quotes_map(fyers, batch_symbols)
+
             for symbol in batch_symbols:
                 try:
-                    ltp = fetch_single_ltp(fyers, symbol)
+                    q = batch_quotes.get(symbol, {})
+                    ltp = safe_float(q.get("ltp"), 0.0)
+
+                    if ltp <= 0:
+                        retry_quotes = fetch_quotes_map(fyers, [symbol])
+                        q = retry_quotes.get(symbol, {})
+                        ltp = safe_float(q.get("ltp"), 0.0)
+
                     if ltp <= 0:
                         log(f"{display_symbol_name(symbol)} | LTP not available")
                         continue
@@ -645,9 +648,9 @@ def run_worker():
                         if sym:
                             option_symbols.append(sym)
 
-                    quotes_map = fetch_quotes_map(fyers, option_symbols)
+                    option_quotes_map = fetch_quotes_map(fyers, option_symbols)
                     expiry_text = datetime.now().strftime("%Y-%m-%d")
-                    rows = normalize_chain(options_list, quotes_map, underlying_ltp, expiry_text)
+                    rows = normalize_chain(options_list, option_quotes_map, underlying_ltp, expiry_text)
 
                     oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
 
