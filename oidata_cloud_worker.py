@@ -9,12 +9,6 @@ from fyers_apiv3 import fyersModel
 from twilio.rest import Client
 
 
-# =========================
-# ENV CONFIG
-# =========================
-RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
@@ -27,17 +21,11 @@ SEND_STARTUP_TEST_MESSAGE = os.getenv("SEND_STARTUP_TEST_MESSAGE", "true").strip
 RISK_FREE_RATE = 0.06
 
 
-# =========================
-# LOG HELPERS
-# =========================
 def log(msg):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] [OIDATA-CLOUD] {msg}", flush=True)
 
 
-# =========================
-# GENERAL HELPERS
-# =========================
 def safe_float(x, default=0.0):
     try:
         if x is None or x == "":
@@ -73,25 +61,18 @@ def chunk_list(items, chunk_size):
         yield items[i:i + chunk_size]
 
 
-# =========================
-# WATCHLIST
-# =========================
 def normalize_symbol(sym):
     s = str(sym).strip().upper()
     if not s:
         return ""
-
     if s.endswith("-INDEX") and ":" in s:
         return s
-
     if ":" not in s:
         s = "NSE:" + s
-
     if s.startswith("NSE:") or s.startswith("BSE:"):
         tail = s.split(":", 1)[1]
         if not tail.endswith("-EQ") and not tail.endswith("-INDEX"):
             s = s + "-EQ"
-
     return s
 
 
@@ -126,12 +107,6 @@ def get_watchlist():
     return final_list
 
 
-WATCHLIST = get_watchlist()
-
-
-# =========================
-# TWILIO HELPERS
-# =========================
 def send_whatsapp_alert(message):
     sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
     auth = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
@@ -149,22 +124,17 @@ def send_whatsapp_alert(message):
 
     try:
         client = Client(sid, auth)
-        msg = client.messages.create(
-            from_=wa_from,
-            to=wa_to,
-            body=message
-        )
+        msg = client.messages.create(from_=wa_from, to=wa_to, body=message)
         log(f"WhatsApp sent SUCCESS: {msg.sid}")
     except Exception as e:
         log(f"WhatsApp ERROR FULL: {repr(e)}")
 
 
-# =========================
-# FYERS HELPERS
-# =========================
 def get_fyers_creds():
-    raw_token = RAW_ACCESS_TOKEN
-    raw_client = RAW_CLIENT_ID
+    raw_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+    raw_client = os.getenv("FYERS_CLIENT_ID", "").strip()
+
+    log(f"FYERS DEBUG -> CLIENT_ID={bool(raw_client)}, TOKEN={bool(raw_token)}")
 
     if not raw_token:
         raise Exception("Missing FYERS_ACCESS_TOKEN in Railway variables")
@@ -186,163 +156,6 @@ def get_fyers_creds():
     )
 
 
-def create_fyers():
-    client_id, access_token = get_fyers_creds()
-    return fyersModel.FyersModel(
-        client_id=client_id,
-        token=access_token,
-        is_async=False,
-        log_path=""
-    )
-
-
-def fetch_quotes_map(fyers, symbols):
-    if not symbols:
-        return {}
-
-    payload = {"symbols": ",".join(symbols)}
-    try:
-        resp = fyers.quotes(data=payload)
-    except TypeError:
-        resp = fyers.quotes(payload)
-    except Exception:
-        return {}
-
-    out = {}
-    if not isinstance(resp, dict):
-        return out
-
-    items = resp.get("d") or resp.get("data") or []
-    if not isinstance(items, list):
-        return out
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
-        vals = item.get("v") or item.get("values") or item
-
-        out[sym] = {
-            "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
-            "prev_close": safe_float(
-                vals.get("prev_close_price")
-                or vals.get("prev_close")
-                or vals.get("prevClose")
-                or vals.get("close")
-                or vals.get("prevClosePrice"),
-                None
-            ),
-            "chg": safe_float(vals.get("ch") or vals.get("chg") or vals.get("change"), None)
-        }
-
-    return out
-
-
-def fetch_history(fyers, symbol, resolution, date_from, date_to, cont_flag="1"):
-    payload = {
-        "symbol": symbol,
-        "resolution": str(resolution),
-        "date_format": "1",
-        "range_from": date_from,
-        "range_to": date_to,
-        "cont_flag": cont_flag,
-    }
-    try:
-        return fyers.history(data=payload)
-    except TypeError:
-        return fyers.history(payload)
-    except Exception:
-        return {}
-
-
-def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
-    payload = {
-        "symbol": symbol,
-        "strikecount": strikecount,
-        "timestamp": timestamp
-    }
-    try:
-        return fyers.optionchain(data=payload)
-    except TypeError:
-        return fyers.optionchain(payload)
-    except Exception:
-        return {}
-
-
-def extract_options_chain_list(resp):
-    if not isinstance(resp, dict):
-        return []
-
-    data = resp.get("data", {})
-    if isinstance(data, dict):
-        if isinstance(data.get("optionsChain"), list):
-            return data["optionsChain"]
-        if isinstance(data.get("optionschain"), list):
-            return data["optionschain"]
-        if isinstance(data.get("options"), list):
-            return data["options"]
-
-    return []
-
-
-def extract_underlying_ltp(resp):
-    if not isinstance(resp, dict):
-        return 0.0
-
-    data = resp.get("data", {})
-    if not isinstance(data, dict):
-        return 0.0
-
-    for key in ["ltp", "underlying_ltp", "underlyingLtp", "underlying_price", "underlyingPrice"]:
-        if key in data:
-            return safe_float(data.get(key), 0.0)
-
-    return 0.0
-
-
-def extract_candles(resp):
-    if not isinstance(resp, dict):
-        return []
-    return resp.get("candles") or resp.get("data", {}).get("candles") or []
-
-
-def close_from_candles(candles):
-    if candles:
-        last = candles[-1]
-        if isinstance(last, list) and len(last) >= 5:
-            return safe_float(last[4], 0.0)
-    return 0.0
-
-
-def get_ltp_fallback(fyers, symbol):
-    today = get_today_str()
-    prev_start = get_prev_day_str()
-
-    # 1-minute fallback
-    resp = fetch_history(fyers, symbol, "1", today, today)
-    val = close_from_candles(extract_candles(resp))
-    if val > 0:
-        return val
-
-    # 5-minute fallback
-    resp = fetch_history(fyers, symbol, "5", today, today)
-    val = close_from_candles(extract_candles(resp))
-    if val > 0:
-        return val
-
-    # Daily fallback over wider range so previous candle is available after hours / holidays
-    resp = fetch_history(fyers, symbol, "D", prev_start, today)
-    val = close_from_candles(extract_candles(resp))
-    if val > 0:
-        return val
-
-    return 0.0
-
-
-# =========================
-# OPTION IV / CHAIN HELPERS
-# =========================
 def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
@@ -350,10 +163,8 @@ def norm_cdf(x):
 def bs_price(spot, strike, time_years, rate, vol, option_type):
     if spot <= 0 or strike <= 0 or time_years <= 0 or vol <= 0:
         return 0.0
-
     d1 = (math.log(spot / strike) + (rate + 0.5 * vol * vol) * time_years) / (vol * math.sqrt(time_years))
     d2 = d1 - vol * math.sqrt(time_years)
-
     option_type = str(option_type).upper().strip()
     if option_type == "CE":
         return spot * norm_cdf(d1) - strike * math.exp(-rate * time_years) * norm_cdf(d2)
@@ -367,32 +178,24 @@ def implied_volatility(market_price, spot, strike, time_years, rate, option_type
     spot = safe_float(spot, 0.0)
     strike = safe_float(strike, 0.0)
     time_years = safe_float(time_years, 0.0)
-
     if market_price <= 0 or spot <= 0 or strike <= 0 or time_years <= 0:
         return 0.0
-
     low = 0.0001
     high = 5.0
-
     low_price = bs_price(spot, strike, time_years, rate, low, option_type)
     high_price = bs_price(spot, strike, time_years, rate, high, option_type)
-
     if market_price < low_price or market_price > high_price:
         return 0.0
-
     for _ in range(max_iter):
         mid = (low + high) / 2.0
         price = bs_price(spot, strike, time_years, rate, mid, option_type)
         diff = price - market_price
-
         if abs(diff) < tolerance:
             return mid * 100.0
-
         if diff > 0:
             high = mid
         else:
             low = mid
-
     return ((low + high) / 2.0) * 100.0
 
 
@@ -415,55 +218,149 @@ def compute_option_iv(option_type, strike, ltp, underlying_ltp, expiry_text, rat
     return implied_volatility(ltp, underlying_ltp, strike, t, rate, option_type)
 
 
+def create_fyers():
+    client_id, access_token = get_fyers_creds()
+    return fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False, log_path="")
+
+
+def fetch_quotes_map(fyers, symbols):
+    if not symbols:
+        return {}
+    payload = {"symbols": ",".join(symbols)}
+    try:
+        resp = fyers.quotes(data=payload)
+    except TypeError:
+        resp = fyers.quotes(payload)
+    except Exception:
+        return {}
+    out = {}
+    if not isinstance(resp, dict):
+        return out
+    items = resp.get("d") or resp.get("data") or []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
+        vals = item.get("v") or item.get("values") or item
+        out[sym] = {
+            "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
+            "prev_close": safe_float(vals.get("prev_close_price") or vals.get("prev_close") or vals.get("prevClose") or vals.get("close") or vals.get("prevClosePrice"), None),
+            "chg": safe_float(vals.get("ch") or vals.get("chg") or vals.get("change"), None),
+        }
+    return out
+
+
+def fetch_history(fyers, symbol, resolution, date_from, date_to, cont_flag="1"):
+    payload = {"symbol": symbol, "resolution": str(resolution), "date_format": "1", "range_from": date_from, "range_to": date_to, "cont_flag": cont_flag}
+    try:
+        return fyers.history(data=payload)
+    except TypeError:
+        return fyers.history(payload)
+    except Exception:
+        return {}
+
+
+def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
+    payload = {"symbol": symbol, "strikecount": strikecount, "timestamp": timestamp}
+    try:
+        return fyers.optionchain(data=payload)
+    except TypeError:
+        return fyers.optionchain(payload)
+    except Exception:
+        return {}
+
+
+def extract_options_chain_list(resp):
+    if not isinstance(resp, dict):
+        return []
+    data = resp.get("data", {})
+    if isinstance(data, dict):
+        if isinstance(data.get("optionsChain"), list):
+            return data["optionsChain"]
+        if isinstance(data.get("optionschain"), list):
+            return data["optionschain"]
+        if isinstance(data.get("options"), list):
+            return data["options"]
+    return []
+
+
+def extract_underlying_ltp(resp):
+    if not isinstance(resp, dict):
+        return 0.0
+    data = resp.get("data", {})
+    if not isinstance(data, dict):
+        return 0.0
+    for key in ["ltp", "underlying_ltp", "underlyingLtp", "underlying_price", "underlyingPrice"]:
+        if key in data:
+            return safe_float(data.get(key), 0.0)
+    return 0.0
+
+
+def extract_candles(resp):
+    if not isinstance(resp, dict):
+        return []
+    return resp.get("candles") or resp.get("data", {}).get("candles") or []
+
+
+def close_from_candles(candles):
+    if candles:
+        last = candles[-1]
+        if isinstance(last, list) and len(last) >= 5:
+            return safe_float(last[4], 0.0)
+    return 0.0
+
+
+def get_ltp_fallback(fyers, symbol):
+    today = get_today_str()
+    prev_start = get_prev_day_str()
+
+    resp = fetch_history(fyers, symbol, "1", today, today)
+    val = close_from_candles(extract_candles(resp))
+    if val > 0:
+        return val
+
+    resp = fetch_history(fyers, symbol, "5", today, today)
+    val = close_from_candles(extract_candles(resp))
+    if val > 0:
+        return val
+
+    resp = fetch_history(fyers, symbol, "D", prev_start, today)
+    val = close_from_candles(extract_candles(resp))
+    if val > 0:
+        return val
+
+    return 0.0
+
+
 def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_text=""):
     if quotes_map is None:
         quotes_map = {}
-
     call_map = {}
     put_map = {}
-
     for x in options_list:
         if not isinstance(x, dict):
             continue
-
         strike = x.get("strike_price") or x.get("strikePrice") or x.get("strike") or x.get("sp")
         if strike is None:
             continue
         strike = safe_float(strike, None)
         if strike is None:
             continue
-
-        option_type = str(
-            x.get("option_type")
-            or x.get("optionType")
-            or x.get("type")
-            or x.get("otype")
-            or ""
-        ).upper().strip()
-
+        option_type = str(x.get("option_type") or x.get("optionType") or x.get("type") or x.get("otype") or "").upper().strip()
         symbol = x.get("symbol", "")
         quote = quotes_map.get(symbol, {})
-
-        ltp = safe_float(
-            x.get("ltp") or x.get("last_price") or x.get("lastPrice") or quote.get("ltp"),
-            0.0
-        )
-
+        ltp = safe_float(x.get("ltp") or x.get("last_price") or x.get("lastPrice") or quote.get("ltp"), 0.0)
         prev_close = quote.get("prev_close", None)
         api_chg = safe_float(x.get("chg") or x.get("change") or x.get("ch") or quote.get("chg"), 0.0)
-
-        if prev_close is not None:
-            final_chg = ltp - prev_close
-        else:
-            final_chg = api_chg
-
+        final_chg = ltp - prev_close if prev_close is not None else api_chg
         sym_upper = str(symbol).upper()
         raw_iv = x.get("iv") or x.get("IV") or x.get("implied_volatility") or x.get("impliedVolatility")
         calc_iv = safe_float(raw_iv, 0.0)
         if calc_iv <= 0 and underlying_ltp > 0 and ltp > 0 and expiry_text:
             inferred_type = option_type if option_type in ("CE", "PE") else ("CE" if sym_upper.endswith("CE") else "PE")
             calc_iv = compute_option_iv(inferred_type, strike, ltp, underlying_ltp, expiry_text)
-
         row = {
             "symbol": symbol,
             "ltp": ltp,
@@ -473,19 +370,15 @@ def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_te
             "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange")),
             "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol")),
         }
-
         if option_type in ("CE", "CALL", "C") or sym_upper.endswith("CE"):
             call_map[int(strike)] = row
         elif option_type in ("PE", "PUT", "P") or sym_upper.endswith("PE"):
             put_map[int(strike)] = row
-
     strikes = sorted(set(call_map.keys()) | set(put_map.keys()))
-
     final_rows = []
     for strike in strikes:
         c = call_map.get(strike, {})
         p = put_map.get(strike, {})
-
         final_rows.append({
             "strike": int(strike),
             "call_ltp": c.get("ltp", 0.0),
@@ -501,17 +394,12 @@ def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_te
             "put_oich": p.get("oi_change", 0.0),
             "put_volume": p.get("volume", 0.0),
         })
-
     return final_rows
 
 
-# =========================
-# STRATEGY HELPERS
-# =========================
 def parse_candles(resp):
     if not isinstance(resp, dict):
         return []
-
     data = resp.get("candles") or resp.get("data", {}).get("candles") or []
     out = []
     for row in data:
@@ -519,14 +407,7 @@ def parse_candles(resp):
             continue
         ts, o, h, l, c, v = row[:6]
         dt = datetime.fromtimestamp(ts)
-        out.append({
-            "dt": dt,
-            "Open": safe_float(o),
-            "High": safe_float(h),
-            "Low": safe_float(l),
-            "Close": safe_float(c),
-            "Volume": safe_float(v),
-        })
+        out.append({"dt": dt, "Open": safe_float(o), "High": safe_float(h), "Low": safe_float(l), "Close": safe_float(c), "Volume": safe_float(v)})
     return out
 
 
@@ -534,20 +415,15 @@ def fetch_intraday_setup_only(fyers, symbol):
     today = get_today_str()
     resp = fetch_history(fyers, symbol, "15", today, today)
     candles = parse_candles(resp)
-
     market_candles = [c for c in candles if dtime(9, 15) <= c["dt"].time() <= dtime(15, 30)]
     if len(market_candles) < 2:
         return None
-
     first = market_candles[0]
     second = market_candles[1]
-
     first_range_pct = 0.0
     if first["Low"] > 0:
         first_range_pct = ((first["High"] - first["Low"]) / first["Low"]) * 100.0
-
     second_inside_first = second["High"] <= first["High"] and second["Low"] >= first["Low"]
-
     return {
         "first15_high": first["High"],
         "first15_low": first["Low"],
@@ -561,15 +437,12 @@ def fetch_intraday_setup_only(fyers, symbol):
 def classify_price_breakout(ltp, setup):
     if not setup:
         return "NO_SETUP"
-
     high_ = safe_float(setup.get("first15_high"), 0.0)
     low_ = safe_float(setup.get("first15_low"), 0.0)
     inside_ok = bool(setup.get("second_inside_first"))
     small_range = safe_float(setup.get("first15_range_pct"), 999.0) < 1.0
-
     if not inside_ok or not small_range:
         return "NO_SETUP"
-
     if ltp > high_:
         return "BUY"
     if ltp < low_:
@@ -580,32 +453,25 @@ def classify_price_breakout(ltp, setup):
 def nearest_strike_rows(rows, underlying_ltp):
     if not rows:
         return None, None, None
-
     rows_sorted = sorted(rows, key=lambda r: abs(safe_float(r.get("strike"), 0.0) - underlying_ltp))
     atm = rows_sorted[0]
-
     all_by_strike = sorted(rows, key=lambda r: safe_float(r.get("strike"), 0.0))
     strikes = [safe_float(r["strike"], 0.0) for r in all_by_strike]
     atm_strike = safe_float(atm["strike"], 0.0)
-
     idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - atm_strike))
     lower_row = all_by_strike[idx - 1] if idx - 1 >= 0 else None
     upper_row = all_by_strike[idx + 1] if idx + 1 < len(all_by_strike) else None
-
     return lower_row, atm, upper_row
 
 
 def classify_oi_confirm(price_signal, rows, underlying_ltp):
     if price_signal not in ("BUY", "SELL"):
         return price_signal
-
     lower_row, atm_row, upper_row = nearest_strike_rows(rows, underlying_ltp)
     if atm_row is None:
         return price_signal
-
     atm_call_oich = safe_float(atm_row.get("call_oich"), 0.0)
     atm_put_oich = safe_float(atm_row.get("put_oich"), 0.0)
-
     lower_call_oich = safe_float(lower_row.get("call_oich"), 0.0) if lower_row else 0.0
     upper_put_oich = safe_float(upper_row.get("put_oich"), 0.0) if upper_row else 0.0
 
@@ -640,9 +506,6 @@ def classify_oi_confirm(price_signal, rows, underlying_ltp):
     return price_signal
 
 
-# =========================
-# ALERT HELPERS
-# =========================
 signal_memory = {}
 
 
@@ -653,11 +516,9 @@ def get_signal_key(symbol, price_signal, oi_signal):
 def should_send_smart_alert(symbol, price_signal, oi_signal, cooldown_seconds=900):
     if oi_signal == "NO_SETUP" or price_signal == "NO_SETUP":
         return False
-
     key = get_signal_key(symbol, price_signal, oi_signal)
     now_ts = time.time()
     last_ts = signal_memory.get(key, 0)
-
     if now_ts - last_ts >= cooldown_seconds:
         signal_memory[key] = now_ts
         return True
@@ -668,41 +529,30 @@ def get_trade_levels(price_signal, ltp):
     ltp = safe_float(ltp, 0.0)
     if ltp <= 0:
         return None, None
-
     if price_signal == "BUY":
-        sl = round(ltp * 0.995, 2)
-        target = round(ltp * 1.01, 2)
-        return sl, target
-
+        return round(ltp * 0.995, 2), round(ltp * 1.01, 2)
     if price_signal == "SELL":
-        sl = round(ltp * 1.005, 2)
-        target = round(ltp * 0.99, 2)
-        return sl, target
-
+        return round(ltp * 1.005, 2), round(ltp * 0.99, 2)
     return None, None
 
 
 def build_smart_alert_message(symbol, ltp, price_signal, oi_signal):
     sl, target = get_trade_levels(price_signal, ltp)
-    emoji = "📈" if price_signal == "BUY" else "📉"
-    strength = "🔥 STRONG" if "STRONG" in oi_signal else "⚠️ NORMAL"
-
+    emoji = "馃搱" if price_signal == "BUY" else "馃搲"
+    strength = "馃敟 STRONG" if "STRONG" in oi_signal else "鈿狅笍 NORMAL"
     return (
-        f"🚨 SMART ALERT 🚨\n\n"
+        f"馃毃 SMART ALERT 馃毃\n\n"
         f"Symbol: {display_symbol_name(symbol)}\n"
         f"{emoji} Price Signal: {price_signal}\n"
-        f"📊 OI Signal: {oi_signal}\n"
-        f"💰 LTP: {ltp:.2f}\n"
-        f"🛑 SL: {sl if sl is not None else '-'}\n"
-        f"🎯 Target: {target if target is not None else '-'}\n"
+        f"馃搳 OI Signal: {oi_signal}\n"
+        f"馃挵 LTP: {ltp:.2f}\n"
+        f"馃洃 SL: {sl if sl is not None else '-'}\n"
+        f"馃幆 Target: {target if target is not None else '-'}\n"
         f"{strength}\n"
-        f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}"
+        f"馃晵 Time: {datetime.now().strftime('%H:%M:%S')}"
     )
 
 
-# =========================
-# HEALTH SERVER
-# =========================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path == "/health":
@@ -711,7 +561,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok")
             return
-
         self.send_response(404)
         self.end_headers()
 
@@ -725,14 +574,11 @@ def run_health_server():
     server.serve_forever()
 
 
-# =========================
-# MAIN LOOP
-# =========================
 def run_worker():
     if SEND_STARTUP_TEST_MESSAGE:
-        send_whatsapp_alert("🚀 Test message working")
+        send_whatsapp_alert("馃殌 Test message working")
 
-    symbols = WATCHLIST
+    symbols = get_watchlist()
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
     log(f"Batch mode: size={BATCH_SIZE}, pause={BATCH_PAUSE_SECONDS}s")
@@ -746,10 +592,8 @@ def run_worker():
             continue
 
         batches = list(chunk_list(symbols, BATCH_SIZE))
-
         for batch_no, batch_symbols in enumerate(batches, start=1):
             log(f"Processing batch {batch_no}/{len(batches)}: {[display_symbol_name(s) for s in batch_symbols]}")
-
             batch_quotes = fetch_quotes_map(fyers, batch_symbols)
 
             for symbol in batch_symbols:
@@ -787,14 +631,10 @@ def run_worker():
                     option_quotes_map = fetch_quotes_map(fyers, option_symbols)
                     expiry_text = datetime.now().strftime("%Y-%m-%d")
                     rows = normalize_chain(options_list, option_quotes_map, underlying_ltp, expiry_text)
-
                     oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
 
                     if price_signal != "NO_SETUP" or oi_signal != "NO_SETUP":
-                        log(
-                            f"{display_symbol_name(symbol)} | "
-                            f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
-                        )
+                        log(f"{display_symbol_name(symbol)} | LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}")
 
                     if oi_signal == "NO_SETUP" or price_signal == "NO_SETUP":
                         continue
@@ -802,22 +642,10 @@ def run_worker():
                     if ONLY_STRONG_ALERTS:
                         eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
                     else:
-                        eligible = oi_signal in (
-                            "BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK"
-                        )
+                        eligible = oi_signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK")
 
-                    if eligible and should_send_smart_alert(
-                        symbol,
-                        price_signal,
-                        oi_signal,
-                        ALERT_COOLDOWN_SECONDS
-                    ):
-                        alert_msg = build_smart_alert_message(
-                            symbol,
-                            ltp,
-                            price_signal,
-                            oi_signal
-                        )
+                    if eligible and should_send_smart_alert(symbol, price_signal, oi_signal, ALERT_COOLDOWN_SECONDS):
+                        alert_msg = build_smart_alert_message(symbol, ltp, price_signal, oi_signal)
                         log(f"SMART ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
                         send_whatsapp_alert(alert_msg)
 
