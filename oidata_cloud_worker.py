@@ -1,9 +1,8 @@
-
 import os
 import math
 import time
 import threading
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from fyers_apiv3 import fyersModel
@@ -16,45 +15,103 @@ RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
-STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
+STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 PORT = int(os.getenv("PORT", "8080"))
+
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
+BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2"))
 
 RISK_FREE_RATE = 0.06
 
 
 # =========================
-# WATCHLIST CONFIG
+# LOG HELPERS
+# =========================
+def log(msg):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] [OIDATA-CLOUD] {msg}", flush=True)
+
+
+# =========================
+# GENERAL HELPERS
+# =========================
+def safe_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def display_symbol_name(symbol):
+    s = str(symbol).upper()
+    if "NIFTYBANK" in s:
+        return "BANKNIFTY"
+    if "NIFTY50" in s or s.endswith("NIFTY-INDEX"):
+        return "NIFTY"
+    if symbol.endswith("-EQ"):
+        return symbol.split(":")[-1].replace("-EQ", "")
+    return symbol.split(":")[-1]
+
+
+def get_today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def chunk_list(items, chunk_size):
+    if chunk_size <= 0:
+        chunk_size = 1
+    for i in range(0, len(items), chunk_size):
+        yield items[i:i + chunk_size]
+
+
+# =========================
+# WATCHLIST
 # =========================
 def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
 
-    if not raw:
-        raw = "NSE:NIFTY50-INDEX,NSE:NIFTYBANK-INDEX"
+    if raw:
+        items = []
+        normalized = raw.replace("\n", ",").replace(";", ",")
+        for part in normalized.split(","):
+            s = part.strip()
+            if s:
+                items.append(s)
 
-    items = []
-    normalized = raw.replace("\n", ",").replace(";", ",")
-    for part in normalized.split(","):
-        s = part.strip()
-        if s:
-            items.append(s)
+        final_list = list(dict.fromkeys(items))
+        log(f"DEBUG WATCHLIST RAW = {repr(raw)}")
+        log(f"DEBUG WATCHLIST PARSED = {final_list}")
+        return final_list
 
-    return list(dict.fromkeys(items))
+    final_list = [
+        "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:ICICIBANK-EQ", "NSE:HDFCBANK-EQ",
+        "NSE:RELIANCE-EQ", "NSE:SBIN-EQ", "NSE:BHARTIARTL-EQ", "NSE:AXISBANK-EQ",
+        "NSE:BEL-EQ", "NSE:INFY-EQ", "NSE:ETERNAL-EQ", "NSE:TCS-EQ", "NSE:LT-EQ",
+        "NSE:ONGC-EQ", "NSE:SHRIRAMFIN-EQ", "NSE:HINDALCO-EQ", "NSE:INDIGO-EQ",
+        "NSE:KOTAKBANK-EQ", "NSE:M&M-EQ", "NSE:ITC-EQ", "NSE:SUNPHARMA-EQ",
+        "NSE:BAJFINANCE-EQ", "NSE:NTPC-EQ", "NSE:TATASTEEL-EQ", "NSE:MARUTI-EQ",
+        "NSE:POWERGRID-EQ", "NSE:COALINDIA-EQ", "NSE:BAJAJFINSV-EQ", "NSE:GRASIM-EQ",
+        "NSE:ADANIPORTS-EQ", "NSE:BAJAJ-AUTO-EQ", "NSE:HINDUNILVR-EQ", "NSE:ULTRACEMCO-EQ",
+        "NSE:ADANIENT-EQ", "NSE:MAXHEALTH-EQ", "NSE:JIOFIN-EQ", "NSE:EICHERMOT-EQ",
+        "NSE:HCLTECH-EQ", "NSE:TITAN-EQ", "NSE:ASIANPAINT-EQ",
+        "NSE:HDFCLIFE-EQ", "NSE:WIPRO-EQ", "NSE:APOLLOHOSP-EQ", "NSE:SBILIFE-EQ",
+        "NSE:JSWSTEEL-EQ", "NSE:TECHM-EQ", "NSE:TRENT-EQ", "NSE:DRREDDY-EQ",
+        "NSE:NESTLEIND-EQ", "NSE:TATACONSUM-EQ", "NSE:CIPLA-EQ"
+    ]
 
-
-WATCHLIST = get_watchlist()
+    log("DEBUG WATCHLIST RAW = ''")
+    log(f"DEBUG WATCHLIST PARSED = {final_list}")
+    return final_list
 
 
 # =========================
-# ENV HELPERS
+# FYERS CREDENTIALS
 # =========================
 def get_fyers_creds():
-    """
-    Supports both:
-    1) FYERS_CLIENT_ID=APPID-100 and FYERS_ACCESS_TOKEN=JWT
-    2) FYERS_ACCESS_TOKEN=APPID-100:JWT  (auto-split)
-    """
     raw_token = RAW_ACCESS_TOKEN
     raw_client = RAW_CLIENT_ID
 
@@ -78,36 +135,19 @@ def get_fyers_creds():
     )
 
 
-def log(msg):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] [OIDATA-CLOUD] {msg}", flush=True)
+def create_fyers():
+    client_id, access_token = get_fyers_creds()
+    return fyersModel.FyersModel(
+        client_id=client_id,
+        token=access_token,
+        is_async=False,
+        log_path=""
+    )
 
 
-def safe_float(x, default=0.0):
-    try:
-        if x is None or x == "":
-            return default
-        return float(x)
-    except Exception:
-        return default
-
-
-def display_symbol_name(symbol):
-    s = symbol.upper()
-    if "NIFTYBANK" in s:
-        return "BANKNIFTY"
-    if "NIFTY50" in s or s.endswith("NIFTY-INDEX"):
-        return "NIFTY"
-    if symbol.endswith("-EQ"):
-        return symbol.split(":")[-1].replace("-EQ", "")
-    return symbol.split(":")[-1]
-
-
-def is_market_open():
-    now = datetime.now().time()
-    return dtime(9, 15) <= now <= dtime(15, 30)
-
-
+# =========================
+# OPTION PRICING HELPERS
+# =========================
 def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
@@ -181,18 +221,8 @@ def compute_option_iv(option_type, strike, ltp, underlying_ltp, expiry_text, rat
 
 
 # =========================
-# FYERS HELPERS
+# FYERS DATA HELPERS
 # =========================
-def create_fyers():
-    client_id, access_token = get_fyers_creds()
-    return fyersModel.FyersModel(
-        client_id=client_id,
-        token=access_token,
-        is_async=False,
-        log_path=""
-    )
-
-
 def fetch_quotes_map(fyers, symbols):
     if not symbols:
         return {}
@@ -301,6 +331,28 @@ def extract_underlying_ltp(resp):
     return 0.0
 
 
+def parse_candles(resp):
+    if not isinstance(resp, dict):
+        return []
+
+    data = resp.get("candles") or resp.get("data", {}).get("candles") or []
+    out = []
+    for row in data:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        ts, o, h, l, c, v = row[:6]
+        dt = datetime.fromtimestamp(ts)
+        out.append({
+            "dt": dt,
+            "Open": safe_float(o),
+            "High": safe_float(h),
+            "Low": safe_float(l),
+            "Close": safe_float(c),
+            "Volume": safe_float(v),
+        })
+    return out
+
+
 def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_text=""):
     if quotes_map is None:
         quotes_map = {}
@@ -395,32 +447,6 @@ def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_te
 # =========================
 # STRATEGY
 # =========================
-def get_today_str():
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def parse_candles(resp):
-    if not isinstance(resp, dict):
-        return []
-
-    data = resp.get("candles") or resp.get("data", {}).get("candles") or []
-    out = []
-    for row in data:
-        if not isinstance(row, list) or len(row) < 6:
-            continue
-        ts, o, h, l, c, v = row[:6]
-        dt = datetime.fromtimestamp(ts)
-        out.append({
-            "dt": dt,
-            "Open": safe_float(o),
-            "High": safe_float(h),
-            "Low": safe_float(l),
-            "Close": safe_float(c),
-            "Volume": safe_float(v),
-        })
-    return out
-
-
 def fetch_intraday_setup_only(fyers, symbol):
     today = get_today_str()
     resp = fetch_history(fyers, symbol, "15", today, today)
@@ -579,9 +605,10 @@ def run_health_server():
 # MAIN LOOP
 # =========================
 def run_worker():
-    symbols = WATCHLIST
+    symbols = get_watchlist()
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
+    log(f"Batch mode: size={BATCH_SIZE}, pause={BATCH_PAUSE_SECONDS}s")
 
     while True:
         try:
@@ -591,49 +618,60 @@ def run_worker():
             time.sleep(10)
             continue
 
-        for symbol in symbols:
-            try:
-                ltp = fetch_single_ltp(fyers, symbol)
-                if ltp <= 0:
-                    log(f"{display_symbol_name(symbol)} | LTP not available")
-                    continue
+        batches = list(chunk_list(symbols, BATCH_SIZE))
 
-                setup = fetch_intraday_setup_only(fyers, symbol)
-                price_signal = classify_price_breakout(ltp, setup)
+        for batch_no, batch_symbols in enumerate(batches, start=1):
+            log(f"Processing batch {batch_no}/{len(batches)}: {[display_symbol_name(s) for s in batch_symbols]}")
 
-                chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
-                options_list = extract_options_chain_list(chain_resp)
-                underlying_ltp = extract_underlying_ltp(chain_resp)
-                if not underlying_ltp:
-                    underlying_ltp = ltp
+            for symbol in batch_symbols:
+                try:
+                    ltp = fetch_single_ltp(fyers, symbol)
+                    if ltp <= 0:
+                        log(f"{display_symbol_name(symbol)} | LTP not available")
+                        continue
 
-                option_symbols = []
-                for x in options_list:
-                    sym = x.get("symbol")
-                    if sym:
-                        option_symbols.append(sym)
+                    setup = fetch_intraday_setup_only(fyers, symbol)
+                    price_signal = classify_price_breakout(ltp, setup)
 
-                quotes_map = fetch_quotes_map(fyers, option_symbols)
-                expiry_text = datetime.now().strftime("%Y-%m-%d")
-                rows = normalize_chain(options_list, quotes_map, underlying_ltp, expiry_text)
+                    chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
+                    options_list = extract_options_chain_list(chain_resp)
+                    underlying_ltp = extract_underlying_ltp(chain_resp)
+                    if not underlying_ltp:
+                        underlying_ltp = ltp
 
-                oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
+                    option_symbols = []
+                    for x in options_list:
+                        sym = x.get("symbol")
+                        if sym:
+                            option_symbols.append(sym)
 
-                log(
-                    f"{display_symbol_name(symbol)} | "
-                    f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
-                )
+                    quotes_map = fetch_quotes_map(fyers, option_symbols)
+                    expiry_text = datetime.now().strftime("%Y-%m-%d")
+                    rows = normalize_chain(options_list, quotes_map, underlying_ltp, expiry_text)
 
-                if ONLY_STRONG_ALERTS:
-                    eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
-                else:
-                    eligible = oi_signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK")
+                    oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
 
-                if eligible and should_send_alert(symbol, oi_signal):
-                    log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+                    if price_signal != "NO_SETUP" or oi_signal != "NO_SETUP":
+                        log(
+                            f"{display_symbol_name(symbol)} | "
+                            f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
+                        )
 
-            except Exception as e:
-                log(f"{display_symbol_name(symbol)} | ERROR: {e}")
+                    if ONLY_STRONG_ALERTS:
+                        eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
+                    else:
+                        eligible = oi_signal in (
+                            "BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK"
+                        )
+
+                    if eligible and should_send_alert(symbol, oi_signal):
+                        log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+
+                except Exception as e:
+                    log(f"{display_symbol_name(symbol)} | ERROR: {e}")
+
+            if batch_no < len(batches):
+                time.sleep(BATCH_PAUSE_SECONDS)
 
         time.sleep(max(5, POLL_SECONDS))
 
