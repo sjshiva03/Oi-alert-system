@@ -29,6 +29,7 @@ RISK_FREE_RATE = 0.06
 # =========================
 def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
+    log(f"DEBUG WATCHLIST RAW = {repr(raw)}")
 
     if not raw:
         raw = "NSE:NIFTY50-INDEX,NSE:NIFTYBANK-INDEX"
@@ -39,8 +40,9 @@ def get_watchlist():
         s = part.strip()
         if s:
             items.append(s)
-
-    return list(dict.fromkeys(items))
+    final_list=list(dict.fromkeys(items))
+    log(f"DEBUG WATCHLIST PARSED = {final_list}")
+    return final_list
 
 
 WATCHLIST = get_watchlist()
@@ -579,7 +581,7 @@ def run_health_server():
 # MAIN LOOP
 # =========================
 def run_worker():
-    symbols = WATCHLIST
+    symbols = get_watchlist()
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
 
