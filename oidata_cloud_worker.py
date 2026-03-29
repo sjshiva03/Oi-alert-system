@@ -74,16 +74,16 @@ def read_text_file(path: str) -> str:
 
 def get_access_token() -> str:
     env_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-    if env_token:
-        return env_token
-    return read_text_file(ACCESS_TOKEN_FILE)
+    if not env_token:
+        raise Exception("Missing FYERS_ACCESS_TOKEN in Railway variables")
+    return env_token
 
 
 def get_client_id() -> str:
     env_client = os.getenv("FYERS_CLIENT_ID", "").strip()
-    if env_client:
-        return env_client
-    return read_text_file(CLIENT_ID_FILE)
+    if  not env_client:
+        raise Exception("Missing FYERS_CLIENT_ID in Railway variables")
+    return env_client
 
 
 def create_fyers():
