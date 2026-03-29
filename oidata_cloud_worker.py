@@ -554,14 +554,17 @@ def send_whatsapp_alert(message):
 
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
         msg = client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
             to=TWILIO_WHATSAPP_TO,
             body=message
         )
-        log(f"WhatsApp sent: {msg.sid}")
+
+        log(f"WhatsApp sent SUCCESS: {msg.sid}")
+
     except Exception as e:
-        log(f"WhatsApp error: {e}")
+        log(f"WhatsApp ERROR FULL: {repr(e)}")
 
 
 # =========================
