@@ -656,20 +656,21 @@ def run_worker():
 
                 if eligible and should_send_alert(symbol, oi_signal):
 
-                    alert_msg = (
-                        f"{display_symbol_name(symbol)}\n"
-                        f"LTP: {ltp:.2f}\n"
-                        f"15M: {price_signal}\n"
-                        f"OI: {oi_signal}\n"
-                        f"Time: {datetime.now().strftime('%H:%M:%S')}"
-                )
+                   try: 
+                        alert_msg = (
+                            f"{display_symbol_name(symbol)}\n"
+                            f"LTP: {ltp:.2f}\n"
+                            f"15M: {price_signal}\n"
+                            f"OI: {oi_signal}\n"
+                            f"Time: {datetime.now().strftime('%H:%M:%S')}"
+                    )
 
-                log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+                    log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
             
-                send_whatsapp_alert(alert_msg)
+                    send_whatsapp_alert(alert_msg)
 
-            except Exception as e:
-                log(f"{display_symbol_name(symbol)} | ERROR: {e}")
+                except Exception as e:
+                    log(f"{display_symbol_name(symbol)} | ERROR: {e}")
 
         time.sleep(max(5, POLL_SECONDS))
 
