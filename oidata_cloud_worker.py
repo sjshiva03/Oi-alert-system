@@ -6,6 +6,7 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from fyers_apiv3 import fyersModel
+from twilio.rest import Client
 
 
 # =========================
@@ -14,14 +15,14 @@ from fyers_apiv3 import fyersModel
 RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 PORT = int(os.getenv("PORT", "8080"))
-
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
-BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2"))
+BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2.5"))
+SEND_STARTUP_TEST_MESSAGE = os.getenv("SEND_STARTUP_TEST_MESSAGE", "true").strip().lower() == "true"
 
 RISK_FREE_RATE = 0.06
 
@@ -71,6 +72,25 @@ def chunk_list(items, chunk_size):
 # =========================
 # WATCHLIST
 # =========================
+def normalize_symbol(sym):
+    s = str(sym).strip().upper()
+    if not s:
+        return ""
+
+    if s.endswith("-INDEX") and ":" in s:
+        return s
+
+    if ":" not in s:
+        s = "NSE:" + s
+
+    if s.startswith("NSE:") or s.startswith("BSE:"):
+        tail = s.split(":", 1)[1]
+        if not tail.endswith("-EQ") and not tail.endswith("-INDEX"):
+            s = s + "-EQ"
+
+    return s
+
+
 def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
 
@@ -78,7 +98,7 @@ def get_watchlist():
         items = []
         normalized = raw.replace("\n", ",").replace(";", ",")
         for part in normalized.split(","):
-            s = part.strip()
+            s = normalize_symbol(part)
             if s:
                 items.append(s)
 
@@ -88,19 +108,13 @@ def get_watchlist():
         return final_list
 
     final_list = [
-        "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:ICICIBANK-EQ", "NSE:HDFCBANK-EQ",
-        "NSE:RELIANCE-EQ", "NSE:SBIN-EQ", "NSE:BHARTIARTL-EQ", "NSE:AXISBANK-EQ",
-        "NSE:BEL-EQ", "NSE:INFY-EQ", "NSE:ETERNAL-EQ", "NSE:TCS-EQ", "NSE:LT-EQ",
-        "NSE:ONGC-EQ", "NSE:SHRIRAMFIN-EQ", "NSE:HINDALCO-EQ", "NSE:INDIGO-EQ",
-        "NSE:KOTAKBANK-EQ", "NSE:M&M-EQ", "NSE:ITC-EQ", "NSE:SUNPHARMA-EQ",
-        "NSE:BAJFINANCE-EQ", "NSE:NTPC-EQ", "NSE:TATASTEEL-EQ", "NSE:MARUTI-EQ",
-        "NSE:POWERGRID-EQ", "NSE:COALINDIA-EQ", "NSE:BAJAJFINSV-EQ", "NSE:GRASIM-EQ",
-        "NSE:ADANIPORTS-EQ", "NSE:BAJAJ-AUTO-EQ", "NSE:HINDUNILVR-EQ", "NSE:ULTRACEMCO-EQ",
-        "NSE:ADANIENT-EQ", "NSE:MAXHEALTH-EQ", "NSE:JIOFIN-EQ", "NSE:EICHERMOT-EQ",
-        "NSE:HCLTECH-EQ", "NSE:TITAN-EQ", "NSE:ASIANPAINT-EQ",
-        "NSE:HDFCLIFE-EQ", "NSE:WIPRO-EQ", "NSE:APOLLOHOSP-EQ", "NSE:SBILIFE-EQ",
-        "NSE:JSWSTEEL-EQ", "NSE:TECHM-EQ", "NSE:TRENT-EQ", "NSE:DRREDDY-EQ",
-        "NSE:NESTLEIND-EQ", "NSE:TATACONSUM-EQ", "NSE:CIPLA-EQ"
+        "NSE:NIFTY50-INDEX",
+        "NSE:NIFTYBANK-INDEX",
+        "NSE:RELIANCE-EQ",
+        "NSE:TCS-EQ",
+        "NSE:HDFCBANK-EQ",
+        "NSE:ICICIBANK-EQ",
+        "NSE:SBIN-EQ",
     ]
 
     log("DEBUG WATCHLIST RAW = ''")
@@ -108,8 +122,41 @@ def get_watchlist():
     return final_list
 
 
+WATCHLIST = get_watchlist()
+
+
 # =========================
-# FYERS CREDENTIALS
+# TWILIO HELPERS
+# =========================
+def send_whatsapp_alert(message):
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    auth = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    wa_from = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+    wa_to = os.getenv("TWILIO_WHATSAPP_TO", "").strip()
+
+    log(
+        f"TWILIO DEBUG -> "
+        f"SID={bool(sid)}, AUTH={bool(auth)}, FROM={bool(wa_from)}, TO={bool(wa_to)}"
+    )
+
+    if not (sid and auth and wa_from and wa_to):
+        log("WhatsApp not configured")
+        return
+
+    try:
+        client = Client(sid, auth)
+        msg = client.messages.create(
+            from_=wa_from,
+            to=wa_to,
+            body=message
+        )
+        log(f"WhatsApp sent SUCCESS: {msg.sid}")
+    except Exception as e:
+        log(f"WhatsApp ERROR FULL: {repr(e)}")
+
+
+# =========================
+# FYERS HELPERS
 # =========================
 def get_fyers_creds():
     raw_token = RAW_ACCESS_TOKEN
@@ -145,8 +192,124 @@ def create_fyers():
     )
 
 
+def fetch_quotes_map(fyers, symbols):
+    if not symbols:
+        return {}
+
+    payload = {"symbols": ",".join(symbols)}
+    try:
+        resp = fyers.quotes(data=payload)
+    except TypeError:
+        resp = fyers.quotes(payload)
+    except Exception:
+        return {}
+
+    out = {}
+    if not isinstance(resp, dict):
+        return out
+
+    items = resp.get("d") or resp.get("data") or []
+    if not isinstance(items, list):
+        return out
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
+        vals = item.get("v") or item.get("values") or item
+
+        out[sym] = {
+            "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
+            "prev_close": safe_float(
+                vals.get("prev_close_price")
+                or vals.get("prev_close")
+                or vals.get("prevClose")
+                or vals.get("close")
+                or vals.get("prevClosePrice"),
+                None
+            ),
+            "chg": safe_float(vals.get("ch") or vals.get("chg") or vals.get("change"), None)
+        }
+
+    return out
+
+
+def fetch_history(fyers, symbol, resolution, date_from, date_to, cont_flag="1"):
+    payload = {
+        "symbol": symbol,
+        "resolution": str(resolution),
+        "date_format": "1",
+        "range_from": date_from,
+        "range_to": date_to,
+        "cont_flag": cont_flag,
+    }
+    try:
+        return fyers.history(data=payload)
+    except TypeError:
+        return fyers.history(payload)
+    except Exception:
+        return {}
+
+
+def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
+    payload = {
+        "symbol": symbol,
+        "strikecount": strikecount,
+        "timestamp": timestamp
+    }
+    try:
+        return fyers.optionchain(data=payload)
+    except TypeError:
+        return fyers.optionchain(payload)
+    except Exception:
+        return {}
+
+
+def extract_options_chain_list(resp):
+    if not isinstance(resp, dict):
+        return []
+
+    data = resp.get("data", {})
+    if isinstance(data, dict):
+        if isinstance(data.get("optionsChain"), list):
+            return data["optionsChain"]
+        if isinstance(data.get("optionschain"), list):
+            return data["optionschain"]
+        if isinstance(data.get("options"), list):
+            return data["options"]
+
+    return []
+
+
+def extract_underlying_ltp(resp):
+    if not isinstance(resp, dict):
+        return 0.0
+
+    data = resp.get("data", {})
+    if not isinstance(data, dict):
+        return 0.0
+
+    for key in ["ltp", "underlying_ltp", "underlyingLtp", "underlying_price", "underlyingPrice"]:
+        if key in data:
+            return safe_float(data.get(key), 0.0)
+
+    return 0.0
+
+
+def get_ltp_fallback(fyers, symbol):
+    today = get_today_str()
+    resp = fetch_history(fyers, symbol, "1", today, today)
+    candles = resp.get("candles") or resp.get("data", {}).get("candles") or []
+    if candles:
+        last = candles[-1]
+        if isinstance(last, list) and len(last) >= 5:
+            return safe_float(last[4], 0.0)
+    return 0.0
+
+
 # =========================
-# OPTION PRICING HELPERS
+# OPTION IV / CHAIN HELPERS
 # =========================
 def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
@@ -218,139 +381,6 @@ def compute_option_iv(option_type, strike, ltp, underlying_ltp, expiry_text, rat
     if t <= 0:
         return 0.0
     return implied_volatility(ltp, underlying_ltp, strike, t, rate, option_type)
-
-
-# =========================
-# FYERS DATA HELPERS
-# =========================
-def fetch_quotes_map(fyers, symbols):
-    if not symbols:
-        return {}
-
-    payload = {"symbols": ",".join(symbols)}
-    try:
-        resp = fyers.quotes(data=payload)
-    except TypeError:
-        resp = fyers.quotes(payload)
-
-    out = {}
-    if not isinstance(resp, dict):
-        return out
-
-    items = resp.get("d") or resp.get("data") or []
-    if not isinstance(items, list):
-        return out
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
-        vals = item.get("v") or item.get("values") or item
-
-        out[sym] = {
-            "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
-            "prev_close": safe_float(
-                vals.get("prev_close_price")
-                or vals.get("prev_close")
-                or vals.get("prevClose")
-                or vals.get("close")
-                or vals.get("prevClosePrice"),
-                None
-            ),
-            "chg": safe_float(vals.get("ch") or vals.get("chg") or vals.get("change"), None)
-        }
-
-    return out
-
-
-def fetch_single_ltp(fyers, symbol):
-    q = fetch_quotes_map(fyers, [symbol])
-    if symbol in q:
-        return safe_float(q[symbol].get("ltp"), 0.0)
-    for _, vals in q.items():
-        return safe_float(vals.get("ltp"), 0.0)
-    return 0.0
-
-
-def fetch_history(fyers, symbol, resolution, date_from, date_to, cont_flag="1"):
-    payload = {
-        "symbol": symbol,
-        "resolution": str(resolution),
-        "date_format": "1",
-        "range_from": date_from,
-        "range_to": date_to,
-        "cont_flag": cont_flag,
-    }
-    try:
-        return fyers.history(data=payload)
-    except TypeError:
-        return fyers.history(payload)
-
-
-def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
-    payload = {
-        "symbol": symbol,
-        "strikecount": strikecount,
-        "timestamp": timestamp
-    }
-    try:
-        return fyers.optionchain(data=payload)
-    except TypeError:
-        return fyers.optionchain(payload)
-
-
-def extract_options_chain_list(resp):
-    if not isinstance(resp, dict):
-        return []
-
-    data = resp.get("data", {})
-    if isinstance(data, dict):
-        if isinstance(data.get("optionsChain"), list):
-            return data["optionsChain"]
-        if isinstance(data.get("optionschain"), list):
-            return data["optionschain"]
-        if isinstance(data.get("options"), list):
-            return data["options"]
-
-    return []
-
-
-def extract_underlying_ltp(resp):
-    if not isinstance(resp, dict):
-        return 0.0
-
-    data = resp.get("data", {})
-    if not isinstance(data, dict):
-        return 0.0
-
-    for key in ["ltp", "underlying_ltp", "underlyingLtp", "underlying_price", "underlyingPrice"]:
-        if key in data:
-            return safe_float(data.get(key), 0.0)
-
-    return 0.0
-
-
-def parse_candles(resp):
-    if not isinstance(resp, dict):
-        return []
-
-    data = resp.get("candles") or resp.get("data", {}).get("candles") or []
-    out = []
-    for row in data:
-        if not isinstance(row, list) or len(row) < 6:
-            continue
-        ts, o, h, l, c, v = row[:6]
-        dt = datetime.fromtimestamp(ts)
-        out.append({
-            "dt": dt,
-            "Open": safe_float(o),
-            "High": safe_float(h),
-            "Low": safe_float(l),
-            "Close": safe_float(c),
-            "Volume": safe_float(v),
-        })
-    return out
 
 
 def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_text=""):
@@ -432,7 +462,6 @@ def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_te
             "call_oi": c.get("oi", 0.0),
             "call_oich": c.get("oi_change", 0.0),
             "call_volume": c.get("volume", 0.0),
-
             "put_ltp": p.get("ltp", 0.0),
             "put_chg": p.get("chg", 0.0),
             "put_iv": p.get("iv", 0.0),
@@ -445,8 +474,30 @@ def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_te
 
 
 # =========================
-# STRATEGY
+# STRATEGY HELPERS
 # =========================
+def parse_candles(resp):
+    if not isinstance(resp, dict):
+        return []
+
+    data = resp.get("candles") or resp.get("data", {}).get("candles") or []
+    out = []
+    for row in data:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        ts, o, h, l, c, v = row[:6]
+        dt = datetime.fromtimestamp(ts)
+        out.append({
+            "dt": dt,
+            "Open": safe_float(o),
+            "High": safe_float(h),
+            "Low": safe_float(l),
+            "Close": safe_float(c),
+            "Volume": safe_float(v),
+        })
+    return out
+
+
 def fetch_intraday_setup_only(fyers, symbol):
     today = get_today_str()
     resp = fetch_history(fyers, symbol, "15", today, today)
@@ -534,7 +585,6 @@ def classify_oi_confirm(price_signal, rows, underlying_ltp):
             score += 1
         if atm_put_oich <= 0:
             score += 1
-
         if score >= 3:
             return "SELL STRONG"
         if score <= 0:
@@ -549,7 +599,6 @@ def classify_oi_confirm(price_signal, rows, underlying_ltp):
             score += 1
         if atm_call_oich <= 0:
             score += 1
-
         if score >= 3:
             return "BUY STRONG"
         if score <= 0:
@@ -560,20 +609,63 @@ def classify_oi_confirm(price_signal, rows, underlying_ltp):
 
 
 # =========================
-# ALERT MEMORY
+# ALERT HELPERS
 # =========================
-last_alert_times = {}
+signal_memory = {}
 
 
-def should_send_alert(symbol, signal):
-    key = f"{symbol}|{signal}"
+def get_signal_key(symbol, price_signal, oi_signal):
+    return f"{symbol}|{price_signal}|{oi_signal}"
+
+
+def should_send_smart_alert(symbol, price_signal, oi_signal, cooldown_seconds=900):
+    if oi_signal == "NO_SETUP" or price_signal == "NO_SETUP":
+        return False
+
+    key = get_signal_key(symbol, price_signal, oi_signal)
     now_ts = time.time()
-    last_ts = last_alert_times.get(key, 0)
+    last_ts = signal_memory.get(key, 0)
 
-    if now_ts - last_ts >= ALERT_COOLDOWN_SECONDS:
-        last_alert_times[key] = now_ts
+    if now_ts - last_ts >= cooldown_seconds:
+        signal_memory[key] = now_ts
         return True
     return False
+
+
+def get_trade_levels(price_signal, ltp):
+    ltp = safe_float(ltp, 0.0)
+    if ltp <= 0:
+        return None, None
+
+    if price_signal == "BUY":
+        sl = round(ltp * 0.995, 2)
+        target = round(ltp * 1.01, 2)
+        return sl, target
+
+    if price_signal == "SELL":
+        sl = round(ltp * 1.005, 2)
+        target = round(ltp * 0.99, 2)
+        return sl, target
+
+    return None, None
+
+
+def build_smart_alert_message(symbol, ltp, price_signal, oi_signal):
+    sl, target = get_trade_levels(price_signal, ltp)
+    emoji = "📈" if price_signal == "BUY" else "📉"
+    strength = "🔥 STRONG" if "STRONG" in oi_signal else "⚠️ NORMAL"
+
+    return (
+        f"🚨 SMART ALERT 🚨\n\n"
+        f"Symbol: {display_symbol_name(symbol)}\n"
+        f"{emoji} Price Signal: {price_signal}\n"
+        f"📊 OI Signal: {oi_signal}\n"
+        f"💰 LTP: {ltp:.2f}\n"
+        f"🛑 SL: {sl if sl is not None else '-'}\n"
+        f"🎯 Target: {target if target is not None else '-'}\n"
+        f"{strength}\n"
+        f"🕒 Time: {datetime.now().strftime('%H:%M:%S')}"
+    )
 
 
 # =========================
@@ -605,7 +697,10 @@ def run_health_server():
 # MAIN LOOP
 # =========================
 def run_worker():
-    symbols = get_watchlist()
+    if SEND_STARTUP_TEST_MESSAGE:
+        send_whatsapp_alert("🚀 Test message working")
+
+    symbols = WATCHLIST
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
     log(f"Batch mode: size={BATCH_SIZE}, pause={BATCH_PAUSE_SECONDS}s")
@@ -623,9 +718,21 @@ def run_worker():
         for batch_no, batch_symbols in enumerate(batches, start=1):
             log(f"Processing batch {batch_no}/{len(batches)}: {[display_symbol_name(s) for s in batch_symbols]}")
 
+            batch_quotes = fetch_quotes_map(fyers, batch_symbols)
+
             for symbol in batch_symbols:
                 try:
-                    ltp = fetch_single_ltp(fyers, symbol)
+                    q = batch_quotes.get(symbol, {})
+                    ltp = safe_float(q.get("ltp"), 0.0)
+
+                    if ltp <= 0:
+                        retry_quotes = fetch_quotes_map(fyers, [symbol])
+                        q = retry_quotes.get(symbol, {})
+                        ltp = safe_float(q.get("ltp"), 0.0)
+
+                    if ltp <= 0:
+                        ltp = get_ltp_fallback(fyers, symbol)
+
                     if ltp <= 0:
                         log(f"{display_symbol_name(symbol)} | LTP not available")
                         continue
@@ -645,9 +752,9 @@ def run_worker():
                         if sym:
                             option_symbols.append(sym)
 
-                    quotes_map = fetch_quotes_map(fyers, option_symbols)
+                    option_quotes_map = fetch_quotes_map(fyers, option_symbols)
                     expiry_text = datetime.now().strftime("%Y-%m-%d")
-                    rows = normalize_chain(options_list, quotes_map, underlying_ltp, expiry_text)
+                    rows = normalize_chain(options_list, option_quotes_map, underlying_ltp, expiry_text)
 
                     oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
 
@@ -657,6 +764,9 @@ def run_worker():
                             f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
                         )
 
+                    if oi_signal == "NO_SETUP" or price_signal == "NO_SETUP":
+                        continue
+
                     if ONLY_STRONG_ALERTS:
                         eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
                     else:
@@ -664,8 +774,20 @@ def run_worker():
                             "BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK"
                         )
 
-                    if eligible and should_send_alert(symbol, oi_signal):
-                        log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+                    if eligible and should_send_smart_alert(
+                        symbol,
+                        price_signal,
+                        oi_signal,
+                        ALERT_COOLDOWN_SECONDS
+                    ):
+                        alert_msg = build_smart_alert_message(
+                            symbol,
+                            ltp,
+                            price_signal,
+                            oi_signal
+                        )
+                        log(f"SMART ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+                        send_whatsapp_alert(alert_msg)
 
                 except Exception as e:
                     log(f"{display_symbol_name(symbol)} | ERROR: {e}")
