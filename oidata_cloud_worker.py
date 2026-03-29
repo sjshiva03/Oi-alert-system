@@ -15,11 +15,6 @@ from twilio.rest import Client
 RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
-TWILIO_WHATSAPP_TO = os.getenv("TWILIO_WHATSAPP_TO", "").strip()
-
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
@@ -548,28 +543,30 @@ def should_send_alert(symbol, signal):
 
 
 def send_whatsapp_alert(message):
-    log(
-        f"TWILIO DEBUG -> "
-        f"SID={bool(TWILIO_ACCOUNT_SID)}, "
-        f"AUTH={bool(TWILIO_AUTH_TOKEN)}, "
-        f"FROM={bool(TWILIO_WHATSAPP_FROM)}, "
-        f"TO={bool(TWILIO_WHATSAPP_TO)}"
-    )
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    auth = os.getenv("TWILIO_AUTH_TOKEN", "")
+    wa_from = os.getenv("TWILIO_WHATSAPP_FROM", "")
+    wa_to = os.getenv("TWILIO_WHATSAPP_TO", "")
 
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TWILIO_WHATSAPP_TO):
-        log("WhatsApp not configured")
+    log(f"TWILIO DEBUG -> SID={bool(sid)}, AUTH={bool(auth)}, FROM={bool(wa_from)}, TO={bool(wa_to)}")
+
+    if not (sid and auth and wa_from and wa_to):
+        log("❌ WhatsApp not configured")
         return
 
     try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client = Client(sid, auth)
+
         msg = client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            to=TWILIO_WHATSAPP_TO,
+            from_=wa_from,
+            to=wa_to,
             body=message
         )
-        log(f"WhatsApp sent SUCCESS: {msg.sid}")
+
+        log(f"✅ WhatsApp sent: {msg.sid}")
+
     except Exception as e:
-        log(f"WhatsApp ERROR FULL: {repr(e)}")
+        log(f"❌ WhatsApp ERROR: {str(e)}")
 
 
 # =========================
