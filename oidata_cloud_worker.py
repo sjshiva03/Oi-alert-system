@@ -1,13 +1,12 @@
-
 import os
 import math
 import time
 import threading
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from twilio.rest import Client
 
 from fyers_apiv3 import fyersModel
+from twilio.rest import Client
 
 
 # =========================
@@ -15,10 +14,11 @@ from fyers_apiv3 import fyersModel
 # =========================
 RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-TWILIO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID","").strip()
-TWILIO_AUTH_TOKEN =os.getenv("TWILIO_AUTH_TOKEN","").strip()
-TWILIO_WHATSAPP_FROM=os.getenv("TWILIO_WHATSAPP_FROM","").strip()
-TWILIO_WHATSAPP_TO=os.getenv("TWI:IO_WHATSAPP_TO","").strip()
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+TWILIO_WHATSAPP_TO = os.getenv("TWILIO_WHATSAPP_TO", "").strip()
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
@@ -36,7 +36,7 @@ def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
 
     if not raw:
-        raw = "NSE:NIFTY50-INDEX,NSE:NIFTYBANK-INDEX,NSE:ICICIBANK-EQ,NSE:HDFCBANK-EQ,NSE:RELIANCE-EQ,NSE:SBIN-EQ"
+        raw = "NSE:NIFTY50-INDEX,NSE:NIFTYBANK-INDEX"
 
     items = []
     normalized = raw.replace("\n", ",").replace(";", ",")
@@ -55,11 +55,6 @@ WATCHLIST = get_watchlist()
 # ENV HELPERS
 # =========================
 def get_fyers_creds():
-    """
-    Supports both:
-    1) FYERS_CLIENT_ID=APPID-100 and FYERS_ACCESS_TOKEN=JWT
-    2) FYERS_ACCESS_TOKEN=APPID-100:JWT  (auto-split)
-    """
     raw_token = RAW_ACCESS_TOKEN
     raw_client = RAW_CLIENT_ID
 
@@ -106,11 +101,6 @@ def display_symbol_name(symbol):
     if symbol.endswith("-EQ"):
         return symbol.split(":")[-1].replace("-EQ", "")
     return symbol.split(":")[-1]
-
-
-def is_market_open():
-    now = datetime.now().time()
-    return dtime(9, 15) <= now <= dtime(15, 30)
 
 
 def norm_cdf(x):
@@ -207,6 +197,8 @@ def fetch_quotes_map(fyers, symbols):
         resp = fyers.quotes(data=payload)
     except TypeError:
         resp = fyers.quotes(payload)
+    except Exception:
+        return {}
 
     out = {}
     if not isinstance(resp, dict):
@@ -555,6 +547,23 @@ def should_send_alert(symbol, signal):
     return False
 
 
+def send_whatsapp_alert(message):
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TWILIO_WHATSAPP_TO):
+        log("WhatsApp not configured")
+        return
+
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        msg = client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=TWILIO_WHATSAPP_TO,
+            body=message
+        )
+        log(f"WhatsApp sent: {msg.sid}")
+    except Exception as e:
+        log(f"WhatsApp error: {e}")
+
+
 # =========================
 # HEALTH SERVER
 # =========================
@@ -579,31 +588,11 @@ def run_health_server():
     log(f"Health server running on port {PORT}")
     server.serve_forever()
 
-def send_whatsapp_alert(message):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TWILIO_WHATSAPP_TO):
-        log("WhatsApp not configured")
-        return
-
-    try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-        msg = client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            to=TWILIO_WHATSAPP_TO,
-            body=message
-        )
-
-        log(f"WhatsApp sent: {msg.sid}")
-
-    except Exception as e:
-        log(f"WhatsApp error: {e}")
-
 
 # =========================
 # MAIN LOOP
 # =========================
 def run_worker():
-    send_whatsapp_alert("Test message working 🚀")
     symbols = WATCHLIST
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
@@ -649,28 +638,29 @@ def run_worker():
                     f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
                 )
 
+                if oi_signal == "NO_SETUP":
+                    continue
+
                 if ONLY_STRONG_ALERTS:
                     eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
                 else:
                     eligible = oi_signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK")
 
                 if eligible and should_send_alert(symbol, oi_signal):
-
-                   try: 
-                        alert_msg = (
-                            f"{display_symbol_name(symbol)}\n"
-                            f"LTP: {ltp:.2f}\n"
-                            f"15M: {price_signal}\n"
-                            f"OI: {oi_signal}\n"
-                            f"Time: {datetime.now().strftime('%H:%M:%S')}"
+                    alert_msg = (
+                        f"🚨 OI + PRICE ALERT 🚨\n\n"
+                        f"Symbol: {display_symbol_name(symbol)}\n"
+                        f"LTP: {ltp:.2f}\n"
+                        f"15M Signal: {price_signal}\n"
+                        f"OI Signal: {oi_signal}\n"
+                        f"Time: {datetime.now().strftime('%H:%M:%S')}"
                     )
 
                     log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
-            
                     send_whatsapp_alert(alert_msg)
 
-                except Exception as e:
-                    log(f"{display_symbol_name(symbol)} | ERROR: {e}")
+            except Exception as e:
+                log(f"{display_symbol_name(symbol)} | ERROR: {e}")
 
         time.sleep(max(5, POLL_SECONDS))
 
