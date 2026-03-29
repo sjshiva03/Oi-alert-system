@@ -1,9 +1,8 @@
-
 import os
 import math
 import time
 import threading
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from fyers_apiv3 import fyersModel
@@ -25,7 +24,47 @@ RISK_FREE_RATE = 0.06
 
 
 # =========================
-# WATCHLIST CONFIG
+# LOG HELPERS
+# =========================
+def log(msg):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] [OIDATA-CLOUD] {msg}", flush=True)
+
+
+# =========================
+# GENERAL HELPERS
+# =========================
+def safe_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def display_symbol_name(symbol):
+    s = str(symbol).upper()
+    if "NIFTYBANK" in s:
+        return "BANKNIFTY"
+    if "NIFTY50" in s or s.endswith("NIFTY-INDEX"):
+        return "NIFTY"
+    if symbol.endswith("-EQ"):
+        return symbol.split(":")[-1].replace("-EQ", "")
+    return symbol.split(":")[-1]
+
+
+def is_market_open():
+    now = datetime.now().time()
+    return dtime(9, 15) <= now <= dtime(15, 30)
+
+
+def get_today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+# =========================
+# WATCHLIST
 # =========================
 def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
@@ -40,22 +79,20 @@ def get_watchlist():
         s = part.strip()
         if s:
             items.append(s)
-    final_list=list(dict.fromkeys(items))
+
+    final_list = list(dict.fromkeys(items))
     log(f"DEBUG WATCHLIST PARSED = {final_list}")
     return final_list
 
 
-WATCHLIST = get_watchlist()
-
-
 # =========================
-# ENV HELPERS
+# FYERS CREDENTIALS
 # =========================
 def get_fyers_creds():
     """
     Supports both:
     1) FYERS_CLIENT_ID=APPID-100 and FYERS_ACCESS_TOKEN=JWT
-    2) FYERS_ACCESS_TOKEN=APPID-100:JWT  (auto-split)
+    2) FYERS_ACCESS_TOKEN=APPID-100:JWT
     """
     raw_token = RAW_ACCESS_TOKEN
     raw_client = RAW_CLIENT_ID
@@ -80,36 +117,19 @@ def get_fyers_creds():
     )
 
 
-def log(msg):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] [OIDATA-CLOUD] {msg}", flush=True)
+def create_fyers():
+    client_id, access_token = get_fyers_creds()
+    return fyersModel.FyersModel(
+        client_id=client_id,
+        token=access_token,
+        is_async=False,
+        log_path=""
+    )
 
 
-def safe_float(x, default=0.0):
-    try:
-        if x is None or x == "":
-            return default
-        return float(x)
-    except Exception:
-        return default
-
-
-def display_symbol_name(symbol):
-    s = symbol.upper()
-    if "NIFTYBANK" in s:
-        return "BANKNIFTY"
-    if "NIFTY50" in s or s.endswith("NIFTY-INDEX"):
-        return "NIFTY"
-    if symbol.endswith("-EQ"):
-        return symbol.split(":")[-1].replace("-EQ", "")
-    return symbol.split(":")[-1]
-
-
-def is_market_open():
-    now = datetime.now().time()
-    return dtime(9, 15) <= now <= dtime(15, 30)
-
-
+# =========================
+# OPTION PRICING HELPERS
+# =========================
 def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
@@ -183,18 +203,8 @@ def compute_option_iv(option_type, strike, ltp, underlying_ltp, expiry_text, rat
 
 
 # =========================
-# FYERS HELPERS
+# FYERS DATA HELPERS
 # =========================
-def create_fyers():
-    client_id, access_token = get_fyers_creds()
-    return fyersModel.FyersModel(
-        client_id=client_id,
-        token=access_token,
-        is_async=False,
-        log_path=""
-    )
-
-
 def fetch_quotes_map(fyers, symbols):
     if not symbols:
         return {}
@@ -303,6 +313,28 @@ def extract_underlying_ltp(resp):
     return 0.0
 
 
+def parse_candles(resp):
+    if not isinstance(resp, dict):
+        return []
+
+    data = resp.get("candles") or resp.get("data", {}).get("candles") or []
+    out = []
+    for row in data:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        ts, o, h, l, c, v = row[:6]
+        dt = datetime.fromtimestamp(ts)
+        out.append({
+            "dt": dt,
+            "Open": safe_float(o),
+            "High": safe_float(h),
+            "Low": safe_float(l),
+            "Close": safe_float(c),
+            "Volume": safe_float(v),
+        })
+    return out
+
+
 def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_text=""):
     if quotes_map is None:
         quotes_map = {}
@@ -397,32 +429,6 @@ def normalize_chain(options_list, quotes_map=None, underlying_ltp=0.0, expiry_te
 # =========================
 # STRATEGY
 # =========================
-def get_today_str():
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def parse_candles(resp):
-    if not isinstance(resp, dict):
-        return []
-
-    data = resp.get("candles") or resp.get("data", {}).get("candles") or []
-    out = []
-    for row in data:
-        if not isinstance(row, list) or len(row) < 6:
-            continue
-        ts, o, h, l, c, v = row[:6]
-        dt = datetime.fromtimestamp(ts)
-        out.append({
-            "dt": dt,
-            "Open": safe_float(o),
-            "High": safe_float(h),
-            "Low": safe_float(l),
-            "Close": safe_float(c),
-            "Volume": safe_float(v),
-        })
-    return out
-
-
 def fetch_intraday_setup_only(fyers, symbol):
     today = get_today_str()
     resp = fetch_history(fyers, symbol, "15", today, today)
