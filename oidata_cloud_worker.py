@@ -15,10 +15,13 @@ RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
-STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
+STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 PORT = int(os.getenv("PORT", "8080"))
+
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
+BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2"))
 
 RISK_FREE_RATE = 0.06
 
@@ -54,13 +57,15 @@ def display_symbol_name(symbol):
     return symbol.split(":")[-1]
 
 
-def is_market_open():
-    now = datetime.now().time()
-    return dtime(9, 15) <= now <= dtime(15, 30)
-
-
 def get_today_str():
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def chunk_list(items, chunk_size):
+    if chunk_size <= 0:
+        chunk_size = 1
+    for i in range(0, len(items), chunk_size):
+        yield items[i:i + chunk_size]
 
 
 # =========================
@@ -82,7 +87,6 @@ def get_watchlist():
         log(f"DEBUG WATCHLIST PARSED = {final_list}")
         return final_list
 
-    # fallback default list if Railway variable is empty
     final_list = [
         "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:ICICIBANK-EQ", "NSE:HDFCBANK-EQ",
         "NSE:RELIANCE-EQ", "NSE:SBIN-EQ", "NSE:BHARTIARTL-EQ", "NSE:AXISBANK-EQ",
@@ -93,7 +97,7 @@ def get_watchlist():
         "NSE:POWERGRID-EQ", "NSE:COALINDIA-EQ", "NSE:BAJAJFINSV-EQ", "NSE:GRASIM-EQ",
         "NSE:ADANIPORTS-EQ", "NSE:BAJAJ-AUTO-EQ", "NSE:HINDUNILVR-EQ", "NSE:ULTRACEMCO-EQ",
         "NSE:ADANIENT-EQ", "NSE:MAXHEALTH-EQ", "NSE:JIOFIN-EQ", "NSE:EICHERMOT-EQ",
-        "NSE:HCLTECH-EQ", "NSE:TITAN-EQ", "NSE:IMPVQ-EQ", "NSE:ASIANPAINT-EQ",
+        "NSE:HCLTECH-EQ", "NSE:TITAN-EQ", "NSE:ASIANPAINT-EQ",
         "NSE:HDFCLIFE-EQ", "NSE:WIPRO-EQ", "NSE:APOLLOHOSP-EQ", "NSE:SBILIFE-EQ",
         "NSE:JSWSTEEL-EQ", "NSE:TECHM-EQ", "NSE:TRENT-EQ", "NSE:DRREDDY-EQ",
         "NSE:NESTLEIND-EQ", "NSE:TATACONSUM-EQ", "NSE:CIPLA-EQ"
@@ -108,11 +112,6 @@ def get_watchlist():
 # FYERS CREDENTIALS
 # =========================
 def get_fyers_creds():
-    """
-    Supports both:
-    1) FYERS_CLIENT_ID=APPID-100 and FYERS_ACCESS_TOKEN=JWT
-    2) FYERS_ACCESS_TOKEN=APPID-100:JWT
-    """
     raw_token = RAW_ACCESS_TOKEN
     raw_client = RAW_CLIENT_ID
 
@@ -609,6 +608,7 @@ def run_worker():
     symbols = get_watchlist()
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
+    log(f"Batch mode: size={BATCH_SIZE}, pause={BATCH_PAUSE_SECONDS}s")
 
     while True:
         try:
@@ -618,49 +618,60 @@ def run_worker():
             time.sleep(10)
             continue
 
-        for symbol in symbols:
-            try:
-                ltp = fetch_single_ltp(fyers, symbol)
-                if ltp <= 0:
-                    log(f"{display_symbol_name(symbol)} | LTP not available")
-                    continue
+        batches = list(chunk_list(symbols, BATCH_SIZE))
 
-                setup = fetch_intraday_setup_only(fyers, symbol)
-                price_signal = classify_price_breakout(ltp, setup)
+        for batch_no, batch_symbols in enumerate(batches, start=1):
+            log(f"Processing batch {batch_no}/{len(batches)}: {[display_symbol_name(s) for s in batch_symbols]}")
 
-                chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
-                options_list = extract_options_chain_list(chain_resp)
-                underlying_ltp = extract_underlying_ltp(chain_resp)
-                if not underlying_ltp:
-                    underlying_ltp = ltp
+            for symbol in batch_symbols:
+                try:
+                    ltp = fetch_single_ltp(fyers, symbol)
+                    if ltp <= 0:
+                        log(f"{display_symbol_name(symbol)} | LTP not available")
+                        continue
 
-                option_symbols = []
-                for x in options_list:
-                    sym = x.get("symbol")
-                    if sym:
-                        option_symbols.append(sym)
+                    setup = fetch_intraday_setup_only(fyers, symbol)
+                    price_signal = classify_price_breakout(ltp, setup)
 
-                quotes_map = fetch_quotes_map(fyers, option_symbols)
-                expiry_text = datetime.now().strftime("%Y-%m-%d")
-                rows = normalize_chain(options_list, quotes_map, underlying_ltp, expiry_text)
+                    chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
+                    options_list = extract_options_chain_list(chain_resp)
+                    underlying_ltp = extract_underlying_ltp(chain_resp)
+                    if not underlying_ltp:
+                        underlying_ltp = ltp
 
-                oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
+                    option_symbols = []
+                    for x in options_list:
+                        sym = x.get("symbol")
+                        if sym:
+                            option_symbols.append(sym)
 
-                log(
-                    f"{display_symbol_name(symbol)} | "
-                    f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
-                )
+                    quotes_map = fetch_quotes_map(fyers, option_symbols)
+                    expiry_text = datetime.now().strftime("%Y-%m-%d")
+                    rows = normalize_chain(options_list, quotes_map, underlying_ltp, expiry_text)
 
-                if ONLY_STRONG_ALERTS:
-                    eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
-                else:
-                    eligible = oi_signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK")
+                    oi_signal = classify_oi_confirm(price_signal, rows, underlying_ltp)
 
-                if eligible and should_send_alert(symbol, oi_signal):
-                    log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+                    if price_signal != "NO_SETUP" or oi_signal != "NO_SETUP":
+                        log(
+                            f"{display_symbol_name(symbol)} | "
+                            f"LTP={ltp:.2f} | 15M={price_signal} | OI={oi_signal}"
+                        )
 
-            except Exception as e:
-                log(f"{display_symbol_name(symbol)} | ERROR: {e}")
+                    if ONLY_STRONG_ALERTS:
+                        eligible = oi_signal in ("BUY STRONG", "SELL STRONG")
+                    else:
+                        eligible = oi_signal in (
+                            "BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK"
+                        )
+
+                    if eligible and should_send_alert(symbol, oi_signal):
+                        log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+
+                except Exception as e:
+                    log(f"{display_symbol_name(symbol)} | ERROR: {e}")
+
+            if batch_no < len(batches):
+                time.sleep(BATCH_PAUSE_SECONDS)
 
         time.sleep(max(5, POLL_SECONDS))
 
