@@ -593,6 +593,7 @@ def run_health_server():
 # MAIN LOOP
 # =========================
 def run_worker():
+    sen_whatsapp_alert("Test Message working")
     symbols = WATCHLIST
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
