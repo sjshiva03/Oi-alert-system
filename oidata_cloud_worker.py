@@ -548,21 +548,26 @@ def should_send_alert(symbol, signal):
 
 
 def send_whatsapp_alert(message):
+    log(
+        f"TWILIO DEBUG -> "
+        f"SID={bool(TWILIO_ACCOUNT_SID)}, "
+        f"AUTH={bool(TWILIO_AUTH_TOKEN)}, "
+        f"FROM={bool(TWILIO_WHATSAPP_FROM)}, "
+        f"TO={bool(TWILIO_WHATSAPP_TO)}"
+    )
+
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TWILIO_WHATSAPP_TO):
         log("WhatsApp not configured")
         return
 
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
         msg = client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
             to=TWILIO_WHATSAPP_TO,
             body=message
         )
-
         log(f"WhatsApp sent SUCCESS: {msg.sid}")
-
     except Exception as e:
         log(f"WhatsApp ERROR FULL: {repr(e)}")
 
