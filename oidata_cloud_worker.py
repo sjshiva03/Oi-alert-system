@@ -5,6 +5,7 @@ import time
 import threading
 from datetime import datetime, timedelta, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from twilio.rest import Client
 
 from fyers_apiv3 import fyersModel
 
@@ -14,6 +15,10 @@ from fyers_apiv3 import fyersModel
 # =========================
 RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
+TWILUO_ACCOUNT_SSID=os.getenv("TWILIO_ACCOUNT_SID","").strip()
+TWILIO_AUTH_TOKEN =os.getenv("TWILIO_AUTH_TOKEN","").strip()
+TWILIO_WHATSAPP_FROM=os.getenv("TWILIO_WHATSAPP_FROM","").strip()
+TWILIO_WHATSAPP_TO=os.getenv("TWI:IO_WHATSAPP_TO","").strip()
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
@@ -574,11 +579,31 @@ def run_health_server():
     log(f"Health server running on port {PORT}")
     server.serve_forever()
 
+def send_whatsapp_alert(message):
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TWILIO_WHATSAPP_TO):
+        log("WhatsApp not configured")
+        return
+
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+        msg = client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=TWILIO_WHATSAPP_TO,
+            body=message
+        )
+
+        log(f"WhatsApp sent: {msg.sid}")
+
+    except Exception as e:
+        log(f"WhatsApp error: {e}")
+
 
 # =========================
 # MAIN LOOP
 # =========================
 def run_worker():
+    send_whatsapp_alert("Test message working 🚀")
     symbols = WATCHLIST
     pretty = ", ".join(display_symbol_name(s) for s in symbols)
     log(f"Watching {len(symbols)} symbol(s): {pretty}")
@@ -630,7 +655,18 @@ def run_worker():
                     eligible = oi_signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL", "BUY WEAK", "SELL WEAK")
 
                 if eligible and should_send_alert(symbol, oi_signal):
-                    log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+
+                    alert_msg = (
+                    f"{display_symbol_name(symbol)}\n"
+                    f"LTP: {ltp:.2f}\n"
+                    f"15M: {price_signal}\n"
+                    f"OI: {oi_signal}\n"
+                    f"Time: {datetime.now().strftime('%H:%M:%S')}"
+                )
+
+    log(f"ALERT: {display_symbol_name(symbol)} -> {oi_signal}")
+
+    send_whatsapp_alert(alert_msg)
 
             except Exception as e:
                 log(f"{display_symbol_name(symbol)} | ERROR: {e}")
