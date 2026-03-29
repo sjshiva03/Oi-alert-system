@@ -15,7 +15,7 @@ from fyers_apiv3 import fyersModel
 # =========================
 RAW_ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 RAW_CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
-TWILUO_ACCOUNT_SSID=os.getenv("TWILIO_ACCOUNT_SID","").strip()
+TWILUO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID","").strip()
 TWILIO_AUTH_TOKEN =os.getenv("TWILIO_AUTH_TOKEN","").strip()
 TWILIO_WHATSAPP_FROM=os.getenv("TWILIO_WHATSAPP_FROM","").strip()
 TWILIO_WHATSAPP_TO=os.getenv("TWI:IO_WHATSAPP_TO","").strip()
