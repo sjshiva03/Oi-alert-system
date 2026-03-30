@@ -315,7 +315,6 @@ def build_side_message(rows, side):
     lines = [title, ""]
     for r in target_rows:
         lines.extend([
-            title,
             r["name"],
             f"LTP: {human_num(r['ltp'])}",
             f"MAX CE OI CHANGE STRIKE: {human_num(r['max_ce_strike'])}",
