@@ -295,7 +295,7 @@ def build_side_message(rows, side):
         target_rows = [r for r in rows if r["signal"] == "STRONG SELL"]
 
     if not target_rows:
-        return f"{title}
+        return f{title}
 None
 
 Time:{ist_time_str()}"
