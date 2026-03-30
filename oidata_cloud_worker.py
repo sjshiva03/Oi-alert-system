@@ -332,7 +332,7 @@ def build_side_message(rows, side):
         ])
 
     lines.append(f"Time:{ist_time_str()}")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 prev_snapshots = {}
 last_summary_ts = 0.0
