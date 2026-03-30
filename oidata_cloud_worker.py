@@ -1,8 +1,9 @@
 import os
 import time
 from datetime import datetime, timedelta, timezone
+
+import requests
 from fyers_apiv3 import fyersModel
-from twilio.rest import Client
 
 
 # ================= CONFIG =================
@@ -11,6 +12,7 @@ STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
 SEND_STARTUP_TEST_MESSAGE = os.getenv("SEND_STARTUP_TEST_MESSAGE", "true").strip().lower() == "true"
+SUMMARY_COOLDOWN = int(os.getenv("SUMMARY_COOLDOWN", "300"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -29,7 +31,7 @@ def ist_date_str():
 
 
 def log(msg: str) -> None:
-    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [EQ-OI] {msg}", flush=True)
+    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [EQ-OI-TG] {msg}", flush=True)
 
 
 def safe_float(x, default=0.0):
@@ -99,23 +101,29 @@ def get_watchlist():
     return final_list
 
 
-# ================= TWILIO =================
-def send_whatsapp_alert(message: str) -> None:
-    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-    auth = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-    wa_from = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
-    wa_to = os.getenv("TWILIO_WHATSAPP_TO", "").strip()
+# ================= TELEGRAM =================
+def send_telegram_alert(message: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-    if not (sid and auth and wa_from and wa_to):
-        log("WhatsApp not configured")
+    if not (token and chat_id):
+        log("Telegram not configured")
         return
 
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+    }
+
     try:
-        client = Client(sid, auth)
-        msg = client.messages.create(from_=wa_from, to=wa_to, body=message)
-        log(f"WhatsApp sent: {msg.sid}")
+        r = requests.post(url, json=payload, timeout=20)
+        if r.ok:
+            log("Telegram alert sent")
+        else:
+            log(f"Telegram error: {r.text}")
     except Exception as e:
-        log(f"WhatsApp error: {e}")
+        log(f"Telegram exception: {e}")
 
 
 # ================= FYERS =================
@@ -327,28 +335,27 @@ def classify_oi_signal(underlying_symbol, underlying_ltp, options_list):
 
 
 # ================= ALERT =================
-last_alert_times = {}
+last_signal_by_symbol = {}
+last_sent_summary_time = 0
 
 
-def should_send_alert(symbol, signal):
+def should_collect_alert(symbol, signal):
     if signal in ("NO_DATA", "SIDEWAYS"):
         return False
 
-    key = f"{symbol}|{signal}"
-    now_ts = time.time()
-    last_ts = last_alert_times.get(key, 0)
+    prev_signal = last_signal_by_symbol.get(symbol)
+    if prev_signal == signal:
+        return False
 
-    if now_ts - last_ts >= ALERT_COOLDOWN_SECONDS:
-        last_alert_times[key] = now_ts
-        return True
-    return False
+    last_signal_by_symbol[symbol] = signal
+    return True
 
 
 def build_combined_alert_message(alert_rows):
     if not alert_rows:
         return ""
 
-    lines = ["🚨 OI ALERT SUMMARY 🚨", ""]
+    lines = ["馃毃 OI ALERT SUMMARY 馃毃", ""]
 
     for row in alert_rows:
         lines.append(f"{row['name']} | {row['ltp']:.2f} | {row['signal']}")
@@ -361,10 +368,12 @@ def build_combined_alert_message(alert_rows):
 
 # ================= MAIN =================
 def main():
+    global last_sent_summary_time
+
     symbols = get_watchlist()
 
     if SEND_STARTUP_TEST_MESSAGE:
-        send_whatsapp_alert(f"🚀 EQ + OPTION OI system started\nTime (IST): {ist_time_str()}")
+        send_telegram_alert(f"馃殌 EQ + OPTION OI system started\nTime (IST): {ist_time_str()}")
 
     while True:
         try:
@@ -398,7 +407,7 @@ def main():
                 else:
                     eligible = signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL")
 
-                if eligible and should_send_alert(eq_symbol, signal):
+                if eligible and should_collect_alert(eq_symbol, signal):
                     alerts_to_send.append({
                         "name": display_symbol_name(eq_symbol),
                         "ltp": ltp,
@@ -408,11 +417,14 @@ def main():
             except Exception as e:
                 log(f"{symbol} | ERROR: {e}")
 
-        if alerts_to_send:
-            send_whatsapp_alert(build_combined_alert_message(alerts_to_send))
+        now_ts = time.time()
+        if alerts_to_send and (now_ts - last_sent_summary_time > SUMMARY_COOLDOWN):
+            send_telegram_alert(build_combined_alert_message(alerts_to_send))
+            last_sent_summary_time = now_ts
 
         time.sleep(max(5, POLL_SECONDS))
 
 
 if __name__ == "__main__":
     main()
+    
