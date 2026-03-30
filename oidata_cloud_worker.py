@@ -298,7 +298,7 @@ def build_side_message(rows, side):
         return f{title}
 None
 
-Time:{ist_time_str()}"
+Time:"{ist_time_str()}"
 
     lines = [title, ""]
     for r in target_rows:
