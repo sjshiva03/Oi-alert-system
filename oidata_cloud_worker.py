@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from fyers_apiv3 import fyersModel
 from twilio.rest import Client
 
@@ -9,155 +9,392 @@ from twilio.rest import Client
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
+ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
+SEND_STARTUP_TEST_MESSAGE = os.getenv("SEND_STARTUP_TEST_MESSAGE", "true").strip().lower() == "true"
 
 
 # ================= HELPERS =================
-def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+def log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EQ-OI] {msg}", flush=True)
 
 
 def safe_float(x, default=0.0):
     try:
+        if x is None or x == "":
+            return default
         return float(x)
-    except:
+    except Exception:
         return default
 
 
-def normalize_symbol(sym):
+def normalize_symbol(sym: str) -> str:
     s = str(sym).strip().upper()
+    if not s:
+        return ""
+
+    if s.endswith("-INDEX") and ":" in s:
+        return s
+
     if ":" not in s:
         s = "NSE:" + s
-    if not s.endswith("-EQ") and not s.endswith("-INDEX"):
-        if "NIFTY" in s:
-            s += "-INDEX"
-        else:
-            s += "-EQ"
+
+    if s.startswith("NSE:") or s.startswith("BSE:"):
+        tail = s.split(":", 1)[1]
+        if not tail.endswith("-EQ") and not tail.endswith("-INDEX"):
+            if "NIFTY" in tail:
+                s = s + "-INDEX"
+            else:
+                s = s + "-EQ"
+
     return s
 
 
+def display_symbol_name(symbol: str) -> str:
+    s = str(symbol).upper()
+    if "NIFTYBANK" in s:
+        return "BANKNIFTY"
+    if "NIFTY50" in s or s.endswith("NIFTY-INDEX"):
+        return "NIFTY"
+    if symbol.endswith("-EQ"):
+        return symbol.split(":")[-1].replace("-EQ", "")
+    return symbol.split(":")[-1]
+
+
 def get_watchlist():
-    raw = os.getenv("WATCHLIST", "")
-    return [normalize_symbol(x) for x in raw.split(",") if x.strip()]
+    raw = os.getenv("WATCHLIST", "").strip()
+    if raw:
+        items = []
+        normalized = raw.replace("\n", ",").replace(";", ",")
+        for part in normalized.split(","):
+            s = normalize_symbol(part)
+            if s:
+                items.append(s)
+        final_list = list(dict.fromkeys(items))
+        log(f"WATCHLIST: {final_list}")
+        return final_list
+
+    final_list = [
+        "NSE:RELIANCE-EQ",
+        "NSE:TCS-EQ",
+        "NSE:HDFCBANK-EQ",
+        "NSE:ICICIBANK-EQ",
+        "NSE:NIFTY50-INDEX",
+        "NSE:NIFTYBANK-INDEX",
+    ]
+    log(f"WATCHLIST fallback: {final_list}")
+    return final_list
 
 
-# ================= FYERS =================
-def get_fyers():
-    token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
-    client = os.getenv("FYERS_CLIENT_ID", "").strip()
+# ================= TWILIO =================
+def send_whatsapp_alert(message: str) -> None:
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    auth = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    wa_from = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+    wa_to = os.getenv("TWILIO_WHATSAPP_TO", "").strip()
 
-    if ":" in token:
-        client, token = token.split(":")
-
-    return fyersModel.FyersModel(client_id=client, token=token, is_async=False)
-
-
-# ================= LTP =================
-def get_ltp(fyers, symbol):
-    try:
-        resp = fyers.quotes({"symbols": symbol})
-        data = resp.get("d", [{}])[0].get("v", {})
-        return safe_float(data.get("lp"))
-    except:
-        return 0.0
-
-
-# ================= OPTION CHAIN =================
-def get_option_chain(fyers, symbol):
-    try:
-        resp = fyers.optionchain({
-            "symbol": symbol,
-            "strikecount": STRIKECOUNT
-        })
-        return resp.get("data", {}).get("optionsChain", [])
-    except:
-        return []
-
-
-def analyze_oi(chain):
-    call_oi = 0
-    put_oi = 0
-
-    for row in chain:
-        call_oi += safe_float(row.get("callOi"))
-        put_oi += safe_float(row.get("putOi"))
-
-    if call_oi == 0 and put_oi == 0:
-        return "NO_DATA"
-
-    if put_oi > call_oi * 1.2:
-        return "BUY STRONG"
-    elif call_oi > put_oi * 1.2:
-        return "SELL STRONG"
-    elif put_oi > call_oi:
-        return "BUY"
-    else:
-        return "SELL"
-
-
-# ================= WHATSAPP =================
-def send_alert(msg):
-    sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth = os.getenv("TWILIO_AUTH_TOKEN")
-    frm = os.getenv("TWILIO_WHATSAPP_FROM")
-    to = os.getenv("TWILIO_WHATSAPP_TO")
-
-    if not all([sid, auth, frm, to]):
+    if not (sid and auth and wa_from and wa_to):
         log("WhatsApp not configured")
         return
 
     try:
-        Client(sid, auth).messages.create(from_=frm, to=to, body=msg)
-        log("Alert sent")
+        client = Client(sid, auth)
+        msg = client.messages.create(from_=wa_from, to=wa_to, body=message)
+        log(f"WhatsApp sent: {msg.sid}")
     except Exception as e:
         log(f"WhatsApp error: {e}")
 
 
-# ================= ALERT CONTROL =================
-last_alert = {}
+# ================= FYERS =================
+def get_fyers_creds():
+    raw_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+    raw_client = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-def can_alert(symbol, signal):
-    key = f"{symbol}_{signal}"
-    now = time.time()
-    if now - last_alert.get(key, 0) > ALERT_COOLDOWN_SECONDS:
-        last_alert[key] = now
+    if not raw_token:
+        raise Exception("Missing FYERS_ACCESS_TOKEN")
+
+    if raw_client:
+        return raw_client, raw_token
+
+    if ":" in raw_token:
+        client_id, access_token = raw_token.split(":", 1)
+        client_id = client_id.strip()
+        access_token = access_token.strip()
+        if client_id and access_token:
+            return client_id, access_token
+
+    raise Exception(
+        "Missing FYERS_CLIENT_ID. Either set FYERS_CLIENT_ID separately or "
+        "store FYERS_ACCESS_TOKEN as APPID:ACCESS_TOKEN"
+    )
+
+
+def create_fyers():
+    client_id, access_token = get_fyers_creds()
+    return fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False, log_path="")
+
+
+def fetch_quotes_map(fyers, symbols):
+    if not symbols:
+        return {}
+
+    payload = {"symbols": ",".join(symbols)}
+    try:
+        resp = fyers.quotes(data=payload)
+    except TypeError:
+        resp = fyers.quotes(payload)
+    except Exception as e:
+        log(f"quotes error: {e}")
+        return {}
+
+    out = {}
+    if not isinstance(resp, dict):
+        return out
+
+    items = resp.get("d") or resp.get("data") or []
+    if not isinstance(items, list):
+        return out
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
+        vals = item.get("v") or item.get("values") or item
+        out[normalize_symbol(sym)] = {
+            "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
+            "prev_close": safe_float(
+                vals.get("prev_close_price")
+                or vals.get("prev_close")
+                or vals.get("prevClose")
+                or vals.get("close")
+                or vals.get("prevClosePrice"),
+                0.0
+            ),
+            "chg": safe_float(vals.get("ch") or vals.get("chg") or vals.get("change"), 0.0),
+        }
+
+    return out
+
+
+def get_ltp_from_quote(fyers, symbol: str):
+    qmap = fetch_quotes_map(fyers, [symbol])
+    q = qmap.get(normalize_symbol(symbol), {})
+    return safe_float(q.get("ltp"), 0.0)
+
+
+def fetch_option_chain(fyers, symbol: str, strikecount: int = 8, timestamp: str = ""):
+    payload = {"symbol": symbol, "strikecount": strikecount, "timestamp": timestamp}
+    try:
+        return fyers.optionchain(data=payload)
+    except TypeError:
+        return fyers.optionchain(payload)
+    except Exception as e:
+        log(f"optionchain error for {symbol}: {e}")
+        return {}
+
+
+def extract_options_chain_list(resp):
+    if not isinstance(resp, dict):
+        return []
+
+    data = resp.get("data", {})
+    if isinstance(data, dict):
+        if isinstance(data.get("optionsChain"), list):
+            return data["optionsChain"]
+        if isinstance(data.get("optionschain"), list):
+            return data["optionschain"]
+        if isinstance(data.get("options"), list):
+            return data["options"]
+
+    return []
+
+
+# ================= EQ + OPTION SEPARATE =================
+def split_ce_pe_rows(options_list):
+    ce_rows = []
+    pe_rows = []
+
+    for row in options_list:
+        if not isinstance(row, dict):
+            continue
+
+        symbol = str(row.get("symbol", "")).upper()
+        option_type = str(
+            row.get("option_type")
+            or row.get("optionType")
+            or row.get("type")
+            or row.get("otype")
+            or ""
+        ).upper()
+
+        if option_type in ("CE", "CALL", "C") or symbol.endswith("CE"):
+            ce_rows.append(row)
+        elif option_type in ("PE", "PUT", "P") or symbol.endswith("PE"):
+            pe_rows.append(row)
+
+    return ce_rows, pe_rows
+
+
+def build_option_symbols(options_list):
+    symbols = []
+    for row in options_list:
+        sym = row.get("symbol")
+        if sym:
+            symbols.append(str(sym).upper().strip())
+    return list(dict.fromkeys(symbols))
+
+
+def nearest_atm_rows(ce_rows, pe_rows, underlying_ltp):
+    all_rows = ce_rows + pe_rows
+    if not all_rows:
+        return None, None
+
+    strikes = []
+    for row in all_rows:
+        strike = safe_float(
+            row.get("strike_price")
+            or row.get("strikePrice")
+            or row.get("strike")
+            or row.get("sp"),
+            0.0,
+        )
+        if strike > 0:
+            strikes.append(strike)
+
+    if not strikes:
+        return None, None
+
+    atm_strike = min(strikes, key=lambda x: abs(x - underlying_ltp))
+
+    atm_ce = None
+    atm_pe = None
+
+    for row in ce_rows:
+        strike = safe_float(row.get("strike_price") or row.get("strikePrice") or row.get("strike") or row.get("sp"), 0.0)
+        if strike == atm_strike:
+            atm_ce = row
+            break
+
+    for row in pe_rows:
+        strike = safe_float(row.get("strike_price") or row.get("strikePrice") or row.get("strike") or row.get("sp"), 0.0)
+        if strike == atm_strike:
+            atm_pe = row
+            break
+
+    return atm_ce, atm_pe
+
+
+def get_row_oi_change(row):
+    return safe_float(
+        row.get("oich")
+        or row.get("oi_change")
+        or row.get("oiChange")
+        or row.get("open_interest_change")
+        or row.get("openInterestChange"),
+        0.0,
+    )
+
+
+def classify_oi_signal(underlying_symbol, underlying_ltp, options_list):
+    if not options_list:
+        return "NO_DATA"
+
+    ce_rows, pe_rows = split_ce_pe_rows(options_list)
+    if not ce_rows and not pe_rows:
+        return "NO_DATA"
+
+    atm_ce, atm_pe = nearest_atm_rows(ce_rows, pe_rows, underlying_ltp)
+    if atm_ce is None and atm_pe is None:
+        return "NO_DATA"
+
+    ce_oich = get_row_oi_change(atm_ce) if atm_ce else 0.0
+    pe_oich = get_row_oi_change(atm_pe) if atm_pe else 0.0
+
+    # Separate EQ call and option call logic:
+    # EQ gives underlying LTP. Option chain gives option OI change.
+    if pe_oich > 0 and ce_oich <= 0:
+        return "BUY STRONG"
+    if ce_oich > 0 and pe_oich <= 0:
+        return "SELL STRONG"
+    if pe_oich > ce_oich:
+        return "BUY"
+    if ce_oich > pe_oich:
+        return "SELL"
+    return "SIDEWAYS"
+
+
+# ================= ALERT =================
+last_alert_times = {}
+
+
+def should_send_alert(symbol, signal):
+    if signal in ("NO_DATA", "SIDEWAYS"):
+        return False
+
+    key = f"{symbol}|{signal}"
+    now_ts = time.time()
+    last_ts = last_alert_times.get(key, 0)
+
+    if now_ts - last_ts >= ALERT_COOLDOWN_SECONDS:
+        last_alert_times[key] = now_ts
         return True
     return False
 
 
+def build_alert_message(symbol, ltp, signal):
+    return (
+        f"🚨 OI ALERT 🚨\n\n"
+        f"Symbol: {display_symbol_name(symbol)}\n"
+        f"LTP: {ltp:.2f}\n"
+        f"Signal: {signal}\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')}"
+    )
+
+
 # ================= MAIN =================
 def main():
-    fyers = get_fyers()
     symbols = get_watchlist()
 
-    send_alert("🚀 OI Alert System Started")
+    if SEND_STARTUP_TEST_MESSAGE:
+        send_whatsapp_alert("🚀 EQ + OPTION OI system started")
 
     while True:
+        try:
+            fyers = create_fyers()
+        except Exception as e:
+            log(f"FYERS init failed: {e}")
+            time.sleep(10)
+            continue
+
         for symbol in symbols:
             try:
-                ltp = get_ltp(fyers, symbol)
+                eq_symbol = normalize_symbol(symbol)
+
+                # 1) EQ call separately -> underlying LTP
+                ltp = get_ltp_from_quote(fyers, eq_symbol)
                 if ltp <= 0:
-                    log(f"{symbol} LTP not available")
+                    log(f"{eq_symbol} | LTP not available")
                     continue
 
-                chain = get_option_chain(fyers, symbol)
-                signal = analyze_oi(chain)
+                # 2) Option chain separately -> option OI/OI change
+                chain_resp = fetch_option_chain(fyers, eq_symbol, STRIKECOUNT, "")
+                options_list = extract_options_chain_list(chain_resp)
+                signal = classify_oi_signal(eq_symbol, ltp, options_list)
 
-                log(f"{symbol} | {ltp:.2f} | {signal}")
+                log(f"{eq_symbol} | {ltp:.2f} | {signal}")
 
-                if "STRONG" in signal and can_alert(symbol, signal):
-                    msg = (
-                        f"🚨 OI ALERT 🚨\n\n"
-                        f"{symbol}\n"
-                        f"LTP: {ltp:.2f}\n"
-                        f"Signal: {signal}\n"
-                        f"Time: {datetime.now().strftime('%H:%M:%S')}"
-                    )
-                    send_alert(msg)
+                if ONLY_STRONG_ALERTS:
+                    eligible = signal in ("BUY STRONG", "SELL STRONG")
+                else:
+                    eligible = signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL")
+
+                if eligible and should_send_alert(eq_symbol, signal):
+                    send_whatsapp_alert(build_alert_message(eq_symbol, ltp, signal))
 
             except Exception as e:
-                log(f"{symbol} ERROR: {e}")
+                log(f"{symbol} | ERROR: {e}")
 
-        time.sleep(POLL_SECONDS)
+        time.sleep(max(5, POLL_SECONDS))
 
 
 if __name__ == "__main__":
