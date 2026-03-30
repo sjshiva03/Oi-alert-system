@@ -11,20 +11,18 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 FYERS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-# Scan once every 15 minutes
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "900"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "900"))   # every 15 minutes
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "6"))
 RR_MULTIPLIER = float(os.getenv("RR_MULTIPLIER", "2.0"))
 SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").strip().lower() == "true"
 
-# Load-friendly
+# load-friendly
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
 BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2.0"))
 SYMBOL_PAUSE_SECONDS = float(os.getenv("SYMBOL_PAUSE_SECONDS", "0.25"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# NIFTY 50 constituents only
 WATCHLIST = [
     "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ",
     "NSE:AXISBANK-EQ","NSE:BAJAJ-AUTO-EQ","NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ",
@@ -52,7 +50,7 @@ def today_ist_str():
     return now_ist().strftime("%Y-%m-%d")
 
 def log(msg):
-    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [NIFTY50-15M] {msg}", flush=True)
+    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [NIFTY50-15M-BOTH] {msg}", flush=True)
 
 def safe_float(x, default=0.0):
     try:
@@ -300,16 +298,30 @@ def sell_signal(ltp, data, oi_signal):
         oi_signal in ("SELL STRONG", "SELL")
     )
 
-def build_breakout_summary(rows):
-    if not rows:
-        return ""
+def build_summary(oi_rows, breakout_rows):
+    lines = ["ðŸ“Š NIFTY 50 - 15 MIN SCAN", ""]
 
-    lines = ["ðŸ“Š NIFTY 50 - 15 MIN BREAKOUT ALERTS", ""]
-    for row in rows:
-        lines.append(
-            f"{row['name']} | {row['side']} | Entry {row['entry']:.2f} | "
-            f"SL {row['sl']:.2f} | Target {row['target']:.2f} | OI {row['oi_signal']}"
-        )
+    lines.append("Strong OI:")
+    if oi_rows:
+        for row in oi_rows[:20]:
+            lines.append(
+                f"{row['name']} | {row['oi_signal']} | LTP {row['ltp']:.2f} | "
+                f"ATM {row['atm']:.0f} | CE {row['ce_oich']:.0f} | PE {row['pe_oich']:.0f}"
+            )
+    else:
+        lines.append("None")
+
+    lines.append("")
+    lines.append("Breakout Setups:")
+    if breakout_rows:
+        for row in breakout_rows:
+            lines.append(
+                f"{row['name']} | {row['side']} | Entry {row['entry']:.2f} | "
+                f"SL {row['sl']:.2f} | Target {row['target']:.2f} | OI {row['oi_signal']}"
+            )
+    else:
+        lines.append("None")
+
     lines.append("")
     lines.append(f"Time (IST): {ist_time_str()}")
     return "\n".join(lines)
@@ -318,8 +330,8 @@ def build_breakout_summary(rows):
 def main():
     if SEND_STARTUP_MESSAGE:
         send_telegram(
-            f"ðŸš€ NIFTY 50 only breakout scanner started\n"
-            f"Checks every 15 minutes\n"
+            f"ðŸš€ NIFTY 50 scanner started\n"
+            f"Strong OI + breakout summary every 15 minutes\n"
             f"Time (IST): {ist_time_str()}"
         )
 
@@ -331,6 +343,7 @@ def main():
             time.sleep(30)
             continue
 
+        strong_oi_rows = []
         breakout_rows = []
 
         batches = list(chunk_list(WATCHLIST, BATCH_SIZE))
@@ -358,6 +371,16 @@ def main():
                     oi_snapshot = get_chain_oi_snapshot(options_list, ltp)
                     oi_signal = classify_chain_oi_signal(oi_snapshot)
 
+                    if oi_snapshot and oi_signal in ("BUY STRONG", "SELL STRONG"):
+                        strong_oi_rows.append({
+                            "name": display_symbol_name(symbol),
+                            "ltp": ltp,
+                            "oi_signal": oi_signal,
+                            "atm": safe_float(oi_snapshot["atm_strike"], 0.0),
+                            "ce_oich": safe_float(oi_snapshot["ce_oich"], 0.0),
+                            "pe_oich": safe_float(oi_snapshot["pe_oich"], 0.0),
+                        })
+
                     if buy_signal(ltp, candle_data, oi_signal):
                         sl = candle_data["first_low"]
                         target = ltp + ((ltp - sl) * RR_MULTIPLIER)
@@ -369,7 +392,6 @@ def main():
                             "target": target,
                             "oi_signal": oi_signal,
                         })
-
                     elif sell_signal(ltp, candle_data, oi_signal):
                         sl = candle_data["first_high"]
                         target = ltp - ((sl - ltp) * RR_MULTIPLIER)
@@ -401,15 +423,7 @@ def main():
             if batch_no < len(batches):
                 time.sleep(BATCH_PAUSE_SECONDS)
 
-        if breakout_rows:
-            send_telegram(build_breakout_summary(breakout_rows))
-        else:
-            send_telegram(
-                f"ðŸ“Š NIFTY 50 - 15 MIN SCAN\n\n"
-                f"No breakout setups found in this cycle.\n\n"
-                f"Time (IST): {ist_time_str()}"
-            )
-
+        send_telegram(build_summary(strong_oi_rows, breakout_rows))
         time.sleep(max(900, POLL_SECONDS))
 
 if __name__ == "__main__":
