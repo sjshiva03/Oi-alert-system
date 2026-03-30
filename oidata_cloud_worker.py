@@ -4,13 +4,11 @@ from datetime import datetime, timedelta, timezone
 import requests
 from fyers_apiv3 import fyersModel
 
-# ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 FYERS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-# Collect snapshots every 5 minutes, send summary every 15 minutes
 SNAPSHOT_SECONDS = int(os.getenv("SNAPSHOT_SECONDS", "300"))
 SUMMARY_SECONDS = int(os.getenv("SUMMARY_SECONDS", "900"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
@@ -21,7 +19,6 @@ SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").strip().lower()
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Use full Nifty 50 if you want, or reduce this list for lighter load.
 WATCHLIST = [
     "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ",
     "NSE:AXISBANK-EQ","NSE:BAJAJ-AUTO-EQ","NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ",
@@ -38,18 +35,14 @@ WATCHLIST = [
     "NSE:TRENT-EQ","NSE:WIPRO-EQ"
 ]
 
-# ================= HELPERS =================
 def now_ist():
     return datetime.now(IST)
 
 def ist_time_str():
     return now_ist().strftime("%H:%M:%S")
 
-def today_ist_str():
-    return now_ist().strftime("%Y-%m-%d")
-
 def log(msg):
-    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [NIFTY50-MAX-OICH] {msg}", flush=True)
+    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [NIFTY50-OICH-SEPARATE] {msg}", flush=True)
 
 def safe_float(x, default=0.0):
     try:
@@ -76,7 +69,18 @@ def chunk_list(items, chunk_size):
     for i in range(0, len(items), chunk_size):
         yield items[i:i + chunk_size]
 
-# ================= TELEGRAM =================
+def trend_label_with_icon(trend):
+    t = str(trend).upper()
+    if t == "SHORT BUILDUP":
+        return "ðŸ”´ SHORT BUILDUP"
+    if t == "LONG BUILDUP":
+        return "ðŸŸ¢ LONG BUILDUP"
+    if t == "SHORT COVERING":
+        return "ðŸŸ¢ SHORT COVERING"
+    if t == "LONG UNWINDING":
+        return "ðŸ”´ LONG UNWINDING"
+    return "âšª SIDEWAYS"
+
 def send_telegram(msg):
     if not (TELEGRAM_TOKEN and CHAT_ID):
         log("Telegram not configured")
@@ -90,7 +94,6 @@ def send_telegram(msg):
     except Exception as e:
         log(f"Telegram exception: {e}")
 
-# ================= FYERS =================
 def get_fyers():
     token = FYERS_TOKEN
     client = CLIENT_ID
@@ -150,7 +153,6 @@ def extract_options_chain_list(resp):
             return data["options"]
     return []
 
-# ================= OI / TREND =================
 def split_ce_pe_rows(options_list):
     ce_rows, pe_rows = [], []
     for row in options_list:
@@ -245,7 +247,6 @@ def analyze_stock(symbol, ltp, prev_snapshot, options_list):
     total_oi_delta = ce_oi_delta_5m + pe_oi_delta_5m
     total_oi_dir = "INCREASING" if total_oi_delta > 0 else ("DECREASING" if total_oi_delta < 0 else "FLAT")
 
-    dominant_signal = None
     if max_pe_oich_now > 0 and max_ce_oich_now <= 0:
         dominant_signal = "STRONG BUY"
     elif max_ce_oich_now > 0 and max_pe_oich_now <= 0:
@@ -285,47 +286,41 @@ def analyze_stock(symbol, ltp, prev_snapshot, options_list):
         "snapshot": snapshot,
     }
 
-def build_message(results):
-    strong_rows = [r for r in results if r["signal"] in ("STRONG BUY", "STRONG SELL")]
-    bias_rows = [r for r in results if r["signal"] not in ("STRONG BUY", "STRONG SELL")]
-
-    lines = ["ðŸ“Š NIFTY 50 OI CHANGE SCAN", "Compared to last 5 min", ""]
-
-    if strong_rows:
-        for r in strong_rows:
-            lines.extend([
-                r["signal"],
-                r["name"],
-                f"LTP:{human_num(r['ltp'])}",
-                f"MAX CE OI CHANGE STRIKE:{human_num(r['max_ce_strike'])}",
-                f"MAX PE OI CHANGE STRIKE:{human_num(r['max_pe_strike'])}",
-                f"MAX CE OI CHANGE:{human_num(r['max_ce_oich'])}",
-                f"MAX PE OI CHANGE:{human_num(r['max_pe_oich'])}",
-                f"CHANGE IN OI:{human_num(r['total_oi_delta'])}",
-                f"CHANGE IN OI TREND:{r['total_oi_dir']}",
-                f"CE OI 5 MIN:{r['ce_oi_dir']}",
-                f"PE OI 5 MIN:{r['pe_oi_dir']}",
-                f"TREND:{r['trend']}",
-                r["signal"],
-                ""
-            ])
+def build_side_message(rows, side):
+    if side == "BUY":
+        title = "ðŸŸ¢ STRONG BUY"
+        target_rows = [r for r in rows if r["signal"] == "STRONG BUY"]
     else:
-        lines.extend(["No strong signals", ""])
+        title = "ðŸ”´ STRONG SELL"
+        target_rows = [r for r in rows if r["signal"] == "STRONG SELL"]
 
-    if bias_rows:
-        lines.append("OTHER BIAS")
-        for r in bias_rows[:10]:
-            lines.append(
-                f"{r['name']} | {r['signal']} | LTP:{human_num(r['ltp'])} | "
-                f"CE:{human_num(r['max_ce_strike'])} | PE:{human_num(r['max_pe_strike'])} | "
-                f"OI:{r['total_oi_dir']} | {r['trend']}"
-            )
-        lines.append("")
+    if not target_rows:
+        return f"{title}
+None
 
+Time:{ist_time_str()}"
+
+    lines = [title, ""]
+    for r in target_rows:
+        lines.extend([
+            title,
+            r["name"],
+            f"LTP:{human_num(r['ltp'])}",
+            f"MAX CE OI CHANGE STRIKE:{human_num(r['max_ce_strike'])}",
+            f"MAX PE OI CHANGE STRIKE:{human_num(r['max_pe_strike'])}",
+            f"MAX CE OI CHANGE:{human_num(r['max_ce_oich'])}",
+            f"MAX PE OI CHANGE:{human_num(r['max_pe_oich'])}",
+            f"CHANGE IN OI:{human_num(r['total_oi_delta'])}",
+            f"CHANGE IN OI TREND:{r['total_oi_dir']}",
+            f"CE OI 5 MIN:{r['ce_oi_dir']} @ {human_num(r['max_ce_strike'])}",
+            f"PE OI 5 MIN:{r['pe_oi_dir']} @ {human_num(r['max_pe_strike'])}",
+            f"TREND:{trend_label_with_icon(r['trend'])}",
+            title,
+            ""
+        ])
     lines.append(f"Time:{ist_time_str()}")
     return "\n".join(lines)
 
-# ================= MAIN =================
 prev_snapshots = {}
 last_summary_ts = 0.0
 
@@ -334,8 +329,8 @@ def main():
 
     if SEND_STARTUP_MESSAGE:
         send_telegram(
-            f"ðŸš€ Nifty 50 max OI change scanner started\n"
-            f"Snapshot every 5 min, summary every 15 min\n"
+            "ðŸš€ Nifty 50 separate BUY/SELL OI scanner started\n"
+            "Snapshot every 5 min, summary every 15 min\n"
             f"Time:{ist_time_str()}"
         )
 
@@ -391,7 +386,9 @@ def main():
 
         now_ts = time.time()
         if results and (now_ts - last_summary_ts >= SUMMARY_SECONDS):
-            send_telegram(build_message(results))
+            send_telegram(build_side_message(results, "SELL"))
+            time.sleep(1)
+            send_telegram(build_side_message(results, "BUY"))
             last_summary_ts = now_ts
 
         time.sleep(max(60, SNAPSHOT_SECONDS))
