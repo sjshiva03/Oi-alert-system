@@ -51,10 +51,13 @@ def normalize_symbol(sym):
     s = str(sym).strip().upper()
     if not s:
         return ""
+
     if s.endswith("-INDEX") and ":" in s:
         return s
+
     if ":" not in s:
         s = "NSE:" + s
+
     if s.startswith("NSE:") or s.startswith("BSE:"):
         tail = s.split(":", 1)[1]
         if not tail.endswith("-EQ") and not tail.endswith("-INDEX"):
@@ -62,6 +65,7 @@ def normalize_symbol(sym):
                 s = s + "-INDEX"
             else:
                 s = s + "-EQ"
+
     return s
 
 def display_symbol_name(symbol):
@@ -90,6 +94,7 @@ def send_telegram(msg):
     if not (TELEGRAM_TOKEN and CHAT_ID):
         log("Telegram not configured")
         return
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=20)
@@ -102,11 +107,19 @@ def send_telegram(msg):
 def get_fyers():
     token = FYERS_TOKEN
     client = CLIENT_ID
+
     if ":" in token and not client:
         client, token = token.split(":", 1)
+
     if not client or not token:
         raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
-    return fyersModel.FyersModel(client_id=client, token=token, is_async=False, log_path="")
+
+    return fyersModel.FyersModel(
+        client_id=client,
+        token=token,
+        is_async=False,
+        log_path=""
+    )
 
 def get_ltp(fyers, symbol):
     try:
@@ -128,6 +141,7 @@ def fetch_option_chain(fyers, symbol, strikecount=8, timestamp=""):
 def extract_options_chain_list(resp):
     if not isinstance(resp, dict):
         return []
+
     data = resp.get("data", {})
     if isinstance(data, dict):
         if isinstance(data.get("optionsChain"), list):
@@ -136,6 +150,7 @@ def extract_options_chain_list(resp):
             return data["optionschain"]
         if isinstance(data.get("options"), list):
             return data["options"]
+
     return []
 
 def get_15min_data(fyers, symbol):
@@ -274,19 +289,12 @@ def get_chain_oi_snapshot(options_list, underlying_ltp):
         "pe_oich": pe_oich,
     }
 
-# ================= STRATEGY =================
-def is_inside_bar(data):
-    return data["second_high"] <= data["first_high"] and data["second_low"] >= data["first_low"]
-
-def is_small_first_candle(data):
-    return data["range_pct"] < 1.0
-
 def classify_chain_oi_signal(snapshot):
     if not snapshot:
         return "NO_DATA"
 
-    ce_oich = safe_float(snapshot["ce_oich"], 0.0)
-    pe_oich = safe_float(snapshot["pe_oich"], 0.0)
+    ce_oich = safe_float(snapshot.get("ce_oich"), 0.0)
+    pe_oich = safe_float(snapshot.get("pe_oich"), 0.0)
 
     if pe_oich > 0 and ce_oich <= 0:
         return "BUY STRONG"
@@ -297,6 +305,13 @@ def classify_chain_oi_signal(snapshot):
     if ce_oich > pe_oich:
         return "SELL"
     return "SIDEWAYS"
+
+# ================= STRATEGY =================
+def is_inside_bar(data):
+    return data["second_high"] <= data["first_high"] and data["second_low"] >= data["first_low"]
+
+def is_small_first_candle(data):
+    return data["range_pct"] < 1.0
 
 def buy_signal(ltp, data, oi_signal):
     return (
@@ -512,7 +527,7 @@ def main():
                 chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
                 options_list = extract_options_chain_list(chain_resp)
                 oi_snapshot = get_chain_oi_snapshot(options_list, ltp)
-                oi_signal = classify_oi_signal(oi_snapshot)
+                oi_signal = classify_chain_oi_signal(oi_snapshot)
 
                 if symbol not in trades or not trades[symbol]["active"]:
                     if buy_signal(ltp, candle_data, oi_signal):
