@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fyers_apiv3 import fyersModel
 from twilio.rest import Client
 
@@ -12,10 +12,24 @@ ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 ONLY_STRONG_ALERTS = os.getenv("ONLY_STRONG_ALERTS", "true").strip().lower() == "true"
 SEND_STARTUP_TEST_MESSAGE = os.getenv("SEND_STARTUP_TEST_MESSAGE", "true").strip().lower() == "true"
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 
 # ================= HELPERS =================
+def now_ist():
+    return datetime.now(IST)
+
+
+def ist_time_str():
+    return now_ist().strftime("%H:%M:%S")
+
+
+def ist_date_str():
+    return now_ist().strftime("%Y-%m-%d")
+
+
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [EQ-OI] {msg}", flush=True)
+    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [EQ-OI] {msg}", flush=True)
 
 
 def safe_float(x, default=0.0):
@@ -70,7 +84,7 @@ def get_watchlist():
             if s:
                 items.append(s)
         final_list = list(dict.fromkeys(items))
-        log(f"WATCHLIST: {final_list}")
+        log(f"WATCHLIST loaded: {final_list}")
         return final_list
 
     final_list = [
@@ -235,15 +249,6 @@ def split_ce_pe_rows(options_list):
     return ce_rows, pe_rows
 
 
-def build_option_symbols(options_list):
-    symbols = []
-    for row in options_list:
-        sym = row.get("symbol")
-        if sym:
-            symbols.append(str(sym).upper().strip())
-    return list(dict.fromkeys(symbols))
-
-
 def nearest_atm_rows(ce_rows, pe_rows, underlying_ltp):
     all_rows = ce_rows + pe_rows
     if not all_rows:
@@ -310,8 +315,6 @@ def classify_oi_signal(underlying_symbol, underlying_ltp, options_list):
     ce_oich = get_row_oi_change(atm_ce) if atm_ce else 0.0
     pe_oich = get_row_oi_change(atm_pe) if atm_pe else 0.0
 
-    # Separate EQ call and option call logic:
-    # EQ gives underlying LTP. Option chain gives option OI change.
     if pe_oich > 0 and ce_oich <= 0:
         return "BUY STRONG"
     if ce_oich > 0 and pe_oich <= 0:
@@ -341,14 +344,19 @@ def should_send_alert(symbol, signal):
     return False
 
 
-def build_alert_message(symbol, ltp, signal):
-    return (
-        f"🚨 OI ALERT 🚨\n\n"
-        f"Symbol: {display_symbol_name(symbol)}\n"
-        f"LTP: {ltp:.2f}\n"
-        f"Signal: {signal}\n"
-        f"Time: {datetime.now().strftime('%H:%M:%S')}"
-    )
+def build_combined_alert_message(alert_rows):
+    if not alert_rows:
+        return ""
+
+    lines = ["🚨 OI ALERT SUMMARY 🚨", ""]
+
+    for row in alert_rows:
+        lines.append(f"{row['name']} | {row['ltp']:.2f} | {row['signal']}")
+
+    lines.append("")
+    lines.append(f"Time (IST): {ist_time_str()}")
+
+    return "\n".join(lines)
 
 
 # ================= MAIN =================
@@ -356,7 +364,7 @@ def main():
     symbols = get_watchlist()
 
     if SEND_STARTUP_TEST_MESSAGE:
-        send_whatsapp_alert("🚀 EQ + OPTION OI system started")
+        send_whatsapp_alert(f"🚀 EQ + OPTION OI system started\nTime (IST): {ist_time_str()}")
 
     while True:
         try:
@@ -365,6 +373,8 @@ def main():
             log(f"FYERS init failed: {e}")
             time.sleep(10)
             continue
+
+        alerts_to_send = []
 
         for symbol in symbols:
             try:
@@ -389,10 +399,17 @@ def main():
                     eligible = signal in ("BUY STRONG", "SELL STRONG", "BUY", "SELL")
 
                 if eligible and should_send_alert(eq_symbol, signal):
-                    send_whatsapp_alert(build_alert_message(eq_symbol, ltp, signal))
+                    alerts_to_send.append({
+                        "name": display_symbol_name(eq_symbol),
+                        "ltp": ltp,
+                        "signal": signal
+                    })
 
             except Exception as e:
                 log(f"{symbol} | ERROR: {e}")
+
+        if alerts_to_send:
+            send_whatsapp_alert(build_combined_alert_message(alerts_to_send))
 
         time.sleep(max(5, POLL_SECONDS))
 
