@@ -2,18 +2,16 @@ import os
 import time
 from datetime import datetime, timedelta
 from fyers_apiv3 import fyersModel
+from twilio.rest import Client
 
-
-# =====================================
-# SIMPLE FYERS LTP DEBUG CHECKER
-# =====================================
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+SEND_STARTUP_TEST_MESSAGE = os.getenv("SEND_STARTUP_TEST_MESSAGE", "true").strip().lower() == "true"
 
 
 def log(msg):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] [LTP-DEBUG] {msg}", flush=True)
+    print(f"[{now}] [LTP-CHECK] {msg}", flush=True)
 
 
 def safe_float(x, default=0.0):
@@ -29,24 +27,19 @@ def normalize_symbol(sym):
     s = str(sym).strip().upper()
     if not s:
         return ""
-
     if s.endswith("-INDEX") and ":" in s:
         return s
-
     if ":" not in s:
         s = "NSE:" + s
-
     if s.startswith("NSE:") or s.startswith("BSE:"):
         tail = s.split(":", 1)[1]
         if not tail.endswith("-EQ") and not tail.endswith("-INDEX"):
             s = s + "-EQ"
-
     return s
 
 
 def get_watchlist():
     raw = os.getenv("WATCHLIST", "").strip()
-
     if raw:
         items = []
         normalized = raw.replace("\n", ",").replace(";", ",")
@@ -54,13 +47,9 @@ def get_watchlist():
             s = normalize_symbol(part)
             if s:
                 items.append(s)
+        return list(dict.fromkeys(items))
 
-        final_list = list(dict.fromkeys(items))
-        log(f"DEBUG WATCHLIST RAW = {repr(raw)}")
-        log(f"DEBUG WATCHLIST PARSED = {final_list}")
-        return final_list
-
-    final_list = [
+    return [
         "NSE:RELIANCE-EQ",
         "NSE:TCS-EQ",
         "NSE:HDFCBANK-EQ",
@@ -68,16 +57,11 @@ def get_watchlist():
         "NSE:NIFTY50-INDEX",
         "NSE:NIFTYBANK-INDEX",
     ]
-    log("DEBUG WATCHLIST RAW = ''")
-    log(f"DEBUG WATCHLIST PARSED = {final_list}")
-    return final_list
 
 
 def get_fyers_creds():
     raw_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
     raw_client = os.getenv("FYERS_CLIENT_ID", "").strip()
-
-    log(f"FYERS DEBUG -> CLIENT_ID={bool(raw_client)}, TOKEN={bool(raw_token)}")
 
     if not raw_token:
         raise Exception("Missing FYERS_ACCESS_TOKEN in environment")
@@ -107,6 +91,49 @@ def create_fyers():
         is_async=False,
         log_path=""
     )
+
+
+def fetch_quotes_map(fyers, symbols):
+    if not symbols:
+        return {}
+
+    payload = {"symbols": ",".join(symbols)}
+    try:
+        resp = fyers.quotes(data=payload)
+    except TypeError:
+        resp = fyers.quotes(payload)
+    except Exception as e:
+        log(f"quotes() error: {e}")
+        return {}
+
+    out = {}
+    if not isinstance(resp, dict):
+        return out
+
+    items = resp.get("d") or resp.get("data") or []
+    if not isinstance(items, list):
+        return out
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
+        vals = item.get("v") or item.get("values") or item
+
+        out[normalize_symbol(sym)] = {
+            "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
+            "prev_close": safe_float(
+                vals.get("prev_close_price")
+                or vals.get("prev_close")
+                or vals.get("prevClose")
+                or vals.get("close")
+                or vals.get("prevClosePrice"),
+                0.0
+            ),
+        }
+
+    return out
 
 
 def fetch_history(fyers, symbol, resolution, date_from, date_to, cont_flag="1"):
@@ -153,19 +180,16 @@ def get_ltp_fallback(fyers, symbol):
     today = get_today_str()
     prev_start = get_prev_day_str()
 
-    # 1-minute close
     resp = fetch_history(fyers, symbol, "1", today, today)
     val = close_from_candles(extract_candles(resp))
     if val > 0:
         return val, "1m_close"
 
-    # 5-minute close
     resp = fetch_history(fyers, symbol, "5", today, today)
     val = close_from_candles(extract_candles(resp))
     if val > 0:
         return val, "5m_close"
 
-    # Daily close
     resp = fetch_history(fyers, symbol, "D", prev_start, today)
     val = close_from_candles(extract_candles(resp))
     if val > 0:
@@ -174,76 +198,59 @@ def get_ltp_fallback(fyers, symbol):
     return 0.0, "unavailable"
 
 
-def fetch_raw_quote_response(fyers, symbol):
-    payload = {"symbols": symbol}
-    try:
-        resp = fyers.quotes(data=payload)
-    except TypeError:
-        resp = fyers.quotes(payload)
-    except Exception as e:
-        log(f"quotes() error for {symbol}: {e}")
-        return {}
-    return resp
-
-
-def extract_quote_ltp(raw_resp, requested_symbol):
-    """
-    Reads many possible quote response shapes and returns:
-    (ltp, matched_symbol, raw_item)
-    """
-    requested_symbol = normalize_symbol(requested_symbol)
-
-    if not isinstance(raw_resp, dict):
-        return 0.0, "", None
-
-    items = raw_resp.get("d") or raw_resp.get("data") or []
-    if not isinstance(items, list):
-        return 0.0, "", None
-
-    # first pass: exact/normalized symbol match
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
-        sym_norm = normalize_symbol(sym)
-        vals = item.get("v") or item.get("values") or item
-
-        if sym_norm == requested_symbol:
-            ltp = safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0)
-            return ltp, sym_norm, item
-
-    # second pass: return first nonzero ltp if only one item came back
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        sym = item.get("n") or item.get("symbol") or item.get("name") or ""
-        sym_norm = normalize_symbol(sym)
-        vals = item.get("v") or item.get("values") or item
-        ltp = safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0)
-        if ltp > 0:
-            return ltp, sym_norm, item
-
-    return 0.0, "", None
-
-
 def get_ltp(fyers, symbol):
-    raw_resp = fetch_raw_quote_response(fyers, symbol)
-    log(f"RAW QUOTE RESPONSE for {symbol}: {raw_resp}")
-
-    ltp, matched_symbol, raw_item = extract_quote_ltp(raw_resp, symbol)
+    symbol = normalize_symbol(symbol)
+    quotes_map = fetch_quotes_map(fyers, [symbol])
+    q = quotes_map.get(symbol, {})
+    ltp = safe_float(q.get("ltp"), 0.0)
     if ltp > 0:
-        return ltp, "quote", matched_symbol, raw_item
+        return ltp, "quote"
 
     ltp, source = get_ltp_fallback(fyers, symbol)
     if ltp > 0:
-        return ltp, source, "", None
+        return ltp, source
 
-    return 0.0, "unavailable", "", None
+    return 0.0, "unavailable"
+
+
+def send_whatsapp_alert(message):
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    auth = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    wa_from = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+    wa_to = os.getenv("TWILIO_WHATSAPP_TO", "").strip()
+
+    if not (sid and auth and wa_from and wa_to):
+        log("WhatsApp not configured")
+        return
+
+    try:
+        client = Client(sid, auth)
+        msg = client.messages.create(
+            from_=wa_from,
+            to=wa_to,
+            body=message
+        )
+        log(f"WhatsApp sent: {msg.sid}")
+    except Exception as e:
+        log(f"WhatsApp error: {e}")
+
+
+def build_ltp_message(symbol, ltp, source):
+    return (
+        f"📈 LTP UPDATE\n\n"
+        f"Symbol: {normalize_symbol(symbol)}\n"
+        f"LTP: {ltp:.2f}\n"
+        f"Source: {source}\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')}"
+    )
 
 
 def main():
+    interval = max(5, POLL_SECONDS)
     symbols = get_watchlist()
+
+    if SEND_STARTUP_TEST_MESSAGE:
+        send_whatsapp_alert("🚀 LTP checker started")
 
     while True:
         try:
@@ -254,26 +261,17 @@ def main():
             continue
 
         log(f"Checking LTP for {len(symbols)} symbol(s)")
-
         for symbol in symbols:
             try:
-                symbol = normalize_symbol(symbol)
-                log(f"Checking symbol: {symbol}")
-
-                ltp, source, matched_symbol, raw_item = get_ltp(fyers, symbol)
-
+                ltp, source = get_ltp(fyers, symbol)
                 if ltp > 0:
-                    if matched_symbol:
-                        log(f"{symbol} | LTP={ltp:.2f} | SOURCE={source} | MATCHED={matched_symbol}")
-                    else:
-                        log(f"{symbol} | LTP={ltp:.2f} | SOURCE={source}")
+                    log(f"{normalize_symbol(symbol)} | LTP={ltp:.2f} | SOURCE={source}")
                 else:
-                    log(f"{symbol} | LTP not available")
-
+                    log(f"{normalize_symbol(symbol)} | LTP not available")
             except Exception as e:
-                log(f"{symbol} | ERROR: {e}")
+                log(f"{normalize_symbol(symbol)} | ERROR: {e}")
 
-        time.sleep(max(5, POLL_SECONDS))
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
