@@ -9,8 +9,8 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 FYERS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-SNAPSHOT_SECONDS = int(os.getenv("SNAPSHOT_SECONDS", "300"))
-SUMMARY_SECONDS = int(os.getenv("SUMMARY_SECONDS", "900"))
+SNAPSHOT_SECONDS = int(os.getenv("SNAPSHOT_SECONDS", "300"))   # 5 min snapshot
+SUMMARY_SECONDS = int(os.getenv("SUMMARY_SECONDS", "900"))     # 15 min summary
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
 BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2.0"))
@@ -72,14 +72,14 @@ def chunk_list(items, chunk_size):
 def trend_label_with_icon(trend):
     t = str(trend).upper()
     if t == "SHORT BUILDUP":
-        return "ðŸ”´ SHORT BUILDUP"
+        return "🔴 SHORT BUILDUP"
     if t == "LONG BUILDUP":
-        return "ðŸŸ¢ LONG BUILDUP"
+        return "🟢 LONG BUILDUP"
     if t == "SHORT COVERING":
-        return "ðŸŸ¢ SHORT COVERING"
+        return "🟢 SHORT COVERING"
     if t == "LONG UNWINDING":
-        return "ðŸ”´ LONG UNWINDING"
-    return "âšª SIDEWAYS"
+        return "🔴 LONG UNWINDING"
+    return "⚪ SIDEWAYS"
 
 def send_telegram(msg):
     if not (TELEGRAM_TOKEN and CHAT_ID):
@@ -106,6 +106,7 @@ def get_fyers():
 def fetch_quotes_map(fyers, symbols):
     if not symbols:
         return {}
+
     payload = {"symbols": ",".join(symbols)}
     try:
         resp = fyers.quotes(data=payload)
@@ -126,9 +127,14 @@ def fetch_quotes_map(fyers, symbols):
     for item in items:
         if not isinstance(item, dict):
             continue
+
         sym = item.get("n") or item.get("symbol") or item.get("name") or ""
         vals = item.get("v") or item.get("values") or item
-        out[sym] = {"ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0)}
+        if sym:
+            out[sym] = {
+                "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0)
+            }
+
     return out
 
 def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
@@ -143,6 +149,7 @@ def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
 def extract_options_chain_list(resp):
     if not isinstance(resp, dict):
         return []
+
     data = resp.get("data", {})
     if isinstance(data, dict):
         if isinstance(data.get("optionsChain"), list):
@@ -151,6 +158,7 @@ def extract_options_chain_list(resp):
             return data["optionschain"]
         if isinstance(data.get("options"), list):
             return data["options"]
+
     return []
 
 def split_ce_pe_rows(options_list):
@@ -158,6 +166,7 @@ def split_ce_pe_rows(options_list):
     for row in options_list:
         if not isinstance(row, dict):
             continue
+
         symbol = str(row.get("symbol", "")).upper()
         option_type = str(
             row.get("option_type")
@@ -166,10 +175,12 @@ def split_ce_pe_rows(options_list):
             or row.get("otype")
             or ""
         ).upper()
+
         if option_type in ("CE", "CALL", "C") or symbol.endswith("CE"):
             ce_rows.append(row)
         elif option_type in ("PE", "PUT", "P") or symbol.endswith("PE"):
             pe_rows.append(row)
+
     return ce_rows, pe_rows
 
 def get_row_strike(row):
@@ -182,7 +193,10 @@ def get_row_strike(row):
     )
 
 def get_row_oi(row):
-    return safe_float(row.get("oi") or row.get("open_interest") or row.get("openInterest"), 0.0)
+    return safe_float(
+        row.get("oi") or row.get("open_interest") or row.get("openInterest"),
+        0.0,
+    )
 
 def get_row_oich(row):
     return safe_float(
@@ -202,6 +216,7 @@ def max_oi_change_row(rows):
 def trend_from_values(price_change, oi_change):
     chg = safe_float(price_change, 0.0)
     oich = safe_float(oi_change, 0.0)
+
     if chg > 0 and oich > 0:
         return "LONG BUILDUP"
     elif chg > 0 and oich < 0:
@@ -288,38 +303,36 @@ def analyze_stock(symbol, ltp, prev_snapshot, options_list):
 
 def build_side_message(rows, side):
     if side == "BUY":
-        title = "ðŸŸ¢ STRONG BUY"
+        title = "🟢 STRONG BUY"
         target_rows = [r for r in rows if r["signal"] == "STRONG BUY"]
     else:
-        title = "ðŸ”´ STRONG SELL"
+        title = "🔴 STRONG SELL"
         target_rows = [r for r in rows if r["signal"] == "STRONG SELL"]
 
     if not target_rows:
-        return f{title}
-None
-
-Time:"{ist_time_str()}"
+        return f"{title}\nNone\n\nTime:{ist_time_str()}"
 
     lines = [title, ""]
     for r in target_rows:
         lines.extend([
             title,
             r["name"],
-            f"LTP:{human_num(r['ltp'])}",
-            f"MAX CE OI CHANGE STRIKE:{human_num(r['max_ce_strike'])}",
-            f"MAX PE OI CHANGE STRIKE:{human_num(r['max_pe_strike'])}",
-            f"MAX CE OI CHANGE:{human_num(r['max_ce_oich'])}",
-            f"MAX PE OI CHANGE:{human_num(r['max_pe_oich'])}",
-            f"CHANGE IN OI:{human_num(r['total_oi_delta'])}",
-            f"CHANGE IN OI TREND:{r['total_oi_dir']}",
-            f"CE OI 5 MIN:{r['ce_oi_dir']} @ {human_num(r['max_ce_strike'])}",
-            f"PE OI 5 MIN:{r['pe_oi_dir']} @ {human_num(r['max_pe_strike'])}",
-            f"TREND:{trend_label_with_icon(r['trend'])}",
+            f"LTP: {human_num(r['ltp'])}",
+            f"MAX CE OI CHANGE STRIKE: {human_num(r['max_ce_strike'])}",
+            f"MAX PE OI CHANGE STRIKE: {human_num(r['max_pe_strike'])}",
+            f"MAX CE OI CHANGE: {human_num(r['max_ce_oich'])}",
+            f"MAX PE OI CHANGE: {human_num(r['max_pe_oich'])}",
+            f"CHANGE IN OI: {human_num(r['total_oi_delta'])}",
+            f"CHANGE IN OI TREND: {r['total_oi_dir']}",
+            f"CE OI 5 MIN: {r['ce_oi_dir']} @ {human_num(r['max_ce_strike'])}",
+            f"PE OI 5 MIN: {r['pe_oi_dir']} @ {human_num(r['max_pe_strike'])}",
+            f"TREND: {trend_label_with_icon(r['trend'])}",
             title,
             ""
         ])
+
     lines.append(f"Time:{ist_time_str()}")
-    return "\n".join(lines)
+    return "\\n".join(lines)
 
 prev_snapshots = {}
 last_summary_ts = 0.0
@@ -329,7 +342,7 @@ def main():
 
     if SEND_STARTUP_MESSAGE:
         send_telegram(
-            "ðŸš€ Nifty 50 separate BUY/SELL OI scanner started\n"
+            "🚀 Nifty 50 separate BUY/SELL OI scanner started\n"
             "Snapshot every 5 min, summary every 15 min\n"
             f"Time:{ist_time_str()}"
         )
@@ -360,6 +373,7 @@ def main():
                     chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
                     options_list = extract_options_chain_list(chain_resp)
                     analysis = analyze_stock(symbol, ltp, prev_snapshots.get(symbol), options_list)
+
                     if not analysis:
                         log(f"{display_symbol_name(symbol)} | OI NO_DATA")
                         time.sleep(SYMBOL_PAUSE_SECONDS)
