@@ -4,6 +4,9 @@ import requests
 from datetime import datetime, timedelta, timezone
 from fyers_apiv3 import fyersModel
 
+# =========================
+# CONFIG
+# =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 FYERS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
@@ -15,50 +18,38 @@ SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").strip().lower()
 
 SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))   # 0.1%
 TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))          # 1%
-NSE_HOLIDAYS_RAW = os.getenv("NSE_HOLIDAYS", "").strip()
 
 IST = timezone(timedelta(hours=5, minutes=30))
-
-import requests
-from datetime import datetime
-
-def fetch_nse_holidays_auto():
-    try:
-        url = "https://www.nseindia.com/api/holiday-master?type=trading"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com/"
-        }
-
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-
-        resp = session.get(url, headers=headers, timeout=10)
-        data = resp.json()
-
-        holidays = set()
-
-        for item in data.get("CBM", []):
-            date_str = item.get("tradingDate")
-            if date_str:
-                dt = datetime.strptime(date_str, "%d-%b-%Y")
-                holidays.add(dt.strftime("%Y-%m-%d"))
-
-        return holidays
-
-    except Exception as e:
-        print("Holiday fetch failed:", e)
-        return set()
 
 WATCHLIST_RAW = os.getenv(
     "WATCHLIST",
     "NSE:HDFCBANK-EQ,NSE:ICICIBANK-EQ,NSE:SBIN-EQ,NSE:RELIANCE-EQ,NSE:INFY-EQ"
 ).strip()
 
+# 2026 NSE trading holidays
+HOLIDAYS = {
+    "2026-01-26",
+    "2026-03-03",
+    "2026-03-26",
+    "2026-03-31",
+    "2026-04-03",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-05-28",
+    "2026-06-26",
+    "2026-09-14",
+    "2026-10-02",
+    "2026-10-20",
+    "2026-11-10",
+    "2026-11-24",
+    "2026-12-25",
+}
+
 alerted_setups = set()
 
+# =========================
+# HELPERS
+# =========================
 def now_ist():
     return datetime.now(IST)
 
@@ -111,22 +102,6 @@ def get_watchlist():
             out.append(s)
     return list(dict.fromkeys(out))
 
-def get_holiday_set():
-    out = set()
-    if not NSE_HOLIDAYS_RAW:
-        return out
-    for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
-        d = part.strip()
-        if d:
-            out.add(d)
-    return out
-
-HOLIDAYS = fetch_nse_holidays_auto()
-
-if not HOLIDAYS:
-    print("Using manual holidays fallback")
-    HOLIDAYS=get_holidsys_set()
-
 def is_weekend(dt_obj):
     return dt_obj.weekday() >= 5
 
@@ -150,6 +125,7 @@ def is_market_open():
 
 def next_market_open_datetime():
     now = now_ist()
+
     if is_market_day(now) and now < market_open_time(now):
         return market_open_time(now)
 
@@ -180,6 +156,9 @@ def reset_daily_alert_cache_if_needed():
     for x in stale:
         alerted_setups.discard(x)
 
+# =========================
+# TELEGRAM
+# =========================
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         log("Telegram not configured")
@@ -193,6 +172,9 @@ def send_telegram(msg):
     except Exception as e:
         log(f"Telegram exception: {e}")
 
+# =========================
+# FYERS
+# =========================
 def get_fyers():
     token = FYERS_TOKEN
     client = CLIENT_ID
@@ -274,6 +256,9 @@ def fetch_option_chain(fyers, symbol, strikecount=8):
         return {}
     return resp
 
+# =========================
+# CANDLE PARSING
+# =========================
 def parse_candles(candles):
     parsed = []
     for row in candles:
@@ -302,6 +287,9 @@ def get_market_candles_for_day(fyers, symbol, resolution):
             market.append(c)
     return market
 
+# =========================
+# OPTION CHAIN OI LOGIC
+# =========================
 def get_option_rows(resp):
     if not isinstance(resp, dict):
         return []
@@ -394,6 +382,9 @@ def check_pe_writer_build(optionchain_resp, ltp):
             built.append((strike, oich))
     return built
 
+# =========================
+# 15M INSIDE BAR BREAKOUT
+# =========================
 def get_first_two_15m_candles(fyers, symbol):
     market = get_market_candles_for_day(fyers, symbol, "15")
     if len(market) < 2:
@@ -407,6 +398,9 @@ def setup_valid_15m(c1, c2):
     inside_bar = c2["high"] < c1["high"] and c2["low"] > c1["low"]
     return (range_pct < 1.0 and inside_bar), range_pct
 
+# =========================
+# 30M PIVOT REJECTION
+# =========================
 def get_prev_day_30m_candles(fyers, symbol):
     end_dt = now_ist()
     start_dt = end_dt - timedelta(days=7)
@@ -494,6 +488,9 @@ def get_latest_pivot_pattern(curr_day_30m, levels):
 
     return None
 
+# =========================
+# GAP-UP SELL
+# =========================
 def get_prev_day_high_and_today_5m(fyers, symbol):
     end_dt = now_ist()
     start_dt = end_dt - timedelta(days=7)
@@ -526,29 +523,9 @@ def setup_gapup_sell(prev_day_high, first_5m):
 
     return (open_above_pdh and small_candle), range_pct
 
-def build_gapup_sell_message(symbol, prev_day_high, first_5m, entry, sl, target, ce_builds):
-    lines = [
-        "🔴 GAP-UP SELL CONFIRMED",
-        display_symbol_name(symbol),
-        "",
-        f"Previous Day High: {round(prev_day_high, 2)}",
-        f"1st 5m Candle O: {round(first_5m['open'], 2)}",
-        f"1st 5m Candle H: {round(first_5m['high'], 2)}",
-        f"1st 5m Candle L: {round(first_5m['low'], 2)}",
-        f"1st 5m Candle C: {round(first_5m['close'], 2)}",
-        "",
-        f"ENTRY SELL: {round(entry, 2)}",
-        f"STOPLOSS: {round(sl, 2)}",
-        f"TARGET: {round(target, 2)}",
-        "",
-        "CE WRITER BUILD:"
-    ]
-    for strike, oich in ce_builds:
-        lines.append(f"{round(strike, 2)} -> OI Change {round(oich, 2)}")
-    lines.append("")
-    lines.append(f"Time (IST): {ist_time_str()}")
-    return "\\n".join(lines)
-
+# =========================
+# MESSAGE BUILDERS
+# =========================
 def build_sell_15m_message(symbol, c1, c2, entry, sl, target, ce_builds):
     lines = [
         "🔴 15M SELL BREAKOUT CONFIRMED",
@@ -638,6 +615,29 @@ def build_buy_30m_pivot_message(symbol, pattern, sl, target, pe_builds):
         "PE WRITER BUILD:"
     ]
     for strike, oich in pe_builds:
+        lines.append(f"{round(strike, 2)} -> OI Change {round(oich, 2)}")
+    lines.append("")
+    lines.append(f"Time (IST): {ist_time_str()}")
+    return "\\n".join(lines)
+
+def build_gapup_sell_message(symbol, prev_day_high, first_5m, entry, sl, target, ce_builds):
+    lines = [
+        "🔴 GAP-UP SELL CONFIRMED",
+        display_symbol_name(symbol),
+        "",
+        f"Previous Day High: {round(prev_day_high, 2)}",
+        f"1st 5m Candle O: {round(first_5m['open'], 2)}",
+        f"1st 5m Candle H: {round(first_5m['high'], 2)}",
+        f"1st 5m Candle L: {round(first_5m['low'], 2)}",
+        f"1st 5m Candle C: {round(first_5m['close'], 2)}",
+        "",
+        f"ENTRY SELL: {round(entry, 2)}",
+        f"STOPLOSS: {round(sl, 2)}",
+        f"TARGET: {round(target, 2)}",
+        "",
+        "CE WRITER BUILD:"
+    ]
+    for strike, oich in ce_builds:
         lines.append(f"{round(strike, 2)} -> OI Change {round(oich, 2)}")
     lines.append("")
     lines.append(f"Time (IST): {ist_time_str()}")
