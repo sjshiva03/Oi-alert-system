@@ -1,48 +1,51 @@
 import os
 import time
-from datetime import datetime, timedelta, timezone
 import requests
+from datetime import datetime, timedelta, timezone
 from fyers_apiv3 import fyersModel
 
+# =========================
+# CONFIG
+# =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 FYERS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID", "").strip()
 
-SNAPSHOT_SECONDS = int(os.getenv("SNAPSHOT_SECONDS", "300"))   # 5 min snapshot
-SUMMARY_SECONDS = int(os.getenv("SUMMARY_SECONDS", "900"))     # 15 min summary
-STRIKECOUNT = int(os.getenv("STRIKECOUNT", "10"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))
-BATCH_PAUSE_SECONDS = float(os.getenv("BATCH_PAUSE_SECONDS", "2.0"))
-SYMBOL_PAUSE_SECONDS = float(os.getenv("SYMBOL_PAUSE_SECONDS", "0.25"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+STRIKECOUNT = int(os.getenv("STRIKECOUNT", "8"))
 SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").strip().lower() == "true"
+
+# 0.1% buffer for SL
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))
+# 1% target
+TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-WATCHLIST = [
-    "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ",
-    "NSE:AXISBANK-EQ","NSE:BAJAJ-AUTO-EQ","NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ",
-    "NSE:BEL-EQ","NSE:BHARTIARTL-EQ","NSE:BPCL-EQ","NSE:BRITANNIA-EQ",
-    "NSE:CIPLA-EQ","NSE:COALINDIA-EQ","NSE:DRREDDY-EQ","NSE:EICHERMOT-EQ",
-    "NSE:ETERNAL-EQ","NSE:GRASIM-EQ","NSE:HCLTECH-EQ","NSE:HDFCBANK-EQ",
-    "NSE:HDFCLIFE-EQ","NSE:HEROMOTOCO-EQ","NSE:HINDALCO-EQ","NSE:HINDUNILVR-EQ",
-    "NSE:ICICIBANK-EQ","NSE:INDIGO-EQ","NSE:INFY-EQ","NSE:ITC-EQ",
-    "NSE:JSWSTEEL-EQ","NSE:KOTAKBANK-EQ","NSE:LT-EQ","NSE:M&M-EQ",
-    "NSE:MARUTI-EQ","NSE:NESTLEIND-EQ","NSE:NTPC-EQ","NSE:ONGC-EQ",
-    "NSE:POWERGRID-EQ","NSE:RELIANCE-EQ","NSE:SBILIFE-EQ","NSE:SHRIRAMFIN-EQ",
-    "NSE:SBIN-EQ","NSE:SUNPHARMA-EQ","NSE:TATACONSUM-EQ","NSE:TATAMOTORS-EQ",
-    "NSE:TATASTEEL-EQ","NSE:TCS-EQ","NSE:TECHM-EQ","NSE:TITAN-EQ",
-    "NSE:TRENT-EQ","NSE:WIPRO-EQ"
-]
+WATCHLIST_RAW = os.getenv(
+    "WATCHLIST",
+    "NSE:HDFCBANK-EQ,NSE:ICICIBANK-EQ,NSE:SBIN-EQ,NSE:RELIANCE-EQ,NSE:INFY-EQ"
+).strip()
 
+# To avoid repeat alerts for same day/symbol/side
+alerted_setups = set()
+
+
+# =========================
+# HELPERS
+# =========================
 def now_ist():
     return datetime.now(IST)
 
 def ist_time_str():
     return now_ist().strftime("%H:%M:%S")
 
+def today_ist_str():
+    return now_ist().strftime("%Y-%m-%d")
+
 def log(msg):
-    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [NIFTY50-OICH-SEPARATE] {msg}", flush=True)
+    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] [15M-BREAKOUT-OI-TG] {msg}", flush=True)
 
 def safe_float(x, default=0.0):
     try:
@@ -56,52 +59,85 @@ def display_symbol_name(symbol):
     s = str(symbol).upper()
     if s.endswith("-EQ"):
         return s.split(":")[-1].replace("-EQ", "")
+    if s.endswith("-INDEX"):
+        return s.split(":")[-1].replace("-INDEX", "")
     return s.split(":")[-1]
 
-def human_num(v):
-    v = safe_float(v, 0.0)
-    if float(v).is_integer():
-        return str(int(v))
-    return f"{v:.2f}"
+def normalize_symbol(sym):
+    s = str(sym).strip().upper()
+    if not s:
+        return ""
+    if ":" not in s:
+        s = "NSE:" + s
+    if s.startswith("NSE:") or s.startswith("BSE:"):
+        tail = s.split(":", 1)[1]
+        if not tail.endswith("-EQ") and not tail.endswith("-INDEX"):
+            if "NIFTY" in tail:
+                s += "-INDEX"
+            else:
+                s += "-EQ"
+    return s
 
-def chunk_list(items, chunk_size):
-    chunk_size = max(1, int(chunk_size))
-    for i in range(0, len(items), chunk_size):
-        yield items[i:i + chunk_size]
+def get_watchlist():
+    out = []
+    raw = WATCHLIST_RAW.replace("\n", ",").replace(";", ",")
+    for part in raw.split(","):
+        s = normalize_symbol(part)
+        if s:
+            out.append(s)
+    return list(dict.fromkeys(out))
 
-def trend_label_with_icon(trend):
-    t = str(trend).upper()
-    if t == "SHORT BUILDUP":
-        return "🔴 SHORT BUILDUP"
-    if t == "LONG BUILDUP":
-        return "🟢 LONG BUILDUP"
-    if t == "SHORT COVERING":
-        return "🟢 SHORT COVERING"
-    if t == "LONG UNWINDING":
-        return "🔴 LONG UNWINDING"
-    return "⚪ SIDEWAYS"
+def is_market_open():
+    t = now_ist().time()
+    return t >= datetime.strptime("09:15", "%H:%M").time() and t <= datetime.strptime("15:30", "%H:%M").time()
 
+def wait_until_market_open():
+    while not is_market_open():
+        log("Market closed. Waiting...")
+        time.sleep(60)
+
+
+# =========================
+# TELEGRAM
+# =========================
 def send_telegram(msg):
-    if not (TELEGRAM_TOKEN and CHAT_ID):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
         log("Telegram not configured")
         print(msg)
         return
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=30)
+        r = requests.post(
+            url,
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=20
+        )
         if not r.ok:
             log(f"Telegram error: {r.text}")
     except Exception as e:
         log(f"Telegram exception: {e}")
 
+
+# =========================
+# FYERS
+# =========================
 def get_fyers():
     token = FYERS_TOKEN
     client = CLIENT_ID
+
     if ":" in token and not client:
         client, token = token.split(":", 1)
+
     if not client or not token:
         raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
-    return fyersModel.FyersModel(client_id=client, token=token, is_async=False, log_path="")
+
+    return fyersModel.FyersModel(
+        client_id=client,
+        token=token,
+        is_async=False,
+        log_path=""
+    )
 
 def fetch_quotes_map(fyers, symbols):
     if not symbols:
@@ -130,6 +166,7 @@ def fetch_quotes_map(fyers, symbols):
 
         sym = item.get("n") or item.get("symbol") or item.get("name") or ""
         vals = item.get("v") or item.get("values") or item
+
         if sym:
             out[sym] = {
                 "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0)
@@ -137,16 +174,99 @@ def fetch_quotes_map(fyers, symbols):
 
     return out
 
-def fetch_option_chain(fyers, symbol, strikecount=10, timestamp=""):
-    payload = {"symbol": symbol, "strikecount": strikecount, "timestamp": timestamp}
+def get_today_15m_candles(fyers, symbol):
+    payload = {
+        "symbol": symbol,
+        "resolution": "15",
+        "date_format": "1",
+        "range_from": today_ist_str(),
+        "range_to": today_ist_str(),
+        "cont_flag": "1"
+    }
+
     try:
-        return fyers.optionchain(data=payload)
+        resp = fyers.history(data=payload)
     except TypeError:
-        return fyers.optionchain(payload)
-    except Exception:
+        resp = fyers.history(payload)
+    except Exception as e:
+        log(f"{symbol} history error: {e}")
+        return []
+
+    candles = resp.get("candles", []) or resp.get("data", {}).get("candles", [])
+    return candles
+
+def fetch_option_chain(fyers, symbol, strikecount=8):
+    payload = {
+        "symbol": symbol,
+        "strikecount": strikecount,
+        "timestamp": ""
+    }
+
+    try:
+        resp = fyers.optionchain(data=payload)
+    except TypeError:
+        resp = fyers.optionchain(payload)
+    except Exception as e:
+        log(f"{symbol} optionchain error: {e}")
         return {}
 
-def extract_options_chain_list(resp):
+    return resp
+
+
+# =========================
+# 15M SETUP
+# =========================
+def get_first_two_market_candles(candles):
+    parsed = []
+
+    for row in candles:
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+
+        ts, o, h, l, c, v = row[:6]
+        dt = datetime.fromtimestamp(ts, IST)
+
+        parsed.append({
+            "dt": dt,
+            "open": safe_float(o),
+            "high": safe_float(h),
+            "low": safe_float(l),
+            "close": safe_float(c),
+            "volume": safe_float(v),
+        })
+
+    parsed.sort(key=lambda x: x["dt"])
+
+    market = []
+    for c in parsed:
+        t = c["dt"].time()
+        if t >= datetime.strptime("09:15", "%H:%M").time() and t <= datetime.strptime("15:30", "%H:%M").time():
+            market.append(c)
+
+    if len(market) < 2:
+        return None, None
+
+    return market[0], market[1]
+
+def setup_valid(c1, c2):
+    if not c1 or not c2:
+        return False, 0.0
+
+    if c1["close"] <= 0:
+        return False, 0.0
+
+    range_pct = ((c1["high"] - c1["low"]) / c1["close"]) * 100.0
+    inside_bar = c2["high"] < c1["high"] and c2["low"] > c1["low"]
+
+    return (range_pct < 1.0 and inside_bar), range_pct
+
+
+# =========================
+# OI CONFIRMATION
+# SELL: CE writers should build at nearby strikes
+# BUY : PE writers should build at nearby strikes
+# =========================
+def get_option_rows(resp):
     if not isinstance(resp, dict):
         return []
 
@@ -158,12 +278,32 @@ def extract_options_chain_list(resp):
             return data["optionschain"]
         if isinstance(data.get("options"), list):
             return data["options"]
-
     return []
 
-def split_ce_pe_rows(options_list):
-    ce_rows, pe_rows = [], []
-    for row in options_list:
+def get_row_strike(row):
+    return safe_float(
+        row.get("strike_price")
+        or row.get("strikePrice")
+        or row.get("strike")
+        or row.get("sp"),
+        0.0
+    )
+
+def get_row_oich(row):
+    return safe_float(
+        row.get("oich")
+        or row.get("oi_change")
+        or row.get("oiChange")
+        or row.get("open_interest_change")
+        or row.get("openInterestChange"),
+        0.0
+    )
+
+def split_ce_pe(option_rows):
+    ce_rows = []
+    pe_rows = []
+
+    for row in option_rows:
         if not isinstance(row, dict):
             continue
 
@@ -183,170 +323,117 @@ def split_ce_pe_rows(options_list):
 
     return ce_rows, pe_rows
 
-def get_row_strike(row):
-    return safe_float(
-        row.get("strike_price")
-        or row.get("strikePrice")
-        or row.get("strike")
-        or row.get("sp"),
-        0.0,
-    )
+def nearest_strike_list(rows, ltp, count=3):
+    enriched = []
+    for row in rows:
+        strike = get_row_strike(row)
+        if strike > 0:
+            enriched.append((abs(strike - ltp), strike, row))
 
-def get_row_oi(row):
-    return safe_float(
-        row.get("oi") or row.get("open_interest") or row.get("openInterest"),
-        0.0,
-    )
+    enriched.sort(key=lambda x: x[0])
+    return [x[2] for x in enriched[:count]]
 
-def get_row_oich(row):
-    return safe_float(
-        row.get("oich")
-        or row.get("oi_change")
-        or row.get("oiChange")
-        or row.get("open_interest_change")
-        or row.get("openInterestChange"),
-        0.0,
-    )
+def check_ce_writer_build(optionchain_resp, ltp):
+    option_rows = get_option_rows(optionchain_resp)
+    ce_rows, _ = split_ce_pe(option_rows)
 
-def max_oi_change_row(rows):
-    if not rows:
-        return None
-    return max(rows, key=lambda r: abs(get_row_oich(r)))
+    nearby = nearest_strike_list(ce_rows, ltp, count=3)
+    built = []
 
-def trend_from_values(price_change, oi_change):
-    chg = safe_float(price_change, 0.0)
-    oich = safe_float(oi_change, 0.0)
+    for row in nearby:
+        strike = get_row_strike(row)
+        oich = get_row_oich(row)
+        if oich > 0:
+            built.append((strike, oich))
 
-    if chg > 0 and oich > 0:
-        return "LONG BUILDUP"
-    elif chg > 0 and oich < 0:
-        return "SHORT COVERING"
-    elif chg < 0 and oich < 0:
-        return "LONG UNWINDING"
-    elif chg < 0 and oich > 0:
-        return "SHORT BUILDUP"
-    return "SIDEWAYS"
+    return built
 
-def analyze_stock(symbol, ltp, prev_snapshot, options_list):
-    ce_rows, pe_rows = split_ce_pe_rows(options_list)
-    if not ce_rows and not pe_rows:
-        return None
+def check_pe_writer_build(optionchain_resp, ltp):
+    option_rows = get_option_rows(optionchain_resp)
+    _, pe_rows = split_ce_pe(option_rows)
 
-    max_ce_row = max_oi_change_row(ce_rows)
-    max_pe_row = max_oi_change_row(pe_rows)
-    if max_ce_row is None or max_pe_row is None:
-        return None
+    nearby = nearest_strike_list(pe_rows, ltp, count=3)
+    built = []
 
-    max_ce_strike = get_row_strike(max_ce_row)
-    max_pe_strike = get_row_strike(max_pe_row)
-    max_ce_oich_now = get_row_oich(max_ce_row)
-    max_pe_oich_now = get_row_oich(max_pe_row)
-    max_ce_oi_now = get_row_oi(max_ce_row)
-    max_pe_oi_now = get_row_oi(max_pe_row)
+    for row in nearby:
+        strike = get_row_strike(row)
+        oich = get_row_oich(row)
+        if oich > 0:
+            built.append((strike, oich))
 
-    prev_ltp = safe_float(prev_snapshot.get("ltp"), ltp) if prev_snapshot else ltp
-    price_change = ltp - prev_ltp
+    return built
 
-    prev_ce_oi = 0.0
-    prev_pe_oi = 0.0
-    if prev_snapshot:
-        prev_ce_oi = safe_float(prev_snapshot.get("ce_oi_by_strike", {}).get(max_ce_strike), 0.0)
-        prev_pe_oi = safe_float(prev_snapshot.get("pe_oi_by_strike", {}).get(max_pe_strike), 0.0)
 
-    ce_oi_delta_5m = max_ce_oi_now - prev_ce_oi
-    pe_oi_delta_5m = max_pe_oi_now - prev_pe_oi
+# =========================
+# MESSAGE
+# =========================
+def build_sell_message(symbol, c1, c2, entry, sl, target, ce_builds):
+    lines = [
+        "🔴 SELL BREAKOUT CONFIRMED",
+        display_symbol_name(symbol),
+        "",
+        f"1st 15m Candle H: {round(c1['high'], 2)}",
+        f"1st 15m Candle L: {round(c1['low'], 2)}",
+        f"2nd 15m Candle H: {round(c2['high'], 2)}",
+        f"2nd 15m Candle L: {round(c2['low'], 2)}",
+        "",
+        f"ENTRY SELL: {round(entry, 2)}",
+        f"STOPLOSS: {round(sl, 2)}",
+        f"TARGET: {round(target, 2)}",
+        "",
+        "CE WRITER BUILD:"
+    ]
 
-    ce_oi_dir = "INCREASING" if ce_oi_delta_5m > 0 else ("DECREASING" if ce_oi_delta_5m < 0 else "FLAT")
-    pe_oi_dir = "INCREASING" if pe_oi_delta_5m > 0 else ("DECREASING" if pe_oi_delta_5m < 0 else "FLAT")
+    for strike, oich in ce_builds:
+        lines.append(f"{round(strike, 2)} -> OI Change {round(oich, 2)}")
 
-    total_oi_delta = ce_oi_delta_5m + pe_oi_delta_5m
-    total_oi_dir = "INCREASING" if total_oi_delta > 0 else ("DECREASING" if total_oi_delta < 0 else "FLAT")
-
-    if max_pe_oich_now > 0 and max_ce_oich_now <= 0:
-        dominant_signal = "STRONG BUY"
-    elif max_ce_oich_now > 0 and max_pe_oich_now <= 0:
-        dominant_signal = "STRONG SELL"
-    elif abs(max_pe_oich_now) > abs(max_ce_oich_now):
-        dominant_signal = "BUY BIAS"
-    elif abs(max_ce_oich_now) > abs(max_pe_oich_now):
-        dominant_signal = "SELL BIAS"
-    else:
-        dominant_signal = "NEUTRAL"
-
-    trend = trend_from_values(price_change, total_oi_delta)
-
-    snapshot = {
-        "ltp": ltp,
-        "ce_oi_by_strike": {get_row_strike(r): get_row_oi(r) for r in ce_rows},
-        "pe_oi_by_strike": {get_row_strike(r): get_row_oi(r) for r in pe_rows},
-    }
-
-    return {
-        "symbol": symbol,
-        "name": display_symbol_name(symbol),
-        "ltp": ltp,
-        "signal": dominant_signal,
-        "max_ce_strike": max_ce_strike,
-        "max_pe_strike": max_pe_strike,
-        "max_ce_oich": max_ce_oich_now,
-        "max_pe_oich": max_pe_oich_now,
-        "ce_oi_delta_5m": ce_oi_delta_5m,
-        "pe_oi_delta_5m": pe_oi_delta_5m,
-        "ce_oi_dir": ce_oi_dir,
-        "pe_oi_dir": pe_oi_dir,
-        "total_oi_delta": total_oi_delta,
-        "total_oi_dir": total_oi_dir,
-        "price_change_5m": price_change,
-        "trend": trend,
-        "snapshot": snapshot,
-    }
-
-def build_side_message(rows, side):
-    if side == "BUY":
-        title = "🟢 STRONG BUY"
-        target_rows = [r for r in rows if r["signal"] == "STRONG BUY"]
-    else:
-        title = "🔴 STRONG SELL"
-        target_rows = [r for r in rows if r["signal"] == "STRONG SELL"]
-
-    if not target_rows:
-        return f"{title}\nNone\n\nTime:{ist_time_str()}"
-
-    lines = [title, ""]
-    for r in target_rows:
-        lines.extend([
-            r["name"],
-            f"LTP: {human_num(r['ltp'])}",
-            f"MAX CE OI CHANGE STRIKE: {human_num(r['max_ce_strike'])}",
-            f"MAX PE OI CHANGE STRIKE: {human_num(r['max_pe_strike'])}",
-            f"MAX CE OI CHANGE: {human_num(r['max_ce_oich'])}",
-            f"MAX PE OI CHANGE: {human_num(r['max_pe_oich'])}",
-            f"CHANGE IN OI: {human_num(r['total_oi_delta'])}",
-            f"CHANGE IN OI TREND: {r['total_oi_dir']}",
-            f"CE OI 5 MIN: {r['ce_oi_dir']} @ {human_num(r['max_ce_strike'])}",
-            f"PE OI 5 MIN: {r['pe_oi_dir']} @ {human_num(r['max_pe_strike'])}",
-            f"TREND: {trend_label_with_icon(r['trend'])}",
-            title,
-            ""
-        ])
-
-    lines.append(f"Time:{ist_time_str()}")
+    lines.append("")
+    lines.append(f"Time (IST): {ist_time_str()}")
     return "\n".join(lines)
 
-prev_snapshots = {}
-last_summary_ts = 0.0
+def build_buy_message(symbol, c1, c2, entry, sl, target, pe_builds):
+    lines = [
+        "🟢 BUY BREAKOUT CONFIRMED",
+        display_symbol_name(symbol),
+        "",
+        f"1st 15m Candle H: {round(c1['high'], 2)}",
+        f"1st 15m Candle L: {round(c1['low'], 2)}",
+        f"2nd 15m Candle H: {round(c2['high'], 2)}",
+        f"2nd 15m Candle L: {round(c2['low'], 2)}",
+        "",
+        f"ENTRY BUY: {round(entry, 2)}",
+        f"STOPLOSS: {round(sl, 2)}",
+        f"TARGET: {round(target, 2)}",
+        "",
+        "PE WRITER BUILD:"
+    ]
 
+    for strike, oich in pe_builds:
+        lines.append(f"{round(strike, 2)} -> OI Change {round(oich, 2)}")
+
+    lines.append("")
+    lines.append(f"Time (IST): {ist_time_str()}")
+    return "\n".join(lines)
+
+
+# =========================
+# MAIN
+# =========================
 def main():
-    global last_summary_ts
+    symbols = get_watchlist()
 
-    if SEND_STARTUP_MESSAGE:
+    if SEND_STARTUP_MESSAGE and is_market_open():
         send_telegram(
-            "🚀 Nifty 50 separate BUY/SELL OI scanner started\n"
-            "Snapshot every 5 min, summary every 15 min\n"
-            f"Time:{ist_time_str()}"
+            "🚀 15m breakout + OI confirmation system started\n"
+            f"Symbols: {', '.join(display_symbol_name(s) for s in symbols)}\n"
+            "Runs only in market hours 09:15 to 15:30 IST"
         )
 
     while True:
+        if not is_market_open():
+            wait_until_market_open()
+            continue
+
         try:
             fyers = get_fyers()
         except Exception as e:
@@ -354,57 +441,70 @@ def main():
             time.sleep(30)
             continue
 
-        results = []
-        batches = list(chunk_list(WATCHLIST, BATCH_SIZE))
+        quotes_map = fetch_quotes_map(fyers, symbols)
 
-        for batch_no, batch_symbols in enumerate(batches, start=1):
-            log(f"Processing batch {batch_no}/{len(batches)}")
-            quotes_map = fetch_quotes_map(fyers, batch_symbols)
+        for symbol in symbols:
+            try:
+                ltp = safe_float(quotes_map.get(symbol, {}).get("ltp"), 0.0)
+                if ltp <= 0:
+                    log(f"{symbol} | LTP not available")
+                    continue
 
-            for symbol in batch_symbols:
-                try:
-                    ltp = safe_float(quotes_map.get(symbol, {}).get("ltp"), 0.0)
-                    if not ltp:
-                        log(f"{symbol} | LTP not available")
-                        time.sleep(SYMBOL_PAUSE_SECONDS)
-                        continue
+                candles = get_today_15m_candles(fyers, symbol)
+                c1, c2 = get_first_two_market_candles(candles)
 
-                    chain_resp = fetch_option_chain(fyers, symbol, STRIKECOUNT, "")
-                    options_list = extract_options_chain_list(chain_resp)
-                    analysis = analyze_stock(symbol, ltp, prev_snapshots.get(symbol), options_list)
+                valid, range_pct = setup_valid(c1, c2)
+                if not valid:
+                    log(f"{display_symbol_name(symbol)} | No valid 15m setup")
+                    continue
 
-                    if not analysis:
-                        log(f"{display_symbol_name(symbol)} | OI NO_DATA")
-                        time.sleep(SYMBOL_PAUSE_SECONDS)
-                        continue
+                # SELL condition
+                if ltp < c1["low"]:
+                    ce_builds = check_ce_writer_build(fetch_option_chain(fyers, symbol, STRIKECOUNT), ltp)
 
-                    prev_snapshots[symbol] = analysis["snapshot"]
-                    results.append(analysis)
+                    if len(ce_builds) >= 2:
+                        entry = c1["low"]
+                        sl = c1["high"] * (1 + SL_BUFFER_PCT)
+                        target = entry - (entry * TARGET_PCT)
 
+                        key = (today_ist_str(), symbol, "SELL")
+                        if key not in alerted_setups:
+                            alerted_setups.add(key)
+                            send_telegram(build_sell_message(symbol, c1, c2, entry, sl, target, ce_builds))
+                            log(f"{display_symbol_name(symbol)} | SELL ALERT SENT")
+                    else:
+                        log(f"{display_symbol_name(symbol)} | Sell breakout but no CE writer confirmation")
+
+                # BUY condition
+                elif ltp > c1["high"]:
+                    pe_builds = check_pe_writer_build(fetch_option_chain(fyers, symbol, STRIKECOUNT), ltp)
+
+                    if len(pe_builds) >= 2:
+                        entry = c1["high"]
+                        sl = c1["low"] * (1 - SL_BUFFER_PCT)
+                        target = entry + (entry * TARGET_PCT)
+
+                        key = (today_ist_str(), symbol, "BUY")
+                        if key not in alerted_setups:
+                            alerted_setups.add(key)
+                            send_telegram(build_buy_message(symbol, c1, c2, entry, sl, target, pe_builds))
+                            log(f"{display_symbol_name(symbol)} | BUY ALERT SENT")
+                    else:
+                        log(f"{display_symbol_name(symbol)} | Buy breakout but no PE writer confirmation")
+
+                else:
                     log(
-                        f"{analysis['name']} | {analysis['signal']} | "
-                        f"LTP={human_num(analysis['ltp'])} | "
-                        f"MAXCE={human_num(analysis['max_ce_strike'])} | "
-                        f"MAXPE={human_num(analysis['max_pe_strike'])} | "
-                        f"OI5M={analysis['total_oi_dir']} | TREND={analysis['trend']}"
+                        f"{display_symbol_name(symbol)} | "
+                        f"Setup ready | LTP={round(ltp,2)} | "
+                        f"C1H={round(c1['high'],2)} | C1L={round(c1['low'],2)} | "
+                        f"Range%={round(range_pct,2)}"
                     )
 
-                except Exception as e:
-                    log(f"{symbol} | ERROR: {e}")
+            except Exception as e:
+                log(f"{symbol} | ERROR: {e}")
 
-                time.sleep(SYMBOL_PAUSE_SECONDS)
+        time.sleep(max(5, POLL_SECONDS))
 
-            if batch_no < len(batches):
-                time.sleep(BATCH_PAUSE_SECONDS)
-
-        now_ts = time.time()
-        if results and (now_ts - last_summary_ts >= SUMMARY_SECONDS):
-            send_telegram(build_side_message(results, "SELL"))
-            time.sleep(1)
-            send_telegram(build_side_message(results, "BUY"))
-            last_summary_ts = now_ts
-
-        time.sleep(max(60, SNAPSHOT_SECONDS))
 
 if __name__ == "__main__":
     main()
