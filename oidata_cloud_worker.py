@@ -19,6 +19,39 @@ NSE_HOLIDAYS_RAW = os.getenv("NSE_HOLIDAYS", "").strip()
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+import requests
+from datetime import datetime
+
+def fetch_nse_holidays_auto():
+    try:
+        url = "https://www.nseindia.com/api/holiday-master?type=trading"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://www.nseindia.com/"
+        }
+
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+
+        resp = session.get(url, headers=headers, timeout=10)
+        data = resp.json()
+
+        holidays = set()
+
+        for item in data.get("CBM", []):
+            date_str = item.get("tradingDate")
+            if date_str:
+                dt = datetime.strptime(date_str, "%d-%b-%Y")
+                holidays.add(dt.strftime("%Y-%m-%d"))
+
+        return holidays
+
+    except Exception as e:
+        print("Holiday fetch failed:", e)
+        return set()
+
 WATCHLIST_RAW = os.getenv(
     "WATCHLIST",
     "NSE:HDFCBANK-EQ,NSE:ICICIBANK-EQ,NSE:SBIN-EQ,NSE:RELIANCE-EQ,NSE:INFY-EQ"
@@ -88,7 +121,11 @@ def get_holiday_set():
             out.add(d)
     return out
 
-HOLIDAYS = get_holiday_set()
+HOLIDAYS = fetch_nse_holidays_auto()
+
+if not HOLIDAYS:
+    print("Using manual holidays fallback")
+    HOLIDAYS=get_holidsys_set()
 
 def is_weekend(dt_obj):
     return dt_obj.weekday() >= 5
