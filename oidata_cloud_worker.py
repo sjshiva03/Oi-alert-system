@@ -21,17 +21,14 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "12"))
 
 # Rules
-FIRST_15M_MAX_RANGE_PCT = float(os.getenv("FIRST_15M_MAX_RANGE_PCT", "2.0"))      # 15m first candle below 2%
-GAPUP_FIRST_5M_MAX_RANGE_PCT = float(os.getenv("GAPUP_FIRST_5M_MAX_RANGE_PCT", "1.5"))  # gapup first 5m below 1.5%
-SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))                        # 0.1%
-TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))                               # 1%
+FIRST_15M_MAX_RANGE_PCT = float(os.getenv("FIRST_15M_MAX_RANGE_PCT", "2.0"))   # 15m first candle below 2%
+GAPUP_FIRST_5M_MAX_RANGE_PCT = float(os.getenv("GAPUP_FIRST_5M_MAX_RANGE_PCT", "1.5"))  # first 5m below 1.5%
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))   # 0.1%
+TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))          # 1%
 
-# OI updates only after trigger
 OI_UPDATE_EVERY_SECONDS = int(os.getenv("OI_UPDATE_EVERY_SECONDS", "300"))
-
 SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").strip().lower() == "true"
 
-# Comma separated dates YYYY-MM-DD
 NSE_HOLIDAYS_RAW = os.getenv(
     "NSE_HOLIDAYS",
     "2026-01-26,2026-03-03,2026-03-26,2026-03-31,2026-04-03,2026-04-14,2026-05-01,2026-05-28,2026-06-26,2026-09-14,2026-10-02,2026-10-20,2026-11-10,2026-11-24,2026-12-25"
@@ -619,4 +616,308 @@ def close_trade(trade, result, exit_price, ltp=None):
 
 def manage_trade_by_price(trade, ltp):
     if trade["side"] == "SELL":
-        if ltp <= trade["
+        if ltp <= trade["target"]:
+            close_trade(trade, "Target 🎯", trade["target"])
+            return
+        if ltp >= trade["stoploss"]:
+            close_trade(trade, "Stoploss 🛑", trade["stoploss"])
+            return
+    else:
+        if ltp >= trade["target"]:
+            close_trade(trade, "Target 🎯", trade["target"])
+            return
+        if ltp <= trade["stoploss"]:
+            close_trade(trade, "Stoploss 🛑", trade["stoploss"])
+            return
+
+def send_5min_oi_update_for_trade(symbol, ltp, snapshot, side):
+    bias, action = classify_bias(snapshot, side)
+    lines = [
+        "📊 OI CHANGE (5 MIN)",
+        "",
+        display_symbol_name(symbol),
+        f"Spot: {round(ltp, 2)}",
+        "",
+    ]
+    for row in snapshot:
+        lines.append(f"{int(row['strike'])}  CE:{row['ce_text']} | PE:{row['pe_text']}")
+    lines.append("")
+    lines.append(f"Bias   : {bias}")
+    lines.append(f"Action : {action}")
+    lines.append("")
+    lines.append(f"Time   : {ist_time_str()}")
+    send_telegram("\n".join(lines))
+
+def maybe_send_oi_update(trade, fyers, ltp):
+    now_ts = time.time()
+    if now_ts - trade["last_oi_update_ts"] < OI_UPDATE_EVERY_SECONDS:
+        return
+
+    option_chain = fetch_option_chain(fyers, trade["symbol"], STRIKECOUNT)
+    snapshot = get_four_strikes_snapshot(option_chain, ltp)
+    if not snapshot:
+        return
+
+    send_5min_oi_update_for_trade(trade["symbol"], ltp, snapshot, trade["side"])
+    trade["last_oi_update_ts"] = now_ts
+
+# =========================================================
+# END OF DAY
+# =========================================================
+def build_eod_summary_message(trades):
+    lines = ["📘 END OF DAY SUMMARY", ""]
+    for t in trades:
+        lines.append(t["symbol"])
+        lines.append(f"Strategy : {t['strategy']}")
+        lines.append(f"Entry    : {round(t['entry'], 2)}")
+        lines.append(f"Target   : {round(t['target'], 2)}")
+        lines.append(f"Stoploss : {round(t['stoploss'], 2)}")
+
+        if t.get("oi_snapshot_entry"):
+            lines.append("")
+            lines.append("OI @ ENTRY")
+            for row in t["oi_snapshot_entry"]:
+                lines.append(f"{int(row['strike'])}  CE:{row['ce_text']} | PE:{row['pe_text']}")
+
+        lines.append("")
+        lines.append(f"Result   : {t['result']}")
+        if t["result"] == "Day End" and t.get("ltp") is not None:
+            lines.append(f"LTP      : {round(t['ltp'], 2)}")
+        sign = "+" if t["pl"] > 0 else ""
+        lines.append(f"P/L      : {sign}{round(t['pl'], 2)}")
+        lines.append("")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+def close_all_open_trades_day_end(quotes_map):
+    for key in list(active_trades.keys()):
+        trade = active_trades.get(key)
+        if not trade:
+            continue
+        ltp = safe_float(quotes_map.get(trade["symbol"], {}).get("ltp"), trade["entry"])
+        close_trade(trade, "Day End", ltp, ltp=ltp)
+
+def send_eod_summary_if_any():
+    if not closed_trades:
+        send_telegram("📘 END OF DAY SUMMARY\n\nNo triggered stocks today.")
+        return
+    send_telegram(build_eod_summary_message(closed_trades))
+
+def reset_next_day_state():
+    global gapup_summary_sent_for_day, inside15_summary_sent_for_day
+    gapup_summary_sent_for_day = None
+    inside15_summary_sent_for_day = None
+    pivot_alert_seen_for_day.clear()
+    active_trades.clear()
+    closed_trades.clear()
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    global eod_sent_for_day
+
+    symbols = get_watchlist()
+
+    if SEND_STARTUP_MESSAGE:
+        send_telegram(
+            "🚀 FINAL FLOW BOT STARTED\n"
+            "Gap-up summary + 15m summary + Pivot summary + triggers + 5m OI + EOD summary\n"
+            f"15m first candle < {FIRST_15M_MAX_RANGE_PCT}%\n"
+            f"Gap-up first 5m candle < {GAPUP_FIRST_5M_MAX_RANGE_PCT}%"
+        )
+
+    while True:
+        now = now_ist()
+        today = today_ist_str()
+
+        if not is_market_open():
+            if now.time() > datetime.strptime("15:30", "%H:%M").time() and eod_sent_for_day != today:
+                try:
+                    fyers = get_fyers()
+                    quotes_map = fetch_quotes_map(fyers, symbols)
+                    close_all_open_trades_day_end(quotes_map)
+                except Exception:
+                    pass
+
+                send_eod_summary_if_any()
+                eod_sent_for_day = today
+                sleep_until_next_market_open()
+                reset_next_day_state()
+                continue
+
+            sleep_until_next_market_open()
+            reset_next_day_state()
+            continue
+
+        try:
+            fyers = get_fyers()
+        except Exception as e:
+            log(f"FYERS init failed: {e}")
+            time.sleep(30)
+            continue
+
+        # Summary messages
+        send_gapup_summary_if_due(fyers, symbols)
+        send_inside15_summary_if_due(fyers, symbols)
+
+        quotes_map = fetch_quotes_map(fyers, symbols)
+        new_pivot_names = set()
+
+        for symbol in symbols:
+            try:
+                ltp = safe_float(quotes_map.get(symbol, {}).get("ltp"), 0.0)
+                if ltp <= 0:
+                    continue
+
+                # ---------------- GAPUP SELL TRIGGER ----------------
+                prev_day_high, first_5m = get_prev_day_high_and_today_5m(fyers, symbol)
+                valid_gapup, _, _ = setup_gapup_sell(prev_day_high, first_5m)
+                if valid_gapup and first_5m and ltp < first_5m["low"]:
+                    option_chain = fetch_option_chain(fyers, symbol, STRIKECOUNT)
+                    snapshot = get_four_strikes_snapshot(option_chain, ltp)
+                    bias, _ = classify_bias(snapshot, "SELL")
+
+                    entry = first_5m["low"]
+                    target = entry - (entry * TARGET_PCT)
+                    stoploss = first_5m["high"] * (1 + SL_BUFFER_PCT)
+
+                    if trade_key("GAPUP SELL", symbol) not in active_trades:
+                        send_telegram(
+                            "\n".join([
+                                "⚡ GAPUP SELL TRIGGER ⚡",
+                                "",
+                                display_symbol_name(symbol),
+                                "",
+                                f"Entry : {round(entry, 2)} ↓ Break",
+                                f"Spot  : {round(ltp, 2)}",
+                                f"Target: {round(target, 2)}",
+                                f"SL    : {round(stoploss, 2)}",
+                                "",
+                                f"Signal: {bias}",
+                                f"Time  : {ist_time_str()}",
+                            ])
+                        )
+                        register_trade("GAPUP SELL", symbol, "SELL", entry, target, stoploss, snapshot)
+
+                # ---------------- 15M BUY / SELL TRIGGER ----------------
+                c1_15, c2_15 = get_first_two_15m_candles(fyers, symbol)
+                valid_15m, _ = setup_valid_15m(c1_15, c2_15)
+
+                if valid_15m and c1_15:
+                    # SELL
+                    if ltp < c1_15["low"]:
+                        option_chain = fetch_option_chain(fyers, symbol, STRIKECOUNT)
+                        snapshot = get_four_strikes_snapshot(option_chain, ltp)
+                        bias, _ = classify_bias(snapshot, "SELL")
+
+                        entry = c1_15["low"]
+                        target = entry - (entry * TARGET_PCT)
+                        stoploss = c1_15["high"] * (1 + SL_BUFFER_PCT)
+
+                        if trade_key("15M BREAKOUT SELL", symbol) not in active_trades:
+                            send_telegram(
+                                "\n".join([
+                                    "🕯️ 15M BREAKOUT SELL 🕯️",
+                                    "",
+                                    display_symbol_name(symbol),
+                                    "",
+                                    f"Entry : {round(entry, 2)} ↓ Break",
+                                    f"Spot  : {round(ltp, 2)}",
+                                    f"Target: {round(target, 2)}",
+                                    f"SL    : {round(stoploss, 2)}",
+                                    "",
+                                    f"Signal: {bias}",
+                                    f"Time  : {ist_time_str()}",
+                                ])
+                            )
+                            register_trade("15M BREAKOUT SELL", symbol, "SELL", entry, target, stoploss, snapshot)
+
+                    # BUY
+                    elif ltp > c1_15["high"]:
+                        option_chain = fetch_option_chain(fyers, symbol, STRIKECOUNT)
+                        snapshot = get_four_strikes_snapshot(option_chain, ltp)
+                        bias, _ = classify_bias(snapshot, "BUY")
+
+                        entry = c1_15["high"]
+                        target = entry + (entry * TARGET_PCT)
+                        stoploss = c1_15["low"] * (1 - SL_BUFFER_PCT)
+
+                        if trade_key("15M BREAKOUT BUY", symbol) not in active_trades:
+                            send_telegram(
+                                "\n".join([
+                                    "🕯️ 15M BREAKOUT BUY 🕯️",
+                                    "",
+                                    display_symbol_name(symbol),
+                                    "",
+                                    f"Entry : {round(entry, 2)} ↑ Break",
+                                    f"Spot  : {round(ltp, 2)}",
+                                    f"Target: {round(target, 2)}",
+                                    f"SL    : {round(stoploss, 2)}",
+                                    "",
+                                    f"Signal: {bias}",
+                                    f"Time  : {ist_time_str()}",
+                                ])
+                            )
+                            register_trade("15M BREAKOUT BUY", symbol, "BUY", entry, target, stoploss, snapshot)
+
+                # ---------------- PIVOT SELL SUMMARY + TRIGGER ----------------
+                prev_day_30m, curr_day_30m = get_prev_day_30m_candles(fyers, symbol)
+                levels = calc_pivot_levels(prev_day_30m)
+                pattern = get_latest_pivot_sell_pattern(curr_day_30m, levels)
+
+                if pattern:
+                    name = display_symbol_name(symbol)
+                    if name not in pivot_alert_seen_for_day:
+                        new_pivot_names.add(name)
+
+                    if ltp <= pattern["entry"]:
+                        option_chain = fetch_option_chain(fyers, symbol, STRIKECOUNT)
+                        snapshot = get_four_strikes_snapshot(option_chain, ltp)
+                        bias, _ = classify_bias(snapshot, "SELL")
+
+                        entry = pattern["entry"]
+                        target = entry - (entry * TARGET_PCT)
+                        stoploss = pattern["sl"] * (1 + SL_BUFFER_PCT)
+
+                        if trade_key("PIVOT SELL", symbol) not in active_trades:
+                            send_telegram(
+                                "\n".join([
+                                    "⛔ PIVOT SELL TRIGGER ⛔",
+                                    "",
+                                    name,
+                                    "",
+                                    f"Level : {pattern['level_name']} @ {round(pattern['level_value'], 2)}",
+                                    f"Entry : {round(entry, 2)} ↓ Break",
+                                    f"Spot  : {round(ltp, 2)}",
+                                    f"Target: {round(target, 2)}",
+                                    f"SL    : {round(stoploss, 2)}",
+                                    "",
+                                    f"Signal: {bias}",
+                                    f"Time  : {ist_time_str()}",
+                                ])
+                            )
+                            register_trade("PIVOT SELL", symbol, "SELL", entry, target, stoploss, snapshot)
+
+                # ---------------- ACTIVE TRADE MGMT + OI UPDATE ----------------
+                for key in list(active_trades.keys()):
+                    trade = active_trades.get(key)
+                    if not trade or trade["symbol"] != symbol:
+                        continue
+                    manage_trade_by_price(trade, ltp)
+                    if key in active_trades:
+                        maybe_send_oi_update(active_trades[key], fyers, ltp)
+
+            except Exception as e:
+                log(f"{symbol} | ERROR: {e}")
+
+        if new_pivot_names:
+            pivot_alert_seen_for_day.update(new_pivot_names)
+            send_pivot_watch_summary_if_new(new_pivot_names)
+
+        time.sleep(max(5, POLL_SECONDS))
+
+
+if __name__ == "__main__":
+    main()
