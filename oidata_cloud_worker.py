@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
 
+# ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
 CLIENT_ID = (os.getenv("CLIENT_ID") or "").strip()
@@ -25,6 +26,7 @@ NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing CLIENT_ID or ACCESS_TOKEN")
 
+# ================= NIFTY 50 =================
 SYMBOLS = [
     "NSE:ADANIENT-EQ", "NSE:ADANIPORTS-EQ", "NSE:APOLLOHOSP-EQ", "NSE:ASIANPAINT-EQ",
     "NSE:AXISBANK-EQ", "NSE:BAJAJ-AUTO-EQ", "NSE:BAJFINANCE-EQ", "NSE:BAJAJFINSV-EQ",
@@ -41,13 +43,14 @@ SYMBOLS = [
     "NSE:TRENT-EQ", "NSE:WIPRO-EQ"
 ]
 
+# ================= HELPERS =================
 def now_ist():
     return datetime.now(IST)
 
-def log(msg):
+def log(msg: str):
     print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def send(msg):
+def send(msg: str):
     print(msg, flush=True)
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
@@ -60,17 +63,26 @@ def send(msg):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-def short_name(symbol):
+def short_name(symbol: str) -> str:
     return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
 
-def candle_dt(ts):
+def candle_dt(ts: int):
     return datetime.fromtimestamp(ts, IST)
 
-def pct_range(high, low, close):
+def pct_range(high: float, low: float, close: float) -> float:
     if close == 0:
         return 0.0
     return ((high - low) / close) * 100.0
 
+def safe_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+# ================= HOLIDAYS / MARKET TIME =================
 def get_holiday_set():
     out = set()
     for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
@@ -107,6 +119,7 @@ def sleep_until_next_market_open():
             return
         time.sleep(min(60, max(1, int(rem))))
 
+# ================= KEY FIX =================
 def analysis_date_str():
     now = now_ist()
     if now.time() < dtime(9, 15):
@@ -116,6 +129,7 @@ def analysis_date_str():
         return d.strftime("%Y-%m-%d")
     return now.strftime("%Y-%m-%d")
 
+# ================= FYERS =================
 fyers = fyersModel.FyersModel(
     client_id=CLIENT_ID,
     token=ACCESS_TOKEN,
@@ -147,9 +161,11 @@ def get_history(symbol, resolution, days=10):
         return []
     return data.get("candles", [])
 
+# ================= CANDLE SELECTION =================
 def get_analysis_day_candles(symbol, resolution, days=10):
     candles = get_history(symbol, resolution, days)
     target_day = analysis_date_str()
+
     out = []
     for c in candles:
         try:
@@ -157,12 +173,14 @@ def get_analysis_day_candles(symbol, resolution, days=10):
                 out.append(c)
         except Exception:
             pass
+
     out.sort(key=lambda x: x[0])
     return out
 
 def get_previous_daily(symbol):
     daily = get_history(symbol, "D", 20)
     target_day = analysis_date_str()
+
     prev = []
     for c in daily:
         try:
@@ -170,37 +188,46 @@ def get_previous_daily(symbol):
                 prev.append(c)
         except Exception:
             pass
+
     prev.sort(key=lambda x: x[0])
     return prev[-1] if prev else None
 
+# ================= RESULT ENGINE =================
 def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
     for c in candles_after_entry:
         high = float(c[2])
         low = float(c[3])
+
         if high >= stoploss and low <= target:
             return "Stoploss 🛑", stoploss
         if high >= stoploss:
             return "Stoploss 🛑", stoploss
         if low <= target:
             return "Target 🎯", target
+
     if candles_after_entry:
         return "Day End", float(candles_after_entry[-1][4])
+
     return "No Data", entry
 
 def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
     for c in candles_after_entry:
         high = float(c[2])
         low = float(c[3])
+
         if low <= stoploss and high >= target:
             return "Stoploss 🛑", stoploss
         if low <= stoploss:
             return "Stoploss 🛑", stoploss
         if high >= target:
             return "Target 🎯", target
+
     if candles_after_entry:
         return "Day End", float(candles_after_entry[-1][4])
+
     return "No Data", entry
 
+# ================= STRATEGY ANALYSIS =================
 def analyze_gapup_sell(symbol):
     prev_day = get_previous_daily(symbol)
     day_5m = get_analysis_day_candles(symbol, 5, 5)
@@ -219,7 +246,12 @@ def analyze_gapup_sell(symbol):
     gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0.0
     candle_pct = pct_range(h, l, c)
 
-    valid = o > prev_high and gap_pct >= GAPUP_MIN_PCT and candle_pct <= GAPUP_CANDLE_MAX_PCT
+    valid = (
+        o > prev_high and
+        gap_pct >= GAPUP_MIN_PCT and
+        candle_pct <= GAPUP_CANDLE_MAX_PCT
+    )
+
     if not valid:
         return None
 
@@ -262,6 +294,7 @@ def analyze_15m_inside(symbol):
 
     range_pct = pct_range(h1, l1, c1_close)
 
+    # inclusive inside rule
     inside = h2 <= h1 and l2 >= l1
 
     log(
@@ -313,9 +346,11 @@ def analyze_15m_inside(symbol):
         }
     }
 
+# ================= FORMATTERS =================
 def format_gap_summary(items):
     if not items:
         return "⚡ GAP UP PLUS ⚡\n\nNone"
+
     msg = "⚡ GAP UP PLUS ⚡\n\n"
     msg += f"Stocks: {len(items)}\n"
     msg += ", ".join([x["symbol"] for x in items])
@@ -355,6 +390,7 @@ def format_results(gap_items, inside_items):
             s = x["sell"]
             bsign = "+" if b["pl"] > 0 else ""
             ssign = "+" if s["pl"] > 0 else ""
+
             lines += [
                 x["symbol"],
                 f"1st Candle H:{x['first_high']} L:{x['first_low']} Range%:{x['range_pct']}",
@@ -366,8 +402,10 @@ def format_results(gap_items, inside_items):
 
     if len(lines) == 2:
         lines.append("No valid setups found.")
+
     return "\n".join(lines).strip()
 
+# ================= RUNNERS =================
 def run_after_market_once():
     send("📡 Running after-market scan...")
 
@@ -457,6 +495,7 @@ def run_live_day():
 
         time.sleep(POLL_SECONDS)
 
+# ================= MAIN =================
 def main():
     profile = check_auth()
     send(
