@@ -239,32 +239,7 @@ def analyze_gapup_sell(symbol):
     valid = (
         o > prev_high and
         gap_pct >= GAPUP_MIN_PCT and
-        candle_pct <= GAPUP_CANDLE_MAX_PCT
-    )
-
-    if not valid:
-        return None
-
-    entry = round(l, 2)
-    target = round(entry * (1 - TARGET_PCT), 2)
-    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
-
-    later = day_5m[1:]
-    result, exit_price = evaluate_sell_result(later, entry, target, stoploss)
-    pl = round(entry - exit_price, 2)
-
-    return {
-        "symbol": short_name(symbol),
-        "entry": entry,
-        "target": target,
-        "stoploss": stoploss,
-        "result": result,
-        "exit_price": round(exit_price, 2),
-        "pl": pl,
-        "gap_pct": round(gap_pct, 2),
-    }
-
-def analyze_15m_inside(symbol):
+ def analyze_15m_inside(symbol):
     day_15m = get_analysis_day_candles(symbol, 15, 5)
     if len(day_15m) < 2:
         return None
@@ -272,14 +247,28 @@ def analyze_15m_inside(symbol):
     c1 = day_15m[0]
     c2 = day_15m[1]
 
-    h1 = float(c1[2]); l1 = float(c1[3]); c1c = float(c1[4])
-    h2 = float(c2[2]); l2 = float(c2[3])
+    h1 = float(c1[2])
+    l1 = float(c1[3])
+    c1c = float(c1[4])
+
+    h2 = float(c2[2])
+    l2 = float(c2[3])
 
     if c1c <= 0:
         return None
 
     range_pct = pct_range(h1, l1, c1c)
-    inside = h2 < h1 and l2 > l1
+
+    # FIXED: inclusive inside candle
+    inside = h2 <= h1 and l2 >= l1
+
+    log(
+        f"15M {short_name(symbol)} | "
+        f"H1:{h1} L1:{l1} C1:{c1c} | "
+        f"H2:{h2} L2:{l2} | "
+        f"Range%:{range_pct:.2f} | "
+        f"Inside:{inside}"
+    )
 
     if not (range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
@@ -321,7 +310,31 @@ def analyze_15m_inside(symbol):
             "exit_price": round(sell_exit, 2),
             "pl": sell_pl
         }
+    }       candle_pct <= GAPUP_CANDLE_MAX_PCT
+    )
+
+    if not valid:
+        return None
+
+    entry = round(l, 2)
+    target = round(entry * (1 - TARGET_PCT), 2)
+    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
+
+    later = day_5m[1:]
+    result, exit_price = evaluate_sell_result(later, entry, target, stoploss)
+    pl = round(entry - exit_price, 2)
+
+    return {
+        "symbol": short_name(symbol),
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": result,
+        "exit_price": round(exit_price, 2),
+        "pl": pl,
+        "gap_pct": round(gap_pct, 2),
     }
+
 
 # ================= FORMATTERS =================
 def format_gap_summary(items):
