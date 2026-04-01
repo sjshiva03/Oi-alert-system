@@ -23,16 +23,14 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
 
 # ================= SETTINGS =================
 SYMBOLS = [
-"NSE:RELIANCE-EQ","NSE:TCS-EQ","NSE:HDFCBANK-EQ","NSE:ICICIBANK-EQ","NSE:INFY-EQ",
-"NSE:HINDUNILVR-EQ","NSE:ITC-EQ","NSE:SBIN-EQ","NSE:BHARTIARTL-EQ","NSE:KOTAKBANK-EQ",
-"NSE:LT-EQ","NSE:AXISBANK-EQ","NSE:ASIANPAINT-EQ","NSE:MARUTI-EQ","NSE:HCLTECH-EQ",
-"NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ","NSE:WIPRO-EQ","NSE:ULTRACEMCO-EQ","NSE:TITAN-EQ",
-"NSE:NTPC-EQ","NSE:POWERGRID-EQ","NSE:ONGC-EQ","NSE:JSWSTEEL-EQ","NSE:TATASTEEL-EQ",
-"NSE:HINDALCO-EQ","NSE:COALINDIA-EQ","NSE:GRASIM-EQ","NSE:TECHM-EQ","NSE:DRREDDY-EQ",
-"NSE:CIPLA-EQ","NSE:DIVISLAB-EQ","NSE:APOLLOHOSP-EQ","NSE:EICHERMOT-EQ","NSE:HEROMOTOCO-EQ",
-"NSE:BAJAJ-AUTO-EQ","NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:UPL-EQ","NSE:SBILIFE-EQ",
-"NSE:HDFCLIFE-EQ","NSE:ICICIPRULI-EQ","NSE:BRITANNIA-EQ","NSE:NESTLEIND-EQ","NSE:TATACONSUM-EQ",
-"NSE:INDUSINDBK-EQ","NSE:SHREECEM-EQ","NSE:BPCL-EQ","NSE:IOC-EQ","NSE:PIDILITIND-EQ"
+    "NSE:RELIANCE-EQ",
+    "NSE:TCS-EQ",
+    "NSE:HDFCBANK-EQ",
+    "NSE:ICICIBANK-EQ",
+    "NSE:SBIN-EQ",
+    "NSE:AXISBANK-EQ",
+    "NSE:INFY-EQ",
+    "NSE:NTPC-EQ",
 ]
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -96,14 +94,25 @@ def next_market_open_datetime():
         candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
     return candidate
 
+_last_sleep_log_for = None
+
 def sleep_until_next_market_open():
+    global _last_sleep_log_for
+
     nxt = next_market_open_datetime()
-    print(f"[{ist_time_str()}] Market closed. Sleeping until {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}", flush=True)
+    nxt_key = nxt.strftime("%Y-%m-%d %H:%M:%S")
+
+    if _last_sleep_log_for != nxt_key:
+        print(f"[{ist_time_str()}] Market closed. Sleeping until {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}", flush=True)
+        _last_sleep_log_for = nxt_key
+
     while True:
-        rem = int((nxt - now_ist()).total_seconds())
-        if rem <= 1:
+        remaining = (nxt - now_ist()).total_seconds()
+        if remaining <= 1:
+            print(f"[{ist_time_str()}] Market opening now...", flush=True)
+            _last_sleep_log_for = None
             break
-        time.sleep(min(60, rem))
+        time.sleep(min(60, max(1, int(remaining))))
 
 # ================= RATE LIMIT =================
 class RateLimiter:
@@ -218,6 +227,7 @@ closed_trades = []
 
 # ================= DATA LOADERS =================
 def load_morning_caches():
+    print(f"[{ist_time_str()}] Loading morning caches...", flush=True)
     for batch in chunk(SYMBOLS, 5):
         for s in batch:
             cache["5m"][s] = get_history(s, 5, 5)
@@ -225,6 +235,7 @@ def load_morning_caches():
             cache["30m"][s] = get_history(s, 30, 5)
             cache["daily"][s] = get_history(s, "D", 7)
         time.sleep(1)
+    print(f"[{ist_time_str()}] Morning caches loaded.", flush=True)
 
 def refresh_quotes_only():
     cache["quotes"] = get_quotes()
@@ -327,6 +338,7 @@ def send_gapup_summary_if_due():
         msg = "⚡Gap up plus⚡\n\n" + "\n".join([f"{i}.{n} ({g}%)" for i, (n, g) in enumerate(found, start=1)])
     else:
         msg = "⚡Gap up plus⚡\n\nNone"
+
     send(msg)
     gapup_summary_sent_for_day = today_ist_str()
 
@@ -357,6 +369,7 @@ def send_inside15_summary_if_due():
         msg = "🕯️15 Min Inside Candle🕯️\n\n" + "\n".join([f"{i}.{n}" for i, n in enumerate(found, start=1)])
     else:
         msg = "🕯️15 Min Inside Candle🕯️\n\nNone"
+
     send(msg)
     inside15_summary_sent_for_day = today_ist_str()
 
@@ -569,7 +582,6 @@ def check_15m_breakout(symbol, ltp):
     if not valid:
         return
 
-    # BUY
     if ltp > h1 and trade_key("15 Min Breakout", symbol) not in active_trades:
         oi_snapshot, _, _ = get_oi_snapshot(symbol, ltp)
         bias, action = classify_bias(oi_snapshot, "BUY")
@@ -599,7 +611,6 @@ def check_15m_breakout(symbol, ltp):
         register_trade("15 Min Breakout", symbol, "BUY", entry, target, stoploss, oi_snapshot)
         return
 
-    # SELL
     if ltp < l1 and trade_key("15 Min Breakdown", symbol) not in active_trades:
         oi_snapshot, _, _ = get_oi_snapshot(symbol, ltp)
         bias, action = classify_bias(oi_snapshot, "SELL")
@@ -699,6 +710,7 @@ def check_pivot_sell(symbol, ltp, new_pivot_names):
 def main():
     global eod_sent_for_day
 
+    print(f"[{ist_time_str()}] Bot started.", flush=True)
     send("🚀 Ultimate bot started with scheduler + holidays + rate limit protection")
 
     morning_loaded_for_day = None
@@ -712,8 +724,9 @@ def main():
                 try:
                     refresh_quotes_only()
                     close_all_open_trades_day_end()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"EOD close error: {e}", flush=True)
+
                 send(build_eod_summary())
                 eod_sent_for_day = today
                 sleep_until_next_market_open()
@@ -726,7 +739,6 @@ def main():
             morning_loaded_for_day = None
             continue
 
-        # one-time daily preload after 09:45
         if morning_loaded_for_day != today and now.time() >= dtime(9, 45):
             load_morning_caches()
             morning_loaded_for_day = today
