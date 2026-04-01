@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from datetime import datetime, timedelta, timezone
 from fyers_apiv3 import fyersModel
@@ -6,16 +7,18 @@ from fyers_apiv3 import fyersModel
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
-CLIENT_ID = (os.getenv("FYERS_CLIENT_ID") or "").strip()
-ACCESS_TOKEN = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
-TELEGRAM_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+CLIENT_ID = open("client_id.txt").read().strip()
+ACCESS_TOKEN = open("access_token.txt").read().strip()
 
-EQ_SYMBOL = "NSE:M&M-EQ"
-STRIKECOUNT = int(os.getenv("STRIKECOUNT", "15"))
+TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
 
-if not CLIENT_ID or not ACCESS_TOKEN:
-    raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
+SYMBOL = "NSE:M&M-EQ"
+STRIKECOUNT = 15
+
+FIRST_CANDLE_MAX_PCT = 1.0
+
+CHECK_INTERVAL = 10  # seconds
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -26,277 +29,150 @@ fyers = fyersModel.FyersModel(
 )
 
 # ================= HELPERS =================
-def now_ist():
+def now():
     return datetime.now(IST)
 
-def send(msg: str):
+def send(msg):
     print(msg)
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=20
+            data={"chat_id": CHAT_ID, "text": msg}
         )
-    except Exception as e:
-        print("Telegram error:", e)
+    except:
+        pass
 
-def safe_float(x, default=0.0):
+def safe_float(x):
     try:
-        if x is None or x == "":
-            return default
         return float(x)
-    except Exception:
-        return default
+    except:
+        return 0.0
 
-def human_format(n):
-    n = safe_float(n, 0.0)
-    sign = "-" if n < 0 else ""
-    n = abs(n)
+# ================= DATA =================
+def get_quotes():
+    r = fyers.quotes({"symbols": SYMBOL})
+    v = r["d"][0]["v"]
+    return {
+        "ltp": v["lp"],
+        "open": v["open_price"],
+        "high": v["high_price"],
+        "low": v["low_price"],
+        "prev_close": v["prev_close_price"]
+    }
 
-    if n >= 10000000:
-        s = f"{n/10000000:.2f}".rstrip("0").rstrip(".")
-        return f"{sign}{s}Cr"
-    elif n >= 100000:
-        s = f"{n/100000:.2f}".rstrip("0").rstrip(".")
-        return f"{sign}{s}L"
-    elif n >= 1000:
-        s = f"{n/1000:.2f}".rstrip("0").rstrip(".")
-        return f"{sign}{s}K"
-    else:
-        if float(n).is_integer():
-            return f"{sign}{int(n)}"
-        return f"{sign}{n:.2f}".rstrip("0").rstrip(".")
-
-def arrow(v):
-    v = safe_float(v, 0.0)
-    if v > 0:
-        return "↑"
-    if v < 0:
-        return "↓"
-    return "→"
-
-def candle_dt(ts):
-    return datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M")
-
-def fmt_candle(c):
-    if not c:
-        return "None"
-    vol = c[5] if len(c) > 5 else "NA"
-    return f"{candle_dt(c[0])}\nO:{c[1]} H:{c[2]} L:{c[3]} C:{c[4]} V:{vol}"
-
-# ================= API CALLS =================
-def fetch_history(symbol, resolution, days=10):
+def get_history(res):
     payload = {
-        "symbol": symbol,
-        "resolution": str(resolution),
+        "symbol": SYMBOL,
+        "resolution": str(res),
         "date_format": "1",
-        "range_from": (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d"),
-        "range_to": now_ist().strftime("%Y-%m-%d"),
+        "range_from": (now() - timedelta(days=5)).strftime("%Y-%m-%d"),
+        "range_to": now().strftime("%Y-%m-%d"),
         "cont_flag": "1"
     }
-    try:
-        return fyers.history(data=payload)
-    except TypeError:
-        return fyers.history(payload)
+    return fyers.history(payload).get("candles", [])
 
-def fetch_option_chain(symbol, strikecount=15, timestamp=""):
-    payload = {
-        "symbol": symbol,
-        "strikecount": strikecount,
-        "timestamp": timestamp
-    }
-    try:
-        return fyers.optionchain(data=payload)
-    except TypeError:
-        return fyers.optionchain(payload)
+def get_option_chain():
+    r = fyers.optionchain({"symbol": SYMBOL, "strikecount": STRIKECOUNT})
+    return r.get("data", {}).get("optionsChain", [])
 
-def fetch_quotes(symbol):
-    payload = {"symbols": symbol}
-    try:
-        resp = fyers.quotes(data=payload)
-    except TypeError:
-        resp = fyers.quotes(payload)
-    except Exception:
-        return {}
+# ================= OI =================
+def get_oi_bias(chain):
+    call_oi = 0
+    put_oi = 0
 
-    if not isinstance(resp, dict):
-        return {}
+    for x in chain:
+        strike = x.get("strike_price")
+        oi = safe_float(x.get("oi"))
 
-    items = resp.get("d") or []
-    if not items:
-        return {}
+        if str(x.get("option_type")).upper() == "CE":
+            call_oi += oi
+        else:
+            put_oi += oi
 
-    item = items[0] if isinstance(items[0], dict) else {}
-    vals = item.get("v") or {}
+    return call_oi, put_oi
 
-    return {
-        "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
-        "open": safe_float(vals.get("open_price") or vals.get("open") or vals.get("openPrice"), 0.0),
-        "high": safe_float(vals.get("high_price") or vals.get("high") or vals.get("highPrice"), 0.0),
-        "low": safe_float(vals.get("low_price") or vals.get("low") or vals.get("lowPrice"), 0.0),
-        "prev_close": safe_float(vals.get("prev_close_price") or vals.get("prev_close") or vals.get("prevClose"), 0.0),
-        "raw": vals
-    }
+# ================= STRATEGY =================
+def check_strategy():
+    quotes = get_quotes()
+    daily = get_history("D")
+    m15 = get_history(15)
 
-def extract_options_chain_list(resp):
-    if not isinstance(resp, dict):
-        return []
+    if len(daily) < 2 or len(m15) < 2:
+        return None
 
-    data = resp.get("data", {})
-    if isinstance(data, dict):
-        if isinstance(data.get("optionsChain"), list):
-            return data["optionsChain"]
-        if isinstance(data.get("optionschain"), list):
-            return data["optionschain"]
-        if isinstance(data.get("options"), list):
-            return data["options"]
+    prev_day = daily[-2]
+    today = daily[-1]
 
-    return []
+    first = m15[0]
+    second = m15[1]
 
-# ================= OI PARSER =================
-def normalize_chain_fast(options_list):
-    call_map = {}
-    put_map = {}
+    # GAPUP+
+    gapup = today[1] > prev_day[2]
 
-    for x in options_list:
-        if not isinstance(x, dict):
-            continue
+    # First candle %
+    range_pct = ((first[2] - first[3]) / first[4]) * 100
 
-        strike = (
-            x.get("strike_price")
-            or x.get("strikePrice")
-            or x.get("strike")
-            or x.get("sp")
-        )
-        if strike is None:
-            continue
+    small_candle = range_pct < FIRST_CANDLE_MAX_PCT
 
-        strike = safe_float(strike, None)
-        if strike is None:
-            continue
+    # Inside bar
+    inside = second[2] <= first[2] and second[3] >= first[3]
 
-        option_type = str(
-            x.get("option_type")
-            or x.get("optionType")
-            or x.get("type")
-            or x.get("otype")
-            or ""
-        ).upper().strip()
+    if not (gapup and small_candle and inside):
+        return None
 
-        sym = str(x.get("symbol", "")).upper()
+    chain = get_option_chain()
+    call_oi, put_oi = get_oi_bias(chain)
 
-        row = {
-            "ltp": safe_float(x.get("ltp") or x.get("last_price") or x.get("lastPrice"), 0.0),
-            "chg": safe_float(x.get("chg") or x.get("change") or x.get("ch"), 0.0),
-            "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility"), 0.0),
-            "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0),
-            "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange"), 0.0),
-            "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol"), 0.0),
+    ltp = quotes["ltp"]
+
+    # BUY
+    if ltp > first[2] and put_oi > call_oi:
+        return {
+            "side": "BUY",
+            "entry": first[2],
+            "sl": first[3],
+            "target": first[2] + (first[2] - first[3]),
+            "oi": f"PUT>{call_oi}"
         }
 
-        if option_type in ("CE", "CALL", "C") or sym.endswith("CE"):
-            call_map[int(strike)] = row
-        elif option_type in ("PE", "PUT", "P") or sym.endswith("PE"):
-            put_map[int(strike)] = row
+    # SELL
+    if ltp < first[3] and call_oi > put_oi:
+        return {
+            "side": "SELL",
+            "entry": first[3],
+            "sl": first[2],
+            "target": first[3] - (first[2] - first[3]),
+            "oi": f"CALL>{put_oi}"
+        }
 
-    strikes = sorted(set(call_map.keys()) | set(put_map.keys()))
-    rows = []
+    return None
 
-    for strike in strikes:
-        c = call_map.get(strike, {})
-        p = put_map.get(strike, {})
-        rows.append({
-            "strike": int(strike),
-            "call_oi": c.get("oi", 0.0),
-            "call_oich": c.get("oi_change", 0.0),
-            "put_oi": p.get("oi", 0.0),
-            "put_oich": p.get("oi_change", 0.0),
-        })
+# ================= MAIN LOOP =================
+last_signal = None
 
-    return rows
+while True:
+    try:
+        signal = check_strategy()
 
-def build_oi_lines(rows, max_rows=12):
-    if not rows:
-        return ["No parsed OI rows"]
+        if signal and signal != last_signal:
+            msg = f"""
+🚀 STRATEGY: 15M INSIDE BAR + OI
 
-    lines = []
-    for row in rows[:max_rows]:
-        lines.append(
-            f"{int(row['strike'])} | "
-            f"CE OI:{human_format(row['call_oi'])} {arrow(row['call_oi'])} "
-            f"OICh:{human_format(row['call_oich'])} {arrow(row['call_oich'])} | "
-            f"PE OI:{human_format(row['put_oi'])} {arrow(row['put_oi'])} "
-            f"OICh:{human_format(row['put_oich'])} {arrow(row['put_oich'])}"
-        )
-    return lines
+Symbol: M&M
+Side: {signal['side']}
 
-# ================= MAIN =================
-def main():
-    # Historical candles
-    daily_resp = fetch_history(EQ_SYMBOL, "D", 10)
-    m5_resp = fetch_history(EQ_SYMBOL, 5, 5)
-    m15_resp = fetch_history(EQ_SYMBOL, 15, 5)
+Entry : {signal['entry']}
+SL    : {signal['sl']}
+Target: {signal['target']}
 
-    daily = daily_resp.get("candles", [])
-    m5 = m5_resp.get("candles", [])
-    m15 = m15_resp.get("candles", [])
+OI Confirm: {signal['oi']}
+Time: {now().strftime('%H:%M:%S')}
+"""
+            send(msg)
+            last_signal = signal
 
-    prev_daily = daily[-2] if len(daily) >= 2 else None
-    last_daily = daily[-1] if len(daily) >= 1 else None
+        time.sleep(CHECK_INTERVAL)
 
-    # Quotes fallback for spot fields
-    q = fetch_quotes(EQ_SYMBOL)
-
-    # Option chain
-    oi_resp = fetch_option_chain(EQ_SYMBOL, STRIKECOUNT, "")
-    option_rows = extract_options_chain_list(oi_resp)
-    parsed_rows = normalize_chain_fast(option_rows)
-
-    summary = [
-        f"✅ M&M DATA CHECK",
-        "",
-        f"SYMBOL: {EQ_SYMBOL}",
-        "",
-        "=== SPOT FROM QUOTES ===",
-        f"LTP       : {q.get('ltp', 0.0)}",
-        f"Open      : {q.get('open', 0.0)}",
-        f"High      : {q.get('high', 0.0)}",
-        f"Low       : {q.get('low', 0.0)}",
-        f"Prev Close: {q.get('prev_close', 0.0)}",
-        "",
-        "=== DAILY ===",
-        f"Daily status: {daily_resp.get('s', 'NA')}",
-        f"Daily candles count: {len(daily)}",
-        f"Previous Daily:\n{fmt_candle(prev_daily)}",
-        "",
-        f"Last Daily:\n{fmt_candle(last_daily)}",
-        "",
-        "=== 5 MIN ===",
-        f"5m status: {m5_resp.get('s', 'NA')}",
-        f"5m candles count: {len(m5)}",
-        f"First 5m:\n{fmt_candle(m5[0] if len(m5) >= 1 else None)}",
-        "",
-        f"Second 5m:\n{fmt_candle(m5[1] if len(m5) >= 2 else None)}",
-        "",
-        "=== 15 MIN ===",
-        f"15m status: {m15_resp.get('s', 'NA')}",
-        f"15m candles count: {len(m15)}",
-        f"First 15m:\n{fmt_candle(m15[0] if len(m15) >= 1 else None)}",
-        "",
-        f"Second 15m:\n{fmt_candle(m15[1] if len(m15) >= 2 else None)}",
-        "",
-        "=== OPTION CHAIN / OI ===",
-        f"OI status: {oi_resp.get('s', 'NA')}",
-        f"Option rows count: {len(option_rows)}",
-        f"Parsed strikes count: {len(parsed_rows)}",
-        "",
-        "=== OI DATA ===",
-    ]
-    summary.extend(build_oi_lines(parsed_rows, 12))
-
-    send("\n".join(summary))
-
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(5)
