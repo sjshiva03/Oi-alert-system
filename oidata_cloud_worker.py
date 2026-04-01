@@ -239,6 +239,7 @@ def analyze_gapup_sell(symbol):
     valid = (
         o > prev_high and
         gap_pct >= GAPUP_MIN_PCT and
+        
  def analyze_15m_inside(symbol):
     day_15m = get_analysis_day_candles(symbol, 15, 5)
     if len(day_15m) < 2:
