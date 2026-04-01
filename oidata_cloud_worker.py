@@ -597,6 +597,7 @@ def maybe_send_oi_update(trade, ltp):
         return
 
     bias, action = classify_bias(snapshot, trade["side"])
+
     lines = [
         "📊 OI UPDATE (5 MIN)",
         "",
@@ -608,8 +609,10 @@ def maybe_send_oi_update(trade, ltp):
         f"Spot: {round(ltp, 2)}",
         "",
     ]
+
     for row in snapshot:
         lines.append(f"{int(row['strike'])}  CE:{row['ce_text']} | PE:{row['pe_text']}")
+
     lines += [
         "",
         f"Bias   : {bias}",
@@ -617,6 +620,7 @@ def maybe_send_oi_update(trade, ltp):
         "",
         f"Time   : {ist_time_str()}",
     ]
+
     send("\n".join(lines))
     trade["last_oi_update_ts"] = time.time()
 
@@ -755,3 +759,196 @@ def check_15m_breakout(symbol, ltp):
             f"Target: {round(target, 2)}",
             f"SL    : {round(stoploss, 2)}",
             "",
+            f"OI Bias : {bias}",
+            f"Action  : {action}",
+            "",
+            f"Time    : {ist_time_str()}",
+        ])
+        send(msg)
+        register_trade("15 Min Breakout", symbol, "BUY", entry, target, stoploss, oi_snapshot)
+        return
+
+    if ltp < l1 and trade_key("15 Min Breakdown", symbol) not in active_trades:
+        oi_snapshot = get_oi_snapshot(symbol, ltp)
+        bias, action = classify_bias(oi_snapshot, "SELL")
+        entry = l1
+        target = entry * (1 - TARGET_PCT)
+        stoploss = h1 * (1 + SL_BUFFER_PCT)
+
+        msg = "\n".join([
+            "🕯️ 15M BREAKOUT 🕯️",
+            "",
+            name(symbol),
+            "",
+            "Strategy : 15 Min Inside Candle Breakdown",
+            "Type     : SELL",
+            "",
+            f"Entry : {round(entry, 2)} ↓ Break",
+            f"Spot  : {round(ltp, 2)}",
+            f"Target: {round(target, 2)}",
+            f"SL    : {round(stoploss, 2)}",
+            "",
+            f"OI Bias : {bias}",
+            f"Action  : {action}",
+            "",
+            f"Time    : {ist_time_str()}",
+        ])
+        send(msg)
+        register_trade("15 Min Breakdown", symbol, "SELL", entry, target, stoploss, oi_snapshot)
+
+def check_pivot_sell(symbol, ltp, new_pivot_names):
+    c30 = get_today_30m_candles(symbol)
+    if len(c30) < 2:
+        return
+
+    highs = [c[2] for c in c30[:-1]]
+    lows = [c[3] for c in c30[:-1]]
+    if not highs or not lows:
+        return
+
+    close_prev = c30[-2][4]
+    h = max(highs)
+    l = min(lows)
+    p = (h + l + close_prev) / 3
+    levels = {
+        "P": p,
+        "R1": 2 * p - l,
+        "R2": p + (h - l),
+        "R3": h + 2 * (p - l),
+    }
+
+    c1 = c30[-2]
+    c2 = c30[-1]
+
+    for level_name, level_value in levels.items():
+        c1_green = c1[4] > c1[1]
+        c2_red = c2[4] < c2[1]
+        c1_touch = c1[3] <= level_value <= c1[2]
+        c2_touch = c2[3] <= level_value <= c2[2]
+        c2_below = c2[4] < level_value
+
+        if c1_green and c1_touch and c2_red and c2_touch and c2_below:
+            n = name(symbol)
+            if n not in pivot_alert_seen_for_day:
+                new_pivot_names.add(n)
+
+            entry = c2[3]
+            if ltp <= entry and trade_key("Pivot Rejection", symbol) not in active_trades:
+                oi_snapshot = get_oi_snapshot(symbol, ltp)
+                bias, action = classify_bias(oi_snapshot, "SELL")
+                target = entry * (1 - TARGET_PCT)
+                stoploss = max(c1[2], c2[2]) * (1 + SL_BUFFER_PCT)
+
+                msg = "\n".join([
+                    "⛔ PIVOT ALERT ⛔",
+                    "",
+                    n,
+                    "",
+                    f"Strategy : Pivot Rejection ({level_name})",
+                    "Type     : SELL",
+                    "",
+                    f"Entry : {round(entry, 2)} ↓ Break",
+                    f"Spot  : {round(ltp, 2)}",
+                    f"Target: {round(target, 2)}",
+                    f"SL    : {round(stoploss, 2)}",
+                    "",
+                    f"OI Bias : {bias}",
+                    "Reason  : CE Writing at resistance",
+                    "",
+                    f"Action  : {action}",
+                    "",
+                    f"Time    : {ist_time_str()}",
+                ])
+                send(msg)
+                register_trade("Pivot Rejection", symbol, "SELL", entry, target, stoploss, oi_snapshot)
+            break
+
+# ================= MAIN =================
+def main():
+    global eod_sent_for_day, gap_setup_done_for_day, full_setup_done_for_day
+
+    log("Bot started.")
+    send("🚀 Ultimate bot started with late-start history logic + debug + scheduler + holidays + rate limit protection")
+
+    while True:
+        now = now_ist()
+        today = today_ist_str()
+
+        if not is_market_open():
+            if now.time() > dtime(15, 30) and eod_sent_for_day != today:
+                try:
+                    refresh_quotes_only()
+                    close_all_open_trades_day_end()
+                except Exception as e:
+                    log(f"EOD close error: {e}")
+
+                send(build_eod_summary())
+                eod_sent_for_day = today
+                sleep_until_next_market_open()
+                reset_next_day_state()
+                continue
+
+            sleep_until_next_market_open()
+            reset_next_day_state()
+            continue
+
+        # Late-start friendly setup
+        if gap_setup_done_for_day != today and now.time() >= dtime(9, 20):
+            load_gapup_caches()
+            gap_setup_done_for_day = today
+            send_gapup_summary_if_due()
+
+            for s in DEBUG_STOCKS:
+                if s in SYMBOLS:
+                    debug_stock_history(s)
+
+        if full_setup_done_for_day != today and now.time() >= dtime(9, 45):
+            load_full_caches()
+            full_setup_done_for_day = today
+            send_inside15_summary_if_due()
+
+            for s in DEBUG_STOCKS:
+                if s in SYMBOLS:
+                    debug_stock_history(s)
+
+        refresh_quotes_only()
+
+        if gap_setup_done_for_day == today or full_setup_done_for_day == today:
+            debug_selected_stocks_once()
+
+        if gap_setup_done_for_day == today:
+            for symbol, ltp in cache["quotes"].items():
+                try:
+                    check_gapup_sell(symbol, ltp)
+                except Exception as e:
+                    log(f"Gap strategy error {symbol}: {e}")
+
+        if full_setup_done_for_day == today:
+            new_pivot_names = set()
+
+            for symbol, ltp in cache["quotes"].items():
+                try:
+                    check_15m_breakout(symbol, ltp)
+                    check_pivot_sell(symbol, ltp, new_pivot_names)
+                except Exception as e:
+                    log(f"15m/pivot strategy error {symbol}: {e}")
+
+            if new_pivot_names:
+                pivot_alert_seen_for_day.update(new_pivot_names)
+                send_pivot_watch_summary_if_new(new_pivot_names)
+
+        for key in list(active_trades.keys()):
+            trade = active_trades.get(key)
+            if not trade:
+                continue
+
+            ltp = float(cache["quotes"].get(trade["symbol"], trade["entry"]))
+            manage_trade_by_price(trade, ltp)
+
+            if key in active_trades:
+                maybe_send_oi_update(active_trades[key], ltp)
+
+        time.sleep(POLL_SECONDS)
+
+if __name__ == "__main__":
+    main()
