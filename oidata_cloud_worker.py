@@ -142,20 +142,41 @@ def run_after_market():
         except Exception as e:
             print("error",sym,e)
 
-    # ================= SEND =================
-    msg = "📘 AFTER MARKET RESULTS\n\n"
+    # ================= SEND CLEAN =================
 
-    msg += "⚡ GAP UP ⚡\n"
-    for x in gap_list:
-        msg += f"{x[0]}\nEntry:{x[1]} Target:{x[2]} SL:{x[3]}\n{x[4]} Exit:{x[5]} P/L:{x[6]}\n\n"
+def send_clean(gap_list, inside_list):
 
-    msg += "🕯️ 15M INSIDE + OI\n"
-    for x in inside_list:
-        msg += f"{x[0]} {x[1]}\nEntry:{x[2]} Target:{x[3]} SL:{x[4]}\n{x[5]} Exit:{x[6]} P/L:{x[7]}\n\n"
+    # ---------- GAP ----------
+    if gap_list:
+        msg = "⚡ GAP UP ⚡\n\n"
+        msg += f"Stocks: {len(gap_list)}\n"
+        msg += ", ".join([x[0].split(":")[1].replace("-EQ","") for x in gap_list])
+        send(msg)
+    else:
+        send("⚡ GAP UP ⚡\n\nNone")
 
-    send(msg)
+    # ---------- INSIDE ----------
+    if inside_list:
+        msg = "🕯️ 15M INSIDE + OI\n\n"
+        for x in inside_list:
+            name = x[0].split(":")[1].replace("-EQ","")
+            msg += f"{name} → {x[1]}\n"
+        send(msg)
+    else:
+        send("🕯️ 15M INSIDE + OI\n\nNone")
 
-    send("🌙 Market Closed\nNext open 09:15 IST")
+    # ---------- RESULTS ----------
+    if inside_list:
+        msg = "📘 AFTER MARKET RESULTS\n\n"
+
+        for x in inside_list:
+            name = x[0].split(":")[1].replace("-EQ","")
+
+            msg += f"{name} {x[1]}\n"
+            msg += f"Entry:{x[2]} Target:{x[3]} SL:{x[4]}\n"
+            msg += f"{x[5]} Exit:{x[6]} P/L:{x[7]}\n\n"
+
+        send(msg)
 
 # ================= RUN =================
 send("🚀 BOT STARTED")
