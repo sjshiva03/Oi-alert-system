@@ -1,5 +1,4 @@
 import os
-import json
 import requests
 from datetime import datetime, timedelta, timezone
 from fyers_apiv3 import fyersModel
@@ -30,9 +29,6 @@ fyers = fyersModel.FyersModel(
 def now_ist():
     return datetime.now(IST)
 
-def log(msg: str):
-    print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
-
 def send(msg: str):
     print(msg)
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -60,16 +56,13 @@ def human_format(n):
     n = abs(n)
 
     if n >= 10000000:
-        v = n / 10000000
-        s = f"{v:.2f}".rstrip("0").rstrip(".")
+        s = f"{n/10000000:.2f}".rstrip("0").rstrip(".")
         return f"{sign}{s}Cr"
     elif n >= 100000:
-        v = n / 100000
-        s = f"{v:.2f}".rstrip("0").rstrip(".")
+        s = f"{n/100000:.2f}".rstrip("0").rstrip(".")
         return f"{sign}{s}L"
     elif n >= 1000:
-        v = n / 1000
-        s = f"{v:.2f}".rstrip("0").rstrip(".")
+        s = f"{n/1000:.2f}".rstrip("0").rstrip(".")
         return f"{sign}{s}K"
     else:
         if float(n).is_integer():
@@ -85,25 +78,15 @@ def arrow(v):
     return "→"
 
 def candle_dt(ts):
-    return datetime.fromtimestamp(ts, IST)
+    return datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M")
 
 def fmt_candle(c):
     if not c:
         return "None"
-    dt = candle_dt(c[0]).strftime("%Y-%m-%d %H:%M")
     vol = c[5] if len(c) > 5 else "NA"
-    return f"{dt}\nO:{c[1]} H:{c[2]} L:{c[3]} C:{c[4]} V:{vol}"
+    return f"{candle_dt(c[0])}\nO:{c[1]} H:{c[2]} L:{c[3]} C:{c[4]} V:{vol}"
 
-def compact(obj, limit=1200):
-    try:
-        s = json.dumps(obj, ensure_ascii=False)
-    except Exception:
-        s = str(obj)
-    if len(s) > limit:
-        return s[:limit] + " ...[truncated]"
-    return s
-
-# ================= FYERS CALLS =================
+# ================= API CALLS =================
 def fetch_history(symbol, resolution, days=10):
     payload = {
         "symbol": symbol,
@@ -129,6 +112,34 @@ def fetch_option_chain(symbol, strikecount=15, timestamp=""):
     except TypeError:
         return fyers.optionchain(payload)
 
+def fetch_quotes(symbol):
+    payload = {"symbols": symbol}
+    try:
+        resp = fyers.quotes(data=payload)
+    except TypeError:
+        resp = fyers.quotes(payload)
+    except Exception:
+        return {}
+
+    if not isinstance(resp, dict):
+        return {}
+
+    items = resp.get("d") or []
+    if not items:
+        return {}
+
+    item = items[0] if isinstance(items[0], dict) else {}
+    vals = item.get("v") or {}
+
+    return {
+        "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
+        "open": safe_float(vals.get("open_price") or vals.get("open") or vals.get("openPrice"), 0.0),
+        "high": safe_float(vals.get("high_price") or vals.get("high") or vals.get("highPrice"), 0.0),
+        "low": safe_float(vals.get("low_price") or vals.get("low") or vals.get("lowPrice"), 0.0),
+        "prev_close": safe_float(vals.get("prev_close_price") or vals.get("prev_close") or vals.get("prevClose"), 0.0),
+        "raw": vals
+    }
+
 def extract_options_chain_list(resp):
     if not isinstance(resp, dict):
         return []
@@ -144,25 +155,8 @@ def extract_options_chain_list(resp):
 
     return []
 
-def extract_underlying_ltp(resp):
-    if not isinstance(resp, dict):
-        return 0.0
-
-    data = resp.get("data", {})
-    if not isinstance(data, dict):
-        return 0.0
-
-    for key in ["ltp", "underlying_ltp", "underlyingLtp", "underlying_price", "underlyingPrice"]:
-        if key in data:
-            return safe_float(data.get(key), 0.0)
-
-    return 0.0
-
-# ================= SAME OI PARSER AS YOUR FILE =================
+# ================= OI PARSER =================
 def normalize_chain_fast(options_list):
-    """
-    Same logic style as your OIDATA file.
-    """
     call_map = {}
     put_map = {}
 
@@ -191,55 +185,39 @@ def normalize_chain_fast(options_list):
             or ""
         ).upper().strip()
 
-        symbol = x.get("symbol", "")
-        ltp = safe_float(x.get("ltp") or x.get("last_price") or x.get("lastPrice"), 0.0)
-        api_chg = safe_float(x.get("chg") or x.get("change") or x.get("ch"), 0.0)
+        sym = str(x.get("symbol", "")).upper()
 
         row = {
-            "symbol": symbol,
-            "ltp": ltp,
-            "chg": api_chg,
-            "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility")),
-            "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest")),
-            "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange")),
-            "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol")),
+            "ltp": safe_float(x.get("ltp") or x.get("last_price") or x.get("lastPrice"), 0.0),
+            "chg": safe_float(x.get("chg") or x.get("change") or x.get("ch"), 0.0),
+            "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility"), 0.0),
+            "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0),
+            "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange"), 0.0),
+            "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol"), 0.0),
         }
 
-        sym_upper = str(symbol).upper()
-        if option_type in ("CE", "CALL", "C") or sym_upper.endswith("CE"):
+        if option_type in ("CE", "CALL", "C") or sym.endswith("CE"):
             call_map[int(strike)] = row
-        elif option_type in ("PE", "PUT", "P") or sym_upper.endswith("PE"):
+        elif option_type in ("PE", "PUT", "P") or sym.endswith("PE"):
             put_map[int(strike)] = row
 
     strikes = sorted(set(call_map.keys()) | set(put_map.keys()))
-    final_rows = []
+    rows = []
 
     for strike in strikes:
         c = call_map.get(strike, {})
         p = put_map.get(strike, {})
-
-        final_rows.append({
+        rows.append({
             "strike": int(strike),
-
-            "call_ltp": c.get("ltp", 0.0),
-            "call_chg": c.get("chg", 0.0),
-            "call_iv": c.get("iv", 0.0),
             "call_oi": c.get("oi", 0.0),
             "call_oich": c.get("oi_change", 0.0),
-            "call_volume": c.get("volume", 0.0),
-
-            "put_ltp": p.get("ltp", 0.0),
-            "put_chg": p.get("chg", 0.0),
-            "put_iv": p.get("iv", 0.0),
             "put_oi": p.get("oi", 0.0),
             "put_oich": p.get("oi_change", 0.0),
-            "put_volume": p.get("volume", 0.0),
         })
 
-    return final_rows
+    return rows
 
-# ================= DEBUG REPORT =================
-def build_oi_lines(rows, max_rows=10):
+def build_oi_lines(rows, max_rows=12):
     if not rows:
         return ["No parsed OI rows"]
 
@@ -254,8 +232,9 @@ def build_oi_lines(rows, max_rows=10):
         )
     return lines
 
+# ================= MAIN =================
 def main():
-    # 1) Candle checks
+    # Historical candles
     daily_resp = fetch_history(EQ_SYMBOL, "D", 10)
     m5_resp = fetch_history(EQ_SYMBOL, 5, 5)
     m15_resp = fetch_history(EQ_SYMBOL, 15, 5)
@@ -267,17 +246,25 @@ def main():
     prev_daily = daily[-2] if len(daily) >= 2 else None
     last_daily = daily[-1] if len(daily) >= 1 else None
 
-    # 2) Option chain on SAME symbol style as your working file
+    # Quotes fallback for spot fields
+    q = fetch_quotes(EQ_SYMBOL)
+
+    # Option chain
     oi_resp = fetch_option_chain(EQ_SYMBOL, STRIKECOUNT, "")
     option_rows = extract_options_chain_list(oi_resp)
-    underlying_ltp = extract_underlying_ltp(oi_resp)
     parsed_rows = normalize_chain_fast(option_rows)
 
-    # 3) Send concise summary
     summary = [
-        f"✅ M&M DEBUG CHECK",
+        f"✅ M&M DATA CHECK",
         "",
-        f"EQ SYMBOL: {EQ_SYMBOL}",
+        f"SYMBOL: {EQ_SYMBOL}",
+        "",
+        "=== SPOT FROM QUOTES ===",
+        f"LTP       : {q.get('ltp', 0.0)}",
+        f"Open      : {q.get('open', 0.0)}",
+        f"High      : {q.get('high', 0.0)}",
+        f"Low       : {q.get('low', 0.0)}",
+        f"Prev Close: {q.get('prev_close', 0.0)}",
         "",
         "=== DAILY ===",
         f"Daily status: {daily_resp.get('s', 'NA')}",
@@ -300,36 +287,16 @@ def main():
         "",
         f"Second 15m:\n{fmt_candle(m15[1] if len(m15) >= 2 else None)}",
         "",
-        "=== OPTION CHAIN ===",
+        "=== OPTION CHAIN / OI ===",
         f"OI status: {oi_resp.get('s', 'NA')}",
         f"Option rows count: {len(option_rows)}",
-        f"Underlying LTP: {underlying_ltp}",
         f"Parsed strikes count: {len(parsed_rows)}",
         "",
         "=== OI DATA ===",
     ]
     summary.extend(build_oi_lines(parsed_rows, 12))
+
     send("\n".join(summary))
-
-    # 4) Send raw sample too
-    raw_msg = [
-        "🔍 RAW OPTIONCHAIN SAMPLE",
-        "",
-        f"Top response keys: {list(oi_resp.keys()) if isinstance(oi_resp, dict) else 'NA'}",
-        "",
-        f"Raw response sample:\n{compact(oi_resp, 1500)}"
-    ]
-    send("\n".join(raw_msg))
-
-    if option_rows:
-        first_row_msg = [
-            "🧪 FIRST OPTION ROW SAMPLE",
-            "",
-            f"Row keys: {', '.join(list(option_rows[0].keys())[:50])}",
-            "",
-            compact(option_rows[0], 1500)
-        ]
-        send("\n".join(first_row_msg))
 
 if __name__ == "__main__":
     main()
