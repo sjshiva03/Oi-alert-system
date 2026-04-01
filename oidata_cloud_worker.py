@@ -1,17 +1,23 @@
+import os
 import time
 import requests
 from datetime import datetime, timedelta, timezone
 from collections import deque
 from fyers_apiv3 import fyersModel
 
-# ================= CONFIG =================
-CLIENT_ID = open("client_id.txt").read().strip()
-ACCESS_TOKEN = open("access_token.txt").read().strip()
+# ================= ENV =================
+CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
+ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-TELEGRAM_TOKEN = "YOUR_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+if not CLIENT_ID or not ACCESS_TOKEN:
+    raise Exception("❌ Missing FYERS credentials in ENV")
 
-SYMBOLS = open("Nifty50.txt").read().replace("\n", ",").split(",")
+# ================= SETTINGS =================
+SYMBOLS = [
+    "NSE:RELIANCE-EQ","NSE:TCS-EQ","NSE:HDFCBANK-EQ","NSE:ICICIBANK-EQ"
+]  # add your 50 stocks
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -45,28 +51,30 @@ rl = RateLimiter()
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, log_path="")
 
-def quotes():
+def get_quotes():
     rl.wait()
     data = fyers.quotes({"symbols": ",".join(SYMBOLS)})
     return {i["n"]: i["v"]["lp"] for i in data["d"]}
 
-def history(sym, res):
+def get_history(symbol, resolution):
     rl.wait()
     today = datetime.now().strftime("%Y-%m-%d")
     past = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
 
-    return fyers.history({
-        "symbol": sym,
-        "resolution": str(res),
+    data = fyers.history({
+        "symbol": symbol,
+        "resolution": str(resolution),
         "date_format": "1",
         "range_from": past,
         "range_to": today,
         "cont_flag": "1"
-    }).get("candles", [])
+    })
 
-def option_chain(sym):
+    return data.get("candles", [])
+
+def get_option_chain(symbol):
     rl.wait()
-    return fyers.optionchain({"symbol": sym, "strikecount": 12})
+    return fyers.optionchain({"symbol": symbol, "strikecount": 12})
 
 # ================= TELEGRAM =================
 def send(msg):
@@ -85,78 +93,81 @@ def name(sym):
 def now_time():
     return datetime.now(IST).strftime("%H:%M:%S")
 
-def chunk(lst,n):
-    for i in range(0,len(lst),n):
+def chunk(lst, n):
+    for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
 # ================= CACHE =================
-cache = {"5":{}, "15":{}, "30":{}, "quotes":{}}
+cache = {"quotes":{}, "15m":{}}
 trades = {}
-sent_alerts = set()
+alerts_sent = set()
 
-# ================= DATA =================
-def refresh_data():
-    cache["quotes"] = quotes()
-
+# ================= LOAD DATA =================
+def load_15m():
     for batch in chunk(SYMBOLS,5):
         for s in batch:
-            cache["15"][s] = history(s,15)
+            cache["15m"][s] = get_history(s,15)
         time.sleep(1)
 
 # ================= OI =================
-def get_oi(sym, ltp):
-    data = option_chain(sym)
+def get_oi(symbol, ltp):
+    data = get_option_chain(symbol)
     rows = data["data"]["optionsChain"]
 
     strikes = sorted(set(r["strike_price"] for r in rows))
     near = min(strikes, key=lambda x: abs(x-ltp))
     idx = strikes.index(near)
 
-    sel = strikes[max(0,idx-1):idx+3]
+    selected = strikes[max(0,idx-1):idx+3]
 
-    out=[]
-    ce_strong=0
-    pe_strong=0
+    result = []
+    ce_count = 0
+    pe_count = 0
 
-    for s in sel:
-        ce=pe=0
+    for s in selected:
+        ce = pe = 0
         for r in rows:
-            if r["strike_price"]==s:
-                if r["type"]=="CE": ce=r["oi_change"]
-                if r["type"]=="PE": pe=r["oi_change"]
+            if r["strike_price"] == s:
+                if r["type"] == "CE":
+                    ce = r["oi_change"]
+                if r["type"] == "PE":
+                    pe = r["oi_change"]
 
-        if ce>0: ce_strong+=1
-        if pe>0: pe_strong+=1
+        if ce > 0: ce_count += 1
+        if pe > 0: pe_count += 1
 
-        out.append((s,ce,pe))
+        result.append((s, ce, pe))
 
     # bias
-    if ce_strong>=2 and pe_strong==0:
-        bias="🔴 STRONG SELL"
-        action="HOLD SELL"
-    elif pe_strong>=2 and ce_strong==0:
-        bias="🟢 STRONG BUY"
-        action="HOLD BUY"
+    if ce_count >= 2 and pe_count == 0:
+        bias = "🔴 STRONG SELL"
+        action = "HOLD SELL"
+    elif pe_count >= 2 and ce_count == 0:
+        bias = "🟢 STRONG BUY"
+        action = "HOLD BUY"
     else:
-        bias="⚪ SIDEWAYS"
-        action="WAIT"
+        bias = "⚪ SIDEWAYS"
+        action = "WAIT"
 
-    return out,bias,action
+    return result, bias, action
 
 # ================= STRATEGY =================
-def check_15m_breakout(sym,ltp):
+def breakout_15m(symbol, ltp):
     try:
-        c1 = cache["15"][sym][0]
+        c1 = cache["15m"][symbol][0]
 
-        if ltp > c1[2]:
-            return "BUY",c1
-        elif ltp < c1[3]:
-            return "SELL",c1
+        high = c1[2]
+        low = c1[3]
+
+        if ltp > high:
+            return "BUY", high, low
+        elif ltp < low:
+            return "SELL", high, low
     except:
-        return None,None
+        return None, None, None
 
-# ================= MAIN =================
-setup_done=False
+# ================= MAIN LOOP =================
+setup_done = False
 
 while True:
 
@@ -166,96 +177,89 @@ while True:
         time.sleep(30)
         continue
 
-    # setup once
+    # load data once
     if not setup_done and now > datetime.strptime("09:45","%H:%M").time():
-        refresh_data()
-        setup_done=True
+        load_15m()
+        setup_done = True
+        print("✅ 15m Data Loaded")
 
-    cache["quotes"] = quotes()
+    # live quotes
+    cache["quotes"] = get_quotes()
 
-    for s,ltp in cache["quotes"].items():
+    for symbol, ltp in cache["quotes"].items():
 
-        # skip duplicate
-        if (s,"ENTRY") in sent_alerts:
-            pass
+        side, high, low = breakout_15m(symbol, ltp)
 
-        side,candle = check_15m_breakout(s,ltp)
+        if side and symbol not in trades:
 
-        if side and s not in trades:
+            oi, bias, action = get_oi(symbol, ltp)
 
-            oi,bias,action = get_oi(s,ltp)
-
-            entry = candle[2] if side=="BUY" else candle[3]
-            sl = candle[3] if side=="BUY" else candle[2]
+            entry = high if side=="BUY" else low
+            sl = low if side=="BUY" else high
             target = entry*1.01 if side=="BUY" else entry*0.99
 
-            msg=f"""
-🕯️ 15M BREAKOUT 🕯️
+            msg = f"""
+🕯️ 15M BREAKOUT
 
-{name(s)}
+{name(symbol)}
 
-Strategy : 15 Min Breakout
-Type     : {side}
+Side   : {side}
+Entry  : {entry}
+LTP    : {ltp}
+Target : {round(target,2)}
+SL     : {sl}
 
-Entry : {entry}
-Spot  : {ltp}
-Target: {round(target,2)}
-SL    : {sl}
+OI Bias: {bias}
+Action : {action}
 
-OI Bias : {bias}
-
-Action  : {action}
-
-Time    : {now_time()}
+Time   : {now_time()}
 """
 
             send(msg)
 
-            trades[s]={
-                "side":side,
-                "entry":entry,
-                "sl":sl,
-                "target":target,
-                "last_oi":0
+            trades[symbol] = {
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "target": target,
+                "last_oi": 0
             }
 
-            sent_alerts.add((s,"ENTRY"))
+        # ================= TRADE MANAGEMENT =================
+        if symbol in trades:
+            t = trades[symbol]
 
-        # ================= TRADE MGMT =================
-        if s in trades:
-            t = trades[s]
+            # TARGET / SL
+            if t["side"] == "BUY":
+                if ltp >= t["target"]:
+                    send(f"🎯 TARGET HIT\n{name(symbol)}")
+                    del trades[symbol]
+                elif ltp <= t["sl"]:
+                    send(f"🛑 STOPLOSS HIT\n{name(symbol)}")
+                    del trades[symbol]
 
-            # SL / TARGET
-            if t["side"]=="BUY":
-                if ltp>=t["target"]:
-                    send(f"🎯 TARGET HIT\n{name(s)}")
-                    del trades[s]
-                elif ltp<=t["sl"]:
-                    send(f"🛑 STOPLOSS\n{name(s)}")
-                    del trades[s]
+            elif t["side"] == "SELL":
+                if ltp <= t["target"]:
+                    send(f"🎯 TARGET HIT\n{name(symbol)}")
+                    del trades[symbol]
+                elif ltp >= t["sl"]:
+                    send(f"🛑 STOPLOSS HIT\n{name(symbol)}")
+                    del trades[symbol]
 
-            if t["side"]=="SELL":
-                if ltp<=t["target"]:
-                    send(f"🎯 TARGET HIT\n{name(s)}")
-                    del trades[s]
-                elif ltp>=t["sl"]:
-                    send(f"🛑 STOPLOSS\n{name(s)}")
-                    del trades[s]
+            # ================= OI UPDATE EVERY 5 MIN =================
+            if time.time() - t["last_oi"] > 300:
 
-            # ================= 5 MIN OI UPDATE =================
-            if time.time()-t["last_oi"]>300:
-                oi,bias,action=get_oi(s,ltp)
+                oi, bias, action = get_oi(symbol, ltp)
 
-                lines=[f"📊 OI UPDATE\n\n{name(s)}\n"]
+                msg = f"\n📊 OI UPDATE - {name(symbol)}\n\n"
 
-                for r in oi:
-                    lines.append(f"{r[0]} CE:{r[1]} | PE:{r[2]}")
+                for s, ce, pe in oi:
+                    msg += f"{s} → CE:{ce} | PE:{pe}\n"
 
-                lines.append(f"\nBias: {bias}")
-                lines.append(f"Action: {action}")
+                msg += f"\nBias: {bias}\nAction: {action}"
 
-                send("\n".join(lines))
+                send(msg)
 
-                t["last_oi"]=time.time()
+                t["last_oi"] = time.time()
 
     time.sleep(20)
