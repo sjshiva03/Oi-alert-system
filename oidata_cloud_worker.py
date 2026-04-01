@@ -1,7 +1,6 @@
 import os
-import time
 import requests
-from datetime import datetime, timedelta, timezone, time as dtime
+from datetime import datetime, timedelta, timezone
 from fyers_apiv3 import fyersModel
 
 # ================= CONFIG =================
@@ -11,56 +10,27 @@ CLIENT_ID = (os.getenv("FYERS_CLIENT_ID") or "").strip()
 ACCESS_TOKEN = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
-AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "false").strip().lower() == "true")
-
-# Holiday list optional
-NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
-
-# Variables from Railway
-GAPUP_MIN_PCT = float(os.getenv("GAPUP_MIN_PCT", "0.0"))                       # extra filter on open vs prev high %
-GAPUP_CANDLE_MAX_PCT = float(os.getenv("GAPUP_CANDLE_MAX_PCT", "1.5"))         # first 5m candle max range %
-INSIDE15_FIRST_CANDLE_MAX_PCT = float(os.getenv("INSIDE15_FIRST_CANDLE_MAX_PCT", "2.0"))
-TARGET_PCT = float(os.getenv("TARGET_PCT", "1.0")) / 100.0                     # 1.0 => 1%
-SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.1")) / 100.0               # 0.1 => 0.1%
+SYMBOL = "NSE:M&M-EQ"   # test stock
+STRIKECOUNT = 12
 
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
-if not WATCHLIST_RAW:
-    raise Exception("Missing WATCHLIST")
 
-# ================= WATCHLIST =================
-def convert_symbol(sym: str) -> str:
-    s = sym.strip().upper()
-    if not s:
-        return ""
-    if ":" in s:
-        return s
-    if s in {"NIFTY", "NIFTY50"}:
-        return "NSE:NIFTY50-INDEX"
-    if s == "BANKNIFTY":
-        return "NSE:NIFTYBANK-INDEX"
-    return f"NSE:{s}-EQ"
-
-SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
+# ================= FYERS =================
+fyers = fyersModel.FyersModel(
+    client_id=CLIENT_ID,
+    token=ACCESS_TOKEN,
+    log_path=""
+)
 
 # ================= HELPERS =================
 def now_ist():
     return datetime.now(IST)
 
-def today_str():
-    return now_ist().strftime("%Y-%m-%d")
-
-def log(msg: str):
-    print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
-
-def short_name(symbol: str) -> str:
-    return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
-
 def send(msg: str):
+    print(msg)
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(msg)
         return
     try:
         requests.post(
@@ -68,52 +38,47 @@ def send(msg: str):
             data={"chat_id": CHAT_ID, "text": msg},
             timeout=20,
         )
-    except Exception:
-        print(msg)
+    except Exception as e:
+        print("Telegram error:", e)
 
-def candle_dt(ts: int):
-    return datetime.fromtimestamp(ts, IST)
+def candle_dt(ts: int) -> str:
+    return datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M")
 
-def pct_range(high: float, low: float, close: float) -> float:
-    if close == 0:
-        return 0.0
-    return ((high - low) / close) * 100.0
+def fmt_candle(c):
+    if not c:
+        return "None"
+    return (
+        f"{candle_dt(c[0])}\n"
+        f"O:{c[1]} H:{c[2]} L:{c[3]} C:{c[4]} V:{c[5] if len(c) > 5 else 'NA'}"
+    )
 
-def fmt2(x: float) -> str:
-    return f"{x:.2f}"
+def human_num(v: float) -> str:
+    sign = "+" if v > 0 else ""
+    av = abs(v)
+    if av >= 10000000:
+        return f"{sign}{v/10000000:.2f}Cr".replace(".00", "")
+    if av >= 100000:
+        return f"{sign}{v/100000:.2f}L".replace(".00", "")
+    if av >= 1000:
+        return f"{sign}{v/1000:.2f}K".replace(".00", "")
+    return f"{sign}{v:.0f}"
 
-# ================= MARKET SCHEDULER =================
-def get_holiday_set():
-    out = set()
-    for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
-        p = part.strip()
-        if p:
-            out.add(p)
-    return out
+def arrow(v: float) -> str:
+    if v > 0:
+        return "↑"
+    if v < 0:
+        return "↓"
+    return "→"
 
-HOLIDAYS = get_holiday_set()
+# ================= API CALLS =================
+def get_profile():
+    try:
+        resp = fyers.get_profile()
+        return resp
+    except Exception as e:
+        return {"s": "error", "message": str(e)}
 
-def is_market_day(dt_obj):
-    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in HOLIDAYS
-
-def is_market_open():
-    now = now_ist()
-    return is_market_day(now) and dtime(9, 15) <= now.time() <= dtime(15, 30)
-
-def next_market_open_datetime():
-    now = now_ist()
-    if is_market_day(now) and now.time() < dtime(9, 15):
-        return now.replace(hour=9, minute=15, second=0, microsecond=0)
-
-    candidate = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
-    while not is_market_day(candidate):
-        candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
-    return candidate
-
-# ================= FYERS =================
-fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, log_path="")
-
-def get_history(symbol, resolution, days=10):
+def get_history(symbol: str, resolution, days=5):
     payload = {
         "symbol": symbol,
         "resolution": str(resolution),
@@ -122,371 +87,158 @@ def get_history(symbol, resolution, days=10):
         "range_to": now_ist().strftime("%Y-%m-%d"),
         "cont_flag": "1",
     }
+
     try:
         data = fyers.history(data=payload)
     except TypeError:
         data = fyers.history(payload)
     except Exception as e:
-        log(f"HISTORY ERROR {symbol} {resolution}: {e}")
-        return []
+        return {"s": "error", "message": str(e), "candles": []}
 
-    candles = data.get("candles", [])
-    if not candles:
-        log(f"HISTORY EMPTY {symbol} {resolution}")
-    return candles
+    return data
 
-# ================= CANDLE SELECTION =================
-def get_today_candles(symbol, resolution, days=10):
-    candles = get_history(symbol, resolution, days)
-    td = today_str()
-    out = []
+def get_option_chain(symbol: str):
+    payload = {"symbol": symbol, "strikecount": STRIKECOUNT}
+    try:
+        data = fyers.optionchain(data=payload)
+    except TypeError:
+        data = fyers.optionchain(payload)
+    except Exception as e:
+        return {"s": "error", "message": str(e), "data": {"optionsChain": []}}
 
-    for c in candles:
+    return data
+
+# ================= OI PARSER =================
+def extract_oi_value(row: dict, cp: str) -> float:
+    vals = [
+        row.get("oi_change"),
+        row.get("changeinopeninterest"),
+        row.get("oiChange"),
+        row.get("changeInOpenInterest"),
+        row.get("oich"),
+    ]
+
+    leg = row.get(cp) if isinstance(row.get(cp), dict) else None
+    if leg:
+        vals += [
+            leg.get("oi_change"),
+            leg.get("changeinopeninterest"),
+            leg.get("oiChange"),
+            leg.get("changeInOpenInterest"),
+            leg.get("oich"),
+        ]
+
+    for v in vals:
+        if v is None:
+            continue
         try:
-            if candle_dt(c[0]).strftime("%Y-%m-%d") == td:
-                out.append(c)
+            return float(v)
         except Exception:
             pass
+    return 0.0
 
-    out.sort(key=lambda x: x[0])
-    return out
+def build_oi_summary(rows):
+    if not rows:
+        return "No option chain rows received."
 
-def get_previous_daily(symbol):
-    daily = get_history(symbol, "D", 15)
-    td = today_str()
-    out = []
-    for c in daily:
-        try:
-            ds = candle_dt(c[0]).strftime("%Y-%m-%d")
-            if ds < td:
-                out.append(c)
-        except Exception:
-            pass
-    out.sort(key=lambda x: x[0])
-    return out[-1] if out else None
+    strikes = sorted(set(
+        int(float(r.get("strike_price") or r.get("strikePrice")))
+        for r in rows
+        if (r.get("strike_price") is not None or r.get("strikePrice") is not None)
+    ))
 
-def get_first_5m_candle_today(symbol):
-    c = get_today_candles(symbol, 5, 5)
-    return c[0] if len(c) >= 1 else None
+    if not strikes:
+        return "No strikes found in option chain."
 
-def get_first_two_15m_candles_today(symbol):
-    c = get_today_candles(symbol, 15, 5)
-    if len(c) >= 2:
-        return c[0], c[1]
-    return None, None
+    # show first 6 unique strikes only for debug
+    strikes = strikes[:6]
 
-# ================= RESULT ENGINE =================
-def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
-    """
-    Conservative rule:
-    If both target and stoploss touched in same candle -> Stoploss first
-    """
-    for c in candles_after_entry:
-        high = float(c[2])
-        low = float(c[3])
+    lines = []
+    for strike in strikes:
+        ce_row = None
+        pe_row = None
 
-        if high >= stoploss and low <= target:
-            return "Stoploss 🛑", stoploss
-        if high >= stoploss:
-            return "Stoploss 🛑", stoploss
-        if low <= target:
-            return "Target 🎯", target
+        for r in rows:
+            sp = r.get("strike_price") or r.get("strikePrice")
+            typ = (r.get("type") or "").upper()
+            if sp is None:
+                continue
 
-    if candles_after_entry:
-        return "Day End", float(candles_after_entry[-1][4])
+            try:
+                sp = int(float(sp))
+            except Exception:
+                continue
 
-    return "No Data", entry
+            if sp == strike and typ == "CE":
+                ce_row = r
+            elif sp == strike and typ == "PE":
+                pe_row = r
 
-def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
-    """
-    Conservative rule:
-    If both target and stoploss touched in same candle -> Stoploss first
-    """
-    for c in candles_after_entry:
-        high = float(c[2])
-        low = float(c[3])
+        ce = extract_oi_value(ce_row, "CE") if ce_row else 0.0
+        pe = extract_oi_value(pe_row, "PE") if pe_row else 0.0
 
-        if low <= stoploss and high >= target:
-            return "Stoploss 🛑", stoploss
-        if low <= stoploss:
-            return "Stoploss 🛑", stoploss
-        if high >= target:
-            return "Target 🎯", target
+        lines.append(
+            f"{strike}  CE:{human_num(ce)} {arrow(ce)} | PE:{human_num(pe)} {arrow(pe)}"
+        )
 
-    if candles_after_entry:
-        return "Day End", float(candles_after_entry[-1][4])
-
-    return "No Data", entry
-
-# ================= GAP-UP ANALYSIS =================
-def analyze_gapup_sell(symbol):
-    """
-    Rule:
-    - Open > Previous Day High
-    - gap % >= GAPUP_MIN_PCT
-    - first 5m range % <= GAPUP_CANDLE_MAX_PCT
-    - sell entry = first 5m low
-    - target = entry - TARGET_PCT
-    - sl = first 5m high + buffer
-    """
-    prev_day = get_previous_daily(symbol)
-    first_5m = get_first_5m_candle_today(symbol)
-
-    if prev_day is None or first_5m is None:
-        return None
-
-    prev_high = float(prev_day[2])
-    o = float(first_5m[1])
-    h = float(first_5m[2])
-    l = float(first_5m[3])
-    c = float(first_5m[4])
-
-    gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0.0
-    candle_pct = pct_range(h, l, c)
-
-    valid = (
-        o > prev_high and
-        gap_pct >= GAPUP_MIN_PCT and
-        candle_pct <= GAPUP_CANDLE_MAX_PCT
-    )
-
-    if not valid:
-        return None
-
-    entry = round(l, 2)
-    target = round(entry * (1 - TARGET_PCT), 2)
-    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
-
-    later_5m = get_today_candles(symbol, 5, 5)[1:]
-    result, exit_price = evaluate_sell_result(later_5m, entry, target, stoploss)
-    pl = round(entry - exit_price, 2)
-
-    return {
-        "symbol": short_name(symbol),
-        "strategy": "Gap-Up Breakdown",
-        "type": "SELL",
-        "gap_pct": round(gap_pct, 2),
-        "candle_pct": round(candle_pct, 2),
-        "entry": entry,
-        "target": target,
-        "stoploss": stoploss,
-        "result": result,
-        "exit_price": round(exit_price, 2),
-        "pl": pl,
-    }
-
-# ================= 15M INSIDE ANALYSIS =================
-def analyze_15m_inside(symbol):
-    """
-    Rule:
-    - first 15m candle range % <= INSIDE15_FIRST_CANDLE_MAX_PCT
-    - second 15m candle inside first
-    - buy above first high
-    - sell below first low
-    - evaluate later 15m candles
-    """
-    c1, c2 = get_first_two_15m_candles_today(symbol)
-    if c1 is None or c2 is None:
-        return None
-
-    h1 = float(c1[2])
-    l1 = float(c1[3])
-    c1_close = float(c1[4])
-
-    h2 = float(c2[2])
-    l2 = float(c2[3])
-
-    if c1_close <= 0:
-        return None
-
-    first_range_pct = pct_range(h1, l1, c1_close)
-    inside = h2 < h1 and l2 > l1
-
-    log(f"15M {short_name(symbol)} | H1:{h1} L1:{l1} H2:{h2} L2:{l2} Range%:{first_range_pct:.2f} Inside:{inside}")
-
-    if not (first_range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
-        return None
-
-    later_15m = get_today_candles(symbol, 15, 5)[2:]
-
-    buy_entry = round(h1, 2)
-    buy_target = round(buy_entry * (1 + TARGET_PCT), 2)
-    buy_sl = round(l1 * (1 - SL_BUFFER_PCT), 2)
-    buy_result, buy_exit = evaluate_buy_result(later_15m, buy_entry, buy_target, buy_sl)
-    buy_pl = round(buy_exit - buy_entry, 2)
-
-    sell_entry = round(l1, 2)
-    sell_target = round(sell_entry * (1 - TARGET_PCT), 2)
-    sell_sl = round(h1 * (1 + SL_BUFFER_PCT), 2)
-    sell_result, sell_exit = evaluate_sell_result(later_15m, sell_entry, sell_target, sell_sl)
-    sell_pl = round(sell_entry - sell_exit, 2)
-
-    return {
-        "symbol": short_name(symbol),
-        "range_pct": round(first_range_pct, 2),
-        "first": {
-            "high": round(h1, 2),
-            "low": round(l1, 2),
-        },
-        "second": {
-            "high": round(h2, 2),
-            "low": round(l2, 2),
-        },
-        "buy": {
-            "strategy": "15 Min Inside Candle Breakout",
-            "type": "BUY",
-            "entry": buy_entry,
-            "target": buy_target,
-            "stoploss": buy_sl,
-            "result": buy_result,
-            "exit_price": round(buy_exit, 2),
-            "pl": buy_pl,
-        },
-        "sell": {
-            "strategy": "15 Min Inside Candle Breakdown",
-            "type": "SELL",
-            "entry": sell_entry,
-            "target": sell_target,
-            "stoploss": sell_sl,
-            "result": sell_result,
-            "exit_price": round(sell_exit, 2),
-            "pl": sell_pl,
-        }
-    }
-
-# ================= FORMATTERS =================
-def format_gap_summary(items):
-    if not items:
-        return "⚡Gap up plus⚡\n\nNone"
-
-    lines = ["⚡Gap up plus⚡", ""]
-    for i, x in enumerate(items, 1):
-        lines.append(f"{i}. {x['symbol']} ({x['gap_pct']}%)")
     return "\n".join(lines)
 
-def format_15m_summary(items):
-    if not items:
-        return "🕯️15 Min Inside Candle🕯️\n\nNone"
+# ================= MAIN DEBUG =================
+def main():
+    profile = get_profile()
+    send(f"FYERS PROFILE CHECK:\n{profile}")
 
-    lines = ["🕯️15 Min Inside Candle🕯️", ""]
-    for i, x in enumerate(items, 1):
-        lines += [
-            f"{i}. {x['symbol']}",
-            f"1st Candle  H:{x['first']['high']} L:{x['first']['low']} Range%:{x['range_pct']}",
-            f"2nd Candle  H:{x['second']['high']} L:{x['second']['low']}",
-            f"BUY Entry:{x['buy']['entry']} Target:{x['buy']['target']} SL:{x['buy']['stoploss']}",
-            f"SELL Entry:{x['sell']['entry']} Target:{x['sell']['target']} SL:{x['sell']['stoploss']}",
-            "",
-        ]
-    return "\n".join(lines).strip()
+    # Daily
+    daily_resp = get_history(SYMBOL, "D", 10)
+    daily = daily_resp.get("candles", [])
+    prev_daily = daily[-2] if len(daily) >= 2 else None
+    last_daily = daily[-1] if len(daily) >= 1 else None
 
-def format_after_market_results(gap_results, inside_results):
-    lines = ["📘 AFTER MARKET RESULTS", ""]
+    # 5m
+    m5_resp = get_history(SYMBOL, 5, 5)
+    m5 = m5_resp.get("candles", [])
 
-    if gap_results:
-        lines.append("⚡ GAP UP SELL ⚡")
-        for x in gap_results:
-            sign = "+" if x["pl"] > 0 else ""
-            lines += [
-                x["symbol"],
-                f"Entry    : {x['entry']}",
-                f"Target   : {x['target']}",
-                f"Stoploss : {x['stoploss']}",
-                f"Result   : {x['result']}",
-                f"Exit/LTP : {x['exit_price']}",
-                f"P/L      : {sign}{x['pl']}",
-                "",
-            ]
+    # 15m
+    m15_resp = get_history(SYMBOL, 15, 5)
+    m15 = m15_resp.get("candles", [])
 
-    if inside_results:
-        lines.append("🕯️ 15M INSIDE CANDLE")
-        for x in inside_results:
-            b = x["buy"]
-            s = x["sell"]
-            bsign = "+" if b["pl"] > 0 else ""
-            ssign = "+" if s["pl"] > 0 else ""
+    # Option chain
+    oi_resp = get_option_chain(SYMBOL)
+    oi_rows = oi_resp.get("data", {}).get("optionsChain", [])
 
-            lines += [
-                x["symbol"],
-                f"1st Candle  H:{x['first']['high']} L:{x['first']['low']} Range%:{x['range_pct']}",
-                f"2nd Candle  H:{x['second']['high']} L:{x['second']['low']}",
-                f"BUY  -> Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']} Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
-                f"SELL -> Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']} Result:{s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
-                "",
-            ]
+    msg = [
+        f"DEBUG CHECK - {SYMBOL}",
+        "",
+        "=== DAILY ===",
+        f"Daily candles count: {len(daily)}",
+        f"Previous Daily:\n{fmt_candle(prev_daily)}",
+        "",
+        f"Last Daily:\n{fmt_candle(last_daily)}",
+        "",
+        "=== 5 MIN ===",
+        f"5m candles count: {len(m5)}",
+        f"First 5m:\n{fmt_candle(m5[0] if len(m5) >= 1 else None)}",
+        "",
+        f"Second 5m:\n{fmt_candle(m5[1] if len(m5) >= 2 else None)}",
+        "",
+        "=== 15 MIN ===",
+        f"15m candles count: {len(m15)}",
+        f"First 15m:\n{fmt_candle(m15[0] if len(m15) >= 1 else None)}",
+        "",
+        f"Second 15m:\n{fmt_candle(m15[1] if len(m15) >= 2 else None)}",
+        "",
+        "=== OPTION CHAIN / OI ===",
+        f"Option rows count: {len(oi_rows)}",
+        build_oi_summary(oi_rows),
+        "",
+        "=== RAW STATUS ===",
+        f"Daily status: {daily_resp.get('s', 'NA')}",
+        f"5m status: {m5_resp.get('s', 'NA')}",
+        f"15m status: {m15_resp.get('s', 'NA')}",
+        f"OI status: {oi_resp.get('s', 'NA')}",
+    ]
 
-    if len(lines) == 2:
-        lines.append("No valid historical setups found.")
+    send("\n".join(msg))
 
-    return "\n".join(lines).strip()
-
-# ================= LIVE MODE =================
-def run_live():
-    send(
-        "🚀 BOT STARTED\n"
-        f"Watching: {', '.join([short_name(s) for s in SYMBOLS])}\n"
-        f"Gap Candle % Max: {GAPUP_CANDLE_MAX_PCT}\n"
-        f"15m Candle % Max: {INSIDE15_FIRST_CANDLE_MAX_PCT}\n"
-        f"Target %: {TARGET_PCT * 100:.2f}\n"
-        f"SL Buffer %: {SL_BUFFER_PCT * 100:.2f}"
-    )
-
-    gap_sent = False
-    inside_sent = False
-
-    while True:
-        if not is_market_open():
-            return
-
-        t = now_ist().time()
-
-        if not gap_sent and t >= dtime(9, 20):
-            gap_results = []
-            for sym in SYMBOLS:
-                r = analyze_gapup_sell(sym)
-                if r:
-                    gap_results.append(r)
-            send(format_gap_summary(gap_results))
-            gap_sent = True
-
-        if not inside_sent and t >= dtime(9, 45):
-            inside_results = []
-            for sym in SYMBOLS:
-                r = analyze_15m_inside(sym)
-                if r:
-                    inside_results.append(r)
-            send(format_15m_summary(inside_results))
-            inside_sent = True
-
-        time.sleep(30)
-
-# ================= AFTER MARKET MODE =================
-def run_after_market():
-    log("Running AFTER MARKET historical mode")
-
-    gap_results = []
-    inside_results = []
-
-    for sym in SYMBOLS:
-        g = analyze_gapup_sell(sym)
-        if g:
-            gap_results.append(g)
-
-        i = analyze_15m_inside(sym)
-        if i:
-            inside_results.append(i)
-
-    send(format_gap_summary(gap_results))
-    send(format_15m_summary(inside_results))
-    send(format_after_market_results(gap_results, inside_results))
-
-# ================= MAIN =================
 if __name__ == "__main__":
-    if is_market_open():
-        run_live()
-    else:
-        if AFTER_MARKET_RUN:
-            run_after_market()
-        else:
-            nxt = next_market_open_datetime()
-            log(f"Market closed. AFTER_MARKET_RUN disabled. Next open: {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    main()
