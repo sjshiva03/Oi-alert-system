@@ -23,14 +23,19 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
 
 # ================= SETTINGS =================
 SYMBOLS = [
-    "NSE:RELIANCE-EQ",
-    "NSE:TCS-EQ",
-    "NSE:HDFCBANK-EQ",
-    "NSE:ICICIBANK-EQ",
-    "NSE:SBIN-EQ",
-    "NSE:AXISBANK-EQ",
-    "NSE:INFY-EQ",
-    "NSE:NTPC-EQ",
+    "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ",
+    "NSE:AXISBANK-EQ","NSE:BAJAJ-AUTO-EQ","NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ",
+    "NSE:BEL-EQ","NSE:BHARTIARTL-EQ","NSE:BPCL-EQ","NSE:BRITANNIA-EQ",
+    "NSE:CIPLA-EQ","NSE:COALINDIA-EQ","NSE:DRREDDY-EQ","NSE:EICHERMOT-EQ",
+    "NSE:ETERNAL-EQ","NSE:GRASIM-EQ","NSE:HCLTECH-EQ","NSE:HDFCBANK-EQ",
+    "NSE:HDFCLIFE-EQ","NSE:HEROMOTOCO-EQ","NSE:HINDALCO-EQ","NSE:HINDUNILVR-EQ",
+    "NSE:ICICIBANK-EQ","NSE:INDIGO-EQ","NSE:INFY-EQ","NSE:ITC-EQ",
+    "NSE:JSWSTEEL-EQ","NSE:KOTAKBANK-EQ","NSE:LT-EQ","NSE:M&M-EQ",
+    "NSE:MARUTI-EQ","NSE:NESTLEIND-EQ","NSE:NTPC-EQ","NSE:ONGC-EQ",
+    "NSE:POWERGRID-EQ","NSE:RELIANCE-EQ","NSE:SBILIFE-EQ","NSE:SHRIRAMFIN-EQ",
+    "NSE:SBIN-EQ","NSE:SUNPHARMA-EQ","NSE:TATACONSUM-EQ","NSE:TATAMOTORS-EQ",
+    "NSE:TATASTEEL-EQ","NSE:TCS-EQ","NSE:TECHM-EQ","NSE:TITAN-EQ",
+    "NSE:TRENT-EQ","NSE:WIPRO-EQ",
 ]
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -344,7 +349,7 @@ def send_gapup_summary_if_due():
 
 def send_inside15_summary_if_due():
     global inside15_summary_sent_for_day
-    if now_ist().time() < dtime(9, 45):
+    if now_ist().time() < dtime(9, 50):
         return
     if inside15_summary_sent_for_day == today_ist_str():
         return
