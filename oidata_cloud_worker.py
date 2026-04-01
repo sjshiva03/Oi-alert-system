@@ -41,7 +41,6 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "12"))
-
 FIRST_15M_MAX_RANGE_PCT = float(os.getenv("FIRST_15M_MAX_RANGE_PCT", "2.0"))
 GAPUP_FIRST_5M_MAX_RANGE_PCT = float(os.getenv("GAPUP_FIRST_5M_MAX_RANGE_PCT", "1.5"))
 TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))
@@ -82,9 +81,6 @@ def is_market_day(dt_obj):
 
 def market_open_time(dt_obj):
     return dt_obj.replace(hour=9, minute=15, second=0, microsecond=0)
-
-def market_close_time(dt_obj):
-    return dt_obj.replace(hour=15, minute=30, second=0, microsecond=0)
 
 def is_market_open():
     now = now_ist()
@@ -220,45 +216,8 @@ def arrow(v):
         return "↓"
     return "→"
 
-def is_same_day_epoch(ts, date_str):
-    dt = datetime.fromtimestamp(ts, IST)
-    return dt.strftime("%Y-%m-%d") == date_str
-
-def get_today_completed_5m_first(symbol):
-    candles = cache["5m"].get(symbol, [])
-    today = today_ist_str()
-    for c in candles:
-        ts = c[0]
-        dt = datetime.fromtimestamp(ts, IST)
-        if dt.strftime("%Y-%m-%d") == today and dt.time() == dtime(9, 15):
-            return c
-    return None
-
-def get_today_first_two_15m(symbol):
-    candles = cache["15m"].get(symbol, [])
-    today = today_ist_str()
-    today_candles = []
-    for c in candles:
-        ts = c[0]
-        dt = datetime.fromtimestamp(ts, IST)
-        if dt.strftime("%Y-%m-%d") == today:
-            today_candles.append(c)
-    today_candles.sort(key=lambda x: x[0])
-    if len(today_candles) >= 2:
-        return today_candles[0], today_candles[1]
-    return None, None
-
-def get_today_30m_candles(symbol):
-    candles = cache["30m"].get(symbol, [])
-    today = today_ist_str()
-    out = []
-    for c in candles:
-        ts = c[0]
-        dt = datetime.fromtimestamp(ts, IST)
-        if dt.strftime("%Y-%m-%d") == today:
-            out.append(c)
-    out.sort(key=lambda x: x[0])
-    return out
+def candle_dt(ts):
+    return datetime.fromtimestamp(ts, IST)
 
 # ================= CACHE =================
 cache = {
@@ -280,12 +239,59 @@ full_setup_done_for_day = None
 active_trades = {}
 closed_trades = []
 
+# ================= CANDLE HELPERS =================
+def get_today_candles(symbol, tf):
+    candles = cache[tf].get(symbol, [])
+    today = today_ist_str()
+
+    out = []
+    for c in candles:
+        try:
+            dt = candle_dt(c[0])
+            if dt.strftime("%Y-%m-%d") == today:
+                out.append(c)
+        except Exception:
+            pass
+
+    out.sort(key=lambda x: x[0])
+    return out
+
+def get_first_5m_candle_today(symbol):
+    today_5m = get_today_candles(symbol, "5m")
+    return today_5m[0] if len(today_5m) >= 1 else None
+
+def get_first_two_15m_candles_today(symbol):
+    today_15m = get_today_candles(symbol, "15m")
+    if len(today_15m) >= 2:
+        return today_15m[0], today_15m[1]
+    return None, None
+
+def get_today_30m_candles(symbol):
+    return get_today_candles(symbol, "30m")
+
+def get_previous_daily_candle(symbol):
+    daily = cache["daily"].get(symbol, [])
+    parsed = []
+
+    for c in daily:
+        try:
+            dt = candle_dt(c[0])
+            parsed.append((dt, c))
+        except Exception:
+            pass
+
+    parsed.sort(key=lambda x: x[0])
+
+    today = today_ist_str()
+    prev = [c for dt, c in parsed if dt.strftime("%Y-%m-%d") < today]
+    return prev[-1] if prev else None
+
 # ================= DATA LOADERS =================
 def load_gapup_caches():
     log("Loading gap-up caches...")
     for batch in chunk(SYMBOLS, 5):
         for s in batch:
-            cache["daily"][s] = get_history(s, "D", 7)
+            cache["daily"][s] = get_history(s, "D", 10)
             cache["5m"][s] = get_history(s, 5, 5)
         time.sleep(1)
     log("Gap-up caches loaded.")
@@ -379,25 +385,32 @@ def send_gapup_summary_if_due():
         return
 
     found = []
+
     for s in SYMBOLS:
-        d = cache["daily"].get(s, [])
-        c1 = get_today_completed_5m_first(s)
-        if len(d) < 2 or c1 is None:
+        prev_day = get_previous_daily_candle(s)
+        c1 = get_first_5m_candle_today(s)
+
+        if prev_day is None or c1 is None:
             continue
 
-        prev_day_high = d[-2][2]
+        prev_day_high = prev_day[2]
         o, h, l, c = c1[1], c1[2], c1[3], c1[4]
+
         if c <= 0:
             continue
 
         gap_pct = ((o - prev_day_high) / prev_day_high) * 100 if prev_day_high else 0
         rng_pct = ((h - l) / c) * 100
 
+        log(f"GAPCHK {name(s)} | Open:{o} PrevHigh:{prev_day_high} Gap%:{gap_pct:.2f} Range%:{rng_pct:.2f}")
+
         if o > prev_day_high and rng_pct < GAPUP_FIRST_5M_MAX_RANGE_PCT:
             found.append((name(s), round(gap_pct, 2)))
 
     if found:
-        msg = "⚡Gap up plus⚡\n\n" + "\n".join([f"{i}.{n} ({g}%)" for i, (n, g) in enumerate(found, start=1)])
+        msg = "⚡Gap up plus⚡\n\n" + "\n".join(
+            [f"{i}.{n} ({g}%)" for i, (n, g) in enumerate(found, start=1)]
+        )
     else:
         msg = "⚡Gap up plus⚡\n\nNone"
 
@@ -413,22 +426,30 @@ def send_inside15_summary_if_due():
         return
 
     found = []
+
     for s in SYMBOLS:
-        c1, c2 = get_today_first_two_15m(s)
+        c1, c2 = get_first_two_15m_candles_today(s)
         if c1 is None or c2 is None:
             continue
 
         h1, l1, c1c = c1[2], c1[3], c1[4]
         h2, l2 = c2[2], c2[3]
+
         if c1c <= 0:
             continue
 
         rng = ((h1 - l1) / c1c) * 100
-        if rng < FIRST_15M_MAX_RANGE_PCT and h2 < h1 and l2 > l1:
+        inside = h2 < h1 and l2 > l1
+
+        log(f"15MCHK {name(s)} | H1:{h1} L1:{l1} H2:{h2} L2:{l2} Range%:{rng:.2f} Inside:{inside}")
+
+        if rng < FIRST_15M_MAX_RANGE_PCT and inside:
             found.append(name(s))
 
     if found:
-        msg = "🕯️15 Min Inside Candle🕯️\n\n" + "\n".join([f"{i}.{n}" for i, n in enumerate(found, start=1)])
+        msg = "🕯️15 Min Inside Candle🕯️\n\n" + "\n".join(
+            [f"{i}.{n}" for i, n in enumerate(found, start=1)]
+        )
     else:
         msg = "🕯️15 Min Inside Candle🕯️\n\nNone"
 
@@ -591,12 +612,13 @@ def reset_next_day_state():
 
 # ================= STRATEGY CHECKS =================
 def check_gapup_sell(symbol, ltp):
-    d = cache["daily"].get(symbol, [])
-    c1 = get_today_completed_5m_first(symbol)
-    if len(d) < 2 or c1 is None:
+    prev_day = get_previous_daily_candle(symbol)
+    c1 = get_first_5m_candle_today(symbol)
+
+    if prev_day is None or c1 is None:
         return
 
-    prev_day_high = d[-2][2]
+    prev_day_high = prev_day[2]
     o, h, low, c = c1[1], c1[2], c1[3], c1[4]
     if c <= 0:
         return
@@ -633,7 +655,7 @@ def check_gapup_sell(symbol, ltp):
         register_trade("Gap-Up Breakdown", symbol, "SELL", entry, target, stoploss, oi_snapshot)
 
 def check_15m_breakout(symbol, ltp):
-    c1, c2 = get_today_first_two_15m(symbol)
+    c1, c2 = get_first_two_15m_candles_today(symbol)
     if c1 is None or c2 is None:
         return
 
@@ -776,7 +798,7 @@ def main():
     global eod_sent_for_day, gap_setup_done_for_day, full_setup_done_for_day
 
     log("Bot started.")
-    send("🚀 Ultimate bot started with late-start summary logic + scheduler + holidays + rate limit protection")
+    send("🚀 Ultimate bot started with late-start history logic + scheduler + holidays + rate limit protection")
 
     while True:
         now = now_ist()
@@ -800,7 +822,7 @@ def main():
             reset_next_day_state()
             continue
 
-        # If started late, this still loads and sends correctly
+        # If started late, this still works
         if gap_setup_done_for_day != today and now.time() >= dtime(9, 20):
             load_gapup_caches()
             gap_setup_done_for_day = today
