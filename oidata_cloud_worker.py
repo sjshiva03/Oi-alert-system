@@ -47,6 +47,11 @@ TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))
 SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))
 OI_UPDATE_EVERY_SECONDS = int(os.getenv("OI_UPDATE_EVERY_SECONDS", "300"))
 
+# Debug stocks for late-start verification
+DEBUG_STOCKS = {"NSE:M&M-EQ", "NSE:AXISBANK-EQ", "NSE:INFY-EQ"}
+SEND_DEBUG_TO_TELEGRAM = os.getenv("SEND_DEBUG_TO_TELEGRAM", "false").strip().lower() == "true"
+DEBUG_PRINT_DONE_FOR_DAY = False
+
 # ================= HOLIDAYS / SCHEDULER =================
 def get_holiday_set():
     out = set()
@@ -219,6 +224,12 @@ def arrow(v):
 def candle_dt(ts):
     return datetime.fromtimestamp(ts, IST)
 
+def fmt_candle(c):
+    if c is None:
+        return "None"
+    dt = candle_dt(c[0]).strftime("%Y-%m-%d %H:%M")
+    return f"{dt} | O:{c[1]} H:{c[2]} L:{c[3]} C:{c[4]}"
+
 # ================= CACHE =================
 cache = {
     "quotes": {},
@@ -285,6 +296,60 @@ def get_previous_daily_candle(symbol):
     today = today_ist_str()
     prev = [c for dt, c in parsed if dt.strftime("%Y-%m-%d") < today]
     return prev[-1] if prev else None
+
+# ================= DEBUG =================
+def send_or_log_debug(msg):
+    log(msg)
+    if SEND_DEBUG_TO_TELEGRAM:
+        send(msg)
+
+def debug_stock_history(symbol):
+    if symbol not in DEBUG_STOCKS:
+        return
+
+    prev_day = get_previous_daily_candle(symbol)
+    first_5m = get_first_5m_candle_today(symbol)
+    first_15m, second_15m = get_first_two_15m_candles_today(symbol)
+    today_30m = get_today_30m_candles(symbol)
+
+    lines = [
+        f"DEBUG {name(symbol)}",
+        "",
+        f"Prev Daily : {fmt_candle(prev_day)}",
+        f"First 5m   : {fmt_candle(first_5m)}",
+        f"First 15m  : {fmt_candle(first_15m)}",
+        f"Second 15m : {fmt_candle(second_15m)}",
+        f"30m Count  : {len(today_30m)}",
+    ]
+
+    if prev_day is not None and first_5m is not None:
+        prev_high = prev_day[2]
+        o, h, l, c = first_5m[1], first_5m[2], first_5m[3], first_5m[4]
+        gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0
+        rng_pct = ((h - l) / c) * 100 if c else 0
+        lines.append("")
+        lines.append(f"GapCheck   : Open={o} PrevHigh={prev_high} Gap%={gap_pct:.2f} Range%={rng_pct:.2f}")
+        lines.append(f"GapValid   : {o > prev_high and rng_pct < GAPUP_FIRST_5M_MAX_RANGE_PCT}")
+
+    if first_15m is not None and second_15m is not None:
+        h1, l1, c1 = first_15m[2], first_15m[3], first_15m[4]
+        h2, l2 = second_15m[2], second_15m[3]
+        rng = ((h1 - l1) / c1) * 100 if c1 else 0
+        inside = h2 < h1 and l2 > l1
+        lines.append("")
+        lines.append(f"15mCheck   : Range%={rng:.2f} Inside={inside}")
+        lines.append(f"15mValid   : {rng < FIRST_15M_MAX_RANGE_PCT and inside}")
+
+    send_or_log_debug("\n".join(lines))
+
+def debug_selected_stocks_once():
+    global DEBUG_PRINT_DONE_FOR_DAY
+    if DEBUG_PRINT_DONE_FOR_DAY:
+        return
+    for s in DEBUG_STOCKS:
+        if s in SYMBOLS:
+            debug_stock_history(s)
+    DEBUG_PRINT_DONE_FOR_DAY = True
 
 # ================= DATA LOADERS =================
 def load_gapup_caches():
@@ -599,12 +664,13 @@ def build_eod_summary():
 
 def reset_next_day_state():
     global gapup_summary_sent_for_day, inside15_summary_sent_for_day
-    global gap_setup_done_for_day, full_setup_done_for_day
+    global gap_setup_done_for_day, full_setup_done_for_day, DEBUG_PRINT_DONE_FOR_DAY
 
     gapup_summary_sent_for_day = None
     inside15_summary_sent_for_day = None
     gap_setup_done_for_day = None
     full_setup_done_for_day = None
+    DEBUG_PRINT_DONE_FOR_DAY = False
 
     pivot_alert_seen_for_day.clear()
     active_trades.clear()
@@ -689,185 +755,3 @@ def check_15m_breakout(symbol, ltp):
             f"Target: {round(target, 2)}",
             f"SL    : {round(stoploss, 2)}",
             "",
-            f"OI Bias : {bias}",
-            f"Action  : {action}",
-            "",
-            f"Time    : {ist_time_str()}",
-        ])
-        send(msg)
-        register_trade("15 Min Breakout", symbol, "BUY", entry, target, stoploss, oi_snapshot)
-        return
-
-    if ltp < l1 and trade_key("15 Min Breakdown", symbol) not in active_trades:
-        oi_snapshot = get_oi_snapshot(symbol, ltp)
-        bias, action = classify_bias(oi_snapshot, "SELL")
-        entry = l1
-        target = entry * (1 - TARGET_PCT)
-        stoploss = h1 * (1 + SL_BUFFER_PCT)
-
-        msg = "\n".join([
-            "🕯️ 15M BREAKOUT 🕯️",
-            "",
-            name(symbol),
-            "",
-            "Strategy : 15 Min Inside Candle Breakdown",
-            "Type     : SELL",
-            "",
-            f"Entry : {round(entry, 2)} ↓ Break",
-            f"Spot  : {round(ltp, 2)}",
-            f"Target: {round(target, 2)}",
-            f"SL    : {round(stoploss, 2)}",
-            "",
-            f"OI Bias : {bias}",
-            f"Action  : {action}",
-            "",
-            f"Time    : {ist_time_str()}",
-        ])
-        send(msg)
-        register_trade("15 Min Breakdown", symbol, "SELL", entry, target, stoploss, oi_snapshot)
-
-def check_pivot_sell(symbol, ltp, new_pivot_names):
-    c30 = get_today_30m_candles(symbol)
-    if len(c30) < 2:
-        return
-
-    highs = [c[2] for c in c30[:-1]]
-    lows = [c[3] for c in c30[:-1]]
-    if not highs or not lows:
-        return
-
-    close_prev = c30[-2][4]
-    h = max(highs)
-    l = min(lows)
-    p = (h + l + close_prev) / 3
-    levels = {
-        "P": p,
-        "R1": 2 * p - l,
-        "R2": p + (h - l),
-        "R3": h + 2 * (p - l),
-    }
-
-    c1 = c30[-2]
-    c2 = c30[-1]
-
-    for level_name, level_value in levels.items():
-        c1_green = c1[4] > c1[1]
-        c2_red = c2[4] < c2[1]
-        c1_touch = c1[3] <= level_value <= c1[2]
-        c2_touch = c2[3] <= level_value <= c2[2]
-        c2_below = c2[4] < level_value
-
-        if c1_green and c1_touch and c2_red and c2_touch and c2_below:
-            n = name(symbol)
-            if n not in pivot_alert_seen_for_day:
-                new_pivot_names.add(n)
-
-            entry = c2[3]
-            if ltp <= entry and trade_key("Pivot Rejection", symbol) not in active_trades:
-                oi_snapshot = get_oi_snapshot(symbol, ltp)
-                bias, action = classify_bias(oi_snapshot, "SELL")
-                target = entry * (1 - TARGET_PCT)
-                stoploss = max(c1[2], c2[2]) * (1 + SL_BUFFER_PCT)
-
-                msg = "\n".join([
-                    "⛔ PIVOT ALERT ⛔",
-                    "",
-                    n,
-                    "",
-                    f"Strategy : Pivot Rejection ({level_name})",
-                    "Type     : SELL",
-                    "",
-                    f"Entry : {round(entry, 2)} ↓ Break",
-                    f"Spot  : {round(ltp, 2)}",
-                    f"Target: {round(target, 2)}",
-                    f"SL    : {round(stoploss, 2)}",
-                    "",
-                    f"OI Bias : {bias}",
-                    "Reason  : CE Writing at resistance",
-                    "",
-                    f"Action  : {action}",
-                    "",
-                    f"Time    : {ist_time_str()}",
-                ])
-                send(msg)
-                register_trade("Pivot Rejection", symbol, "SELL", entry, target, stoploss, oi_snapshot)
-            break
-
-# ================= MAIN =================
-def main():
-    global eod_sent_for_day, gap_setup_done_for_day, full_setup_done_for_day
-
-    log("Bot started.")
-    send("🚀 Ultimate bot started with late-start history logic + scheduler + holidays + rate limit protection")
-
-    while True:
-        now = now_ist()
-        today = today_ist_str()
-
-        if not is_market_open():
-            if now.time() > dtime(15, 30) and eod_sent_for_day != today:
-                try:
-                    refresh_quotes_only()
-                    close_all_open_trades_day_end()
-                except Exception as e:
-                    log(f"EOD close error: {e}")
-
-                send(build_eod_summary())
-                eod_sent_for_day = today
-                sleep_until_next_market_open()
-                reset_next_day_state()
-                continue
-
-            sleep_until_next_market_open()
-            reset_next_day_state()
-            continue
-
-        # If started late, this still works
-        if gap_setup_done_for_day != today and now.time() >= dtime(9, 20):
-            load_gapup_caches()
-            gap_setup_done_for_day = today
-            send_gapup_summary_if_due()
-
-        if full_setup_done_for_day != today and now.time() >= dtime(9, 45):
-            load_full_caches()
-            full_setup_done_for_day = today
-            send_inside15_summary_if_due()
-
-        refresh_quotes_only()
-
-        if gap_setup_done_for_day == today:
-            for symbol, ltp in cache["quotes"].items():
-                try:
-                    check_gapup_sell(symbol, ltp)
-                except Exception as e:
-                    log(f"Gap strategy error {symbol}: {e}")
-
-        if full_setup_done_for_day == today:
-            new_pivot_names = set()
-
-            for symbol, ltp in cache["quotes"].items():
-                try:
-                    check_15m_breakout(symbol, ltp)
-                    check_pivot_sell(symbol, ltp, new_pivot_names)
-                except Exception as e:
-                    log(f"15m/pivot strategy error {symbol}: {e}")
-
-            if new_pivot_names:
-                pivot_alert_seen_for_day.update(new_pivot_names)
-                send_pivot_watch_summary_if_new(new_pivot_names)
-
-        for key in list(active_trades.keys()):
-            trade = active_trades.get(key)
-            if not trade:
-                continue
-
-            ltp = float(cache["quotes"].get(trade["symbol"], trade["entry"]))
-            manage_trade_by_price(trade, ltp)
-
-            if key in active_trades:
-                maybe_send_oi_update(active_trades[key], ltp)
-
-        time.sleep(POLL_SECONDS)
-
-if __name__ == "__main__":
-    main()
