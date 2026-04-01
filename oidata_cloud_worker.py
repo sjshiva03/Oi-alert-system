@@ -115,7 +115,6 @@ def sleep_until_next_market_open():
 def analysis_date_str():
     now = now_ist()
 
-    # Before market open, use previous completed market day
     if now.time() < dtime(9, 15):
         d = now - timedelta(days=1)
         while not is_market_day(d):
@@ -239,8 +238,32 @@ def analyze_gapup_sell(symbol):
     valid = (
         o > prev_high and
         gap_pct >= GAPUP_MIN_PCT and
-        
- def analyze_15m_inside(symbol):
+        candle_pct <= GAPUP_CANDLE_MAX_PCT
+    )
+
+    if not valid:
+        return None
+
+    entry = round(l, 2)
+    target = round(entry * (1 - TARGET_PCT), 2)
+    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
+
+    later = day_5m[1:]
+    result, exit_price = evaluate_sell_result(later, entry, target, stoploss)
+    pl = round(entry - exit_price, 2)
+
+    return {
+        "symbol": short_name(symbol),
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": result,
+        "exit_price": round(exit_price, 2),
+        "pl": pl,
+        "gap_pct": round(gap_pct, 2),
+    }
+
+def analyze_15m_inside(symbol):
     day_15m = get_analysis_day_candles(symbol, 15, 5)
     if len(day_15m) < 2:
         return None
@@ -250,25 +273,24 @@ def analyze_gapup_sell(symbol):
 
     h1 = float(c1[2])
     l1 = float(c1[3])
-    c1c = float(c1[4])
+    c1_close = float(c1[4])
 
     h2 = float(c2[2])
     l2 = float(c2[3])
 
-    if c1c <= 0:
+    if c1_close <= 0:
         return None
 
-    range_pct = pct_range(h1, l1, c1c)
+    range_pct = pct_range(h1, l1, c1_close)
 
-    # FIXED: inclusive inside candle
+    # inclusive inside-bar check
     inside = h2 <= h1 and l2 >= l1
 
     log(
         f"15M {short_name(symbol)} | "
-        f"H1:{h1} L1:{l1} C1:{c1c} | "
+        f"H1:{h1} L1:{l1} C1:{c1_close} | "
         f"H2:{h2} L2:{l2} | "
-        f"Range%:{range_pct:.2f} | "
-        f"Inside:{inside}"
+        f"Range%:{range_pct:.2f} | Inside:{inside}"
     )
 
     if not (range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
@@ -311,31 +333,7 @@ def analyze_gapup_sell(symbol):
             "exit_price": round(sell_exit, 2),
             "pl": sell_pl
         }
-    }       candle_pct <= GAPUP_CANDLE_MAX_PCT
-    )
-
-    if not valid:
-        return None
-
-    entry = round(l, 2)
-    target = round(entry * (1 - TARGET_PCT), 2)
-    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
-
-    later = day_5m[1:]
-    result, exit_price = evaluate_sell_result(later, entry, target, stoploss)
-    pl = round(entry - exit_price, 2)
-
-    return {
-        "symbol": short_name(symbol),
-        "entry": entry,
-        "target": target,
-        "stoploss": stoploss,
-        "result": result,
-        "exit_price": round(exit_price, 2),
-        "pl": pl,
-        "gap_pct": round(gap_pct, 2),
     }
-
 
 # ================= FORMATTERS =================
 def format_gap_summary(items):
@@ -349,9 +347,14 @@ def format_gap_summary(items):
 def format_inside_summary(items):
     if not items:
         return "🕯️ 15M INSIDE + OI\n\nNone"
+
     msg = "🕯️ 15M INSIDE + OI\n\n"
     for x in items:
-        msg += f"{x['symbol']} → BUY / SELL\n"
+        msg += (
+            f"{x['symbol']}\n"
+            f"1st Candle H:{x['first_high']} L:{x['first_low']} Range%:{x['range_pct']}\n"
+            f"2nd Candle H:{x['second_high']} L:{x['second_low']}\n\n"
+        )
     return msg.strip()
 
 def format_results(gap_items, inside_items):
@@ -369,7 +372,7 @@ def format_results(gap_items, inside_items):
             ]
 
     if inside_items:
-        lines.append("🕯️ 15M INSIDE + OI")
+        lines.append("🕯️ 15M INSIDE")
         for x in inside_items:
             b = x["buy"]
             s = x["sell"]
