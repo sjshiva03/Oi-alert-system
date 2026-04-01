@@ -1,25 +1,126 @@
 import os
 import time
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
 
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
-SYMBOL = "NSE:M&M-EQ"
-CHECK_INTERVAL = 10
+CLIENT_ID = (os.getenv("CLIENT_ID") or "").strip()
+ACCESS_TOKEN = (os.getenv("ACCESS_TOKEN") or "").strip()
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
+CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 
-FIRST_CANDLE_MAX_PCT = float(os.getenv("FIRST_CANDLE_MAX_PCT", "1.0"))
+AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
 
-# ================= ENV =================
-CLIENT_ID = os.getenv("CLIENT_ID")
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+GAPUP_MIN_PCT = float(os.getenv("GAPUP_MIN_PCT", "0.0"))
+GAPUP_CANDLE_MAX_PCT = float(os.getenv("GAPUP_CANDLE_MAX_PCT", "1.5"))
+INSIDE15_FIRST_CANDLE_MAX_PCT = float(os.getenv("INSIDE15_FIRST_CANDLE_MAX_PCT", "2.0"))
+TARGET_PCT = float(os.getenv("TARGET_PCT", "1.0")) / 100.0
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.1")) / 100.0
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+
+NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
 
 if not CLIENT_ID or not ACCESS_TOKEN:
-    raise Exception("Missing credentials")
+    raise Exception("Missing CLIENT_ID or ACCESS_TOKEN")
+
+# ================= NIFTY 50 =================
+SYMBOLS = [
+    "NSE:ADANIENT-EQ", "NSE:ADANIPORTS-EQ", "NSE:APOLLOHOSP-EQ", "NSE:ASIANPAINT-EQ",
+    "NSE:AXISBANK-EQ", "NSE:BAJAJ-AUTO-EQ", "NSE:BAJFINANCE-EQ", "NSE:BAJAJFINSV-EQ",
+    "NSE:BEL-EQ", "NSE:BHARTIARTL-EQ", "NSE:BPCL-EQ", "NSE:BRITANNIA-EQ",
+    "NSE:CIPLA-EQ", "NSE:COALINDIA-EQ", "NSE:DRREDDY-EQ", "NSE:EICHERMOT-EQ",
+    "NSE:ETERNAL-EQ", "NSE:GRASIM-EQ", "NSE:HCLTECH-EQ", "NSE:HDFCBANK-EQ",
+    "NSE:HDFCLIFE-EQ", "NSE:HEROMOTOCO-EQ", "NSE:HINDALCO-EQ", "NSE:HINDUNILVR-EQ",
+    "NSE:ICICIBANK-EQ", "NSE:INDIGO-EQ", "NSE:INFY-EQ", "NSE:ITC-EQ",
+    "NSE:JSWSTEEL-EQ", "NSE:KOTAKBANK-EQ", "NSE:LT-EQ", "NSE:M&M-EQ",
+    "NSE:MARUTI-EQ", "NSE:NESTLEIND-EQ", "NSE:NTPC-EQ", "NSE:ONGC-EQ",
+    "NSE:POWERGRID-EQ", "NSE:RELIANCE-EQ", "NSE:SBILIFE-EQ", "NSE:SHRIRAMFIN-EQ",
+    "NSE:SBIN-EQ", "NSE:SUNPHARMA-EQ", "NSE:TATACONSUM-EQ", "NSE:TATAMOTORS-EQ",
+    "NSE:TATASTEEL-EQ", "NSE:TCS-EQ", "NSE:TECHM-EQ", "NSE:TITAN-EQ",
+    "NSE:TRENT-EQ", "NSE:WIPRO-EQ"
+]
+
+# ================= HELPERS =================
+def now_ist():
+    return datetime.now(IST)
+
+def today_str():
+    return now_ist().strftime("%Y-%m-%d")
+
+def log(msg: str):
+    print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+def send(msg: str):
+    print(msg)
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=30
+        )
+    except Exception as e:
+        log(f"Telegram error: {e}")
+
+def short_name(symbol: str) -> str:
+    return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
+
+def candle_dt(ts: int):
+    return datetime.fromtimestamp(ts, IST)
+
+def safe_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def pct_range(high: float, low: float, close: float) -> float:
+    if close == 0:
+        return 0.0
+    return ((high - low) / close) * 100.0
+
+# ================= HOLIDAYS / MARKET TIME =================
+def get_holiday_set():
+    out = set()
+    for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
+        p = part.strip()
+        if p:
+            out.add(p)
+    return out
+
+HOLIDAYS = get_holiday_set()
+
+def is_market_day(dt_obj):
+    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in HOLIDAYS
+
+def is_market_open():
+    now = now_ist()
+    return is_market_day(now) and dtime(9, 15) <= now.time() <= dtime(15, 30)
+
+def next_market_open_datetime():
+    now = now_ist()
+    if is_market_day(now) and now.time() < dtime(9, 15):
+        return now.replace(hour=9, minute=15, second=0, microsecond=0)
+
+    nxt = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+    while not is_market_day(nxt):
+        nxt = (nxt + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+    return nxt
+
+def sleep_until_next_market_open():
+    nxt = next_market_open_datetime()
+    log(f"Sleeping until {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    while True:
+        rem = (nxt - now_ist()).total_seconds()
+        if rem <= 1:
+            return
+        time.sleep(min(60, max(1, int(rem))))
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -29,161 +130,383 @@ fyers = fyersModel.FyersModel(
     log_path=""
 )
 
-# ================= TELEGRAM =================
-def send(msg):
-    print(msg)
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg}
-        )
-    except:
-        pass
+def check_auth():
+    profile = fyers.get_profile()
+    if profile.get("s") != "ok":
+        raise Exception(f"FYERS auth failed: {profile}")
+    return profile
 
-# ================= DATA =================
-def now():
-    return datetime.now(IST)
-
-def get_quotes():
-    q = fyers.quotes({"symbols": SYMBOL})
-    v = q["d"][0]["v"]
-    return {
-        "ltp": v["lp"],
-        "open": v["open_price"],
-        "high": v["high_price"],
-        "low": v["low_price"],
-        "prev_close": v["prev_close_price"]
-    }
-
-def get_history(res):
+def get_history(symbol, resolution, days=10):
     payload = {
-        "symbol": SYMBOL,
-        "resolution": str(res),
+        "symbol": symbol,
+        "resolution": str(resolution),
         "date_format": "1",
-        "range_from": (now() - timedelta(days=5)).strftime("%Y-%m-%d"),
-        "range_to": now().strftime("%Y-%m-%d"),
+        "range_from": (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d"),
+        "range_to": now_ist().strftime("%Y-%m-%d"),
         "cont_flag": "1"
     }
-    return fyers.history(payload).get("candles", [])
+    try:
+        data = fyers.history(data=payload)
+    except TypeError:
+        data = fyers.history(payload)
+    except Exception as e:
+        log(f"HISTORY ERROR {symbol} {resolution}: {e}")
+        return []
+    return data.get("candles", [])
 
-def get_option_chain():
-    r = fyers.optionchain({"symbol": SYMBOL, "strikecount": 10})
-    return r.get("data", {}).get("optionsChain", [])
+# ================= CANDLE SELECTION =================
+def get_today_candles(symbol, resolution, days=10):
+    candles = get_history(symbol, resolution, days)
+    td = today_str()
+    out = []
+    for c in candles:
+        try:
+            if candle_dt(c[0]).strftime("%Y-%m-%d") == td:
+                out.append(c)
+        except Exception:
+            pass
+    out.sort(key=lambda x: x[0])
+    return out
 
-# ================= OI =================
-def get_oi_bias(chain):
-    call_oi = 0
-    put_oi = 0
+def get_previous_daily(symbol):
+    daily = get_history(symbol, "D", 20)
+    td = today_str()
+    prev = []
+    for c in daily:
+        try:
+            if candle_dt(c[0]).strftime("%Y-%m-%d") < td:
+                prev.append(c)
+        except Exception:
+            pass
+    prev.sort(key=lambda x: x[0])
+    return prev[-1] if prev else None
 
-    for x in chain:
-        oi = float(x.get("oi", 0))
+def get_first_5m_candle_today(symbol):
+    c = get_today_candles(symbol, 5, 5)
+    return c[0] if len(c) >= 1 else None
 
-        if str(x.get("option_type")).upper() == "CE":
-            call_oi += oi
-        else:
-            put_oi += oi
+def get_first_two_15m_candles_today(symbol):
+    c = get_today_candles(symbol, 15, 5)
+    if len(c) >= 2:
+        return c[0], c[1]
+    return None, None
 
-    return call_oi, put_oi
+# ================= RESULT ENGINE =================
+def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
+    for c in candles_after_entry:
+        high = float(c[2])
+        low = float(c[3])
 
-# ================= STATE =================
-trade = None
-signal_sent = False
+        if high >= stoploss and low <= target:
+            return "Stoploss 🛑", stoploss
+        if high >= stoploss:
+            return "Stoploss 🛑", stoploss
+        if low <= target:
+            return "Target 🎯", target
 
-# ================= STRATEGY =================
-def check_setup():
-    quotes = get_quotes()
-    daily = get_history("D")
-    m15 = get_history(15)
+    if candles_after_entry:
+        return "Day End", float(candles_after_entry[-1][4])
 
-    if len(daily) < 2 or len(m15) < 2:
+    return "No Data", entry
+
+def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
+    for c in candles_after_entry:
+        high = float(c[2])
+        low = float(c[3])
+
+        if low <= stoploss and high >= target:
+            return "Stoploss 🛑", stoploss
+        if low <= stoploss:
+            return "Stoploss 🛑", stoploss
+        if high >= target:
+            return "Target 🎯", target
+
+    if candles_after_entry:
+        return "Day End", float(candles_after_entry[-1][4])
+
+    return "No Data", entry
+
+# ================= STRATEGY ANALYSIS =================
+def analyze_gapup_sell(symbol):
+    prev_day = get_previous_daily(symbol)
+    first_5m = get_first_5m_candle_today(symbol)
+
+    if prev_day is None or first_5m is None:
         return None
 
-    prev = daily[-2]
-    today = daily[-1]
+    prev_high = float(prev_day[2])
+    o = float(first_5m[1])
+    h = float(first_5m[2])
+    l = float(first_5m[3])
+    c = float(first_5m[4])
 
-    first = m15[0]
-    second = m15[1]
+    gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0.0
+    candle_pct = pct_range(h, l, c)
 
-    # GAPUP+
-    gapup = today[1] > prev[2]
+    valid = (
+        o > prev_high and
+        gap_pct >= GAPUP_MIN_PCT and
+        candle_pct <= GAPUP_CANDLE_MAX_PCT
+    )
 
-    # SMALL CANDLE
-    range_pct = ((first[2] - first[3]) / first[4]) * 100
-    small = range_pct < FIRST_CANDLE_MAX_PCT
+    if not valid:
+        return None
 
-    # INSIDE BAR
-    inside = second[2] <= first[2] and second[3] >= first[3]
+    entry = round(l, 2)
+    target = round(entry * (1 - TARGET_PCT), 2)
+    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
 
-    if gapup and small and inside:
-        return {
-            "high": first[2],
-            "low": first[3]
+    later_5m = get_today_candles(symbol, 5, 5)[1:]
+    result, exit_price = evaluate_sell_result(later_5m, entry, target, stoploss)
+    pl = round(entry - exit_price, 2)
+
+    return {
+        "symbol": short_name(symbol),
+        "strategy": "Gap-Up Breakdown",
+        "type": "SELL",
+        "gap_pct": round(gap_pct, 2),
+        "candle_pct": round(candle_pct, 2),
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": result,
+        "exit_price": round(exit_price, 2),
+        "pl": pl,
+    }
+
+def analyze_15m_inside(symbol):
+    c1, c2 = get_first_two_15m_candles_today(symbol)
+    if c1 is None or c2 is None:
+        return None
+
+    h1 = float(c1[2])
+    l1 = float(c1[3])
+    c1_close = float(c1[4])
+
+    h2 = float(c2[2])
+    l2 = float(c2[3])
+
+    if c1_close <= 0:
+        return None
+
+    first_range_pct = pct_range(h1, l1, c1_close)
+    inside = h2 < h1 and l2 > l1
+
+    if not (first_range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
+        return None
+
+    later_15m = get_today_candles(symbol, 15, 5)[2:]
+
+    buy_entry = round(h1, 2)
+    buy_target = round(buy_entry * (1 + TARGET_PCT), 2)
+    buy_sl = round(l1 * (1 - SL_BUFFER_PCT), 2)
+    buy_result, buy_exit = evaluate_buy_result(later_15m, buy_entry, buy_target, buy_sl)
+    buy_pl = round(buy_exit - buy_entry, 2)
+
+    sell_entry = round(l1, 2)
+    sell_target = round(sell_entry * (1 - TARGET_PCT), 2)
+    sell_sl = round(h1 * (1 + SL_BUFFER_PCT), 2)
+    sell_result, sell_exit = evaluate_sell_result(later_15m, sell_entry, sell_target, sell_sl)
+    sell_pl = round(sell_entry - sell_exit, 2)
+
+    return {
+        "symbol": short_name(symbol),
+        "range_pct": round(first_range_pct, 2),
+        "first": {
+            "high": round(h1, 2),
+            "low": round(l1, 2),
+        },
+        "second": {
+            "high": round(h2, 2),
+            "low": round(l2, 2),
+        },
+        "buy": {
+            "strategy": "15 Min Inside Candle Breakout",
+            "type": "BUY",
+            "entry": buy_entry,
+            "target": buy_target,
+            "stoploss": buy_sl,
+            "result": buy_result,
+            "exit_price": round(buy_exit, 2),
+            "pl": buy_pl,
+        },
+        "sell": {
+            "strategy": "15 Min Inside Candle Breakdown",
+            "type": "SELL",
+            "entry": sell_entry,
+            "target": sell_target,
+            "stoploss": sell_sl,
+            "result": sell_result,
+            "exit_price": round(sell_exit, 2),
+            "pl": sell_pl,
         }
+    }
 
-    return None
+# ================= FORMATTERS =================
+def format_gap_summary(items):
+    if not items:
+        return "⚡Gap up plus⚡\n\nNone"
 
-# ================= LOOP =================
-send("🚀 FINAL CLOUD BOT STARTED")
+    lines = ["⚡Gap up plus⚡", ""]
+    for i, x in enumerate(items, 1):
+        lines.append(f"{i}. {x['symbol']} ({x['gap_pct']}%)")
+    return "\n".join(lines)
 
-while True:
-    try:
-        setup = check_setup()
-        quotes = get_quotes()
-        ltp = quotes["ltp"]
+def format_15m_summary(items):
+    if not items:
+        return "🕯️15 Min Inside Candle🕯️\n\nNone"
 
-        if setup:
-            chain = get_option_chain()
-            call_oi, put_oi = get_oi_bias(chain)
+    lines = ["🕯️15 Min Inside Candle🕯️", ""]
+    for i, x in enumerate(items, 1):
+        lines += [
+            f"{i}. {x['symbol']}",
+            f"1st Candle  H:{x['first']['high']} L:{x['first']['low']} Range%:{x['range_pct']}",
+            f"2nd Candle  H:{x['second']['high']} L:{x['second']['low']}",
+            f"BUY Entry:{x['buy']['entry']} Target:{x['buy']['target']} SL:{x['buy']['stoploss']}",
+            f"SELL Entry:{x['sell']['entry']} Target:{x['sell']['target']} SL:{x['sell']['stoploss']}",
+            "",
+        ]
+    return "\n".join(lines).strip()
 
-            # ENTRY
-            if not trade:
-                if ltp > setup["high"] and put_oi > call_oi:
-                    trade = {
-                        "side": "BUY",
-                        "entry": setup["high"],
-                        "sl": setup["low"],
-                        "target": setup["high"] + (setup["high"] - setup["low"])
-                    }
+def format_after_market_results(gap_results, inside_results):
+    lines = ["📘 AFTER MARKET RESULTS", ""]
 
-                elif ltp < setup["low"] and call_oi > put_oi:
-                    trade = {
-                        "side": "SELL",
-                        "entry": setup["low"],
-                        "sl": setup["high"],
-                        "target": setup["low"] - (setup["high"] - setup["low"])
-                    }
+    if gap_results:
+        lines.append("⚡ GAP UP SELL ⚡")
+        for x in gap_results:
+            sign = "+" if x["pl"] > 0 else ""
+            lines += [
+                x["symbol"],
+                f"Entry    : {x['entry']}",
+                f"Target   : {x['target']}",
+                f"Stoploss : {x['stoploss']}",
+                f"Result   : {x['result']}",
+                f"Exit/LTP : {x['exit_price']}",
+                f"P/L      : {sign}{x['pl']}",
+                "",
+            ]
 
-                if trade:
-                    send(f"""
-🔥 ENTRY SIGNAL
+    if inside_results:
+        lines.append("🕯️ 15M INSIDE CANDLE")
+        for x in inside_results:
+            b = x["buy"]
+            s = x["sell"]
+            bsign = "+" if b["pl"] > 0 else ""
+            ssign = "+" if s["pl"] > 0 else ""
 
-Side: {trade['side']}
-Entry: {trade['entry']}
-SL: {trade['sl']}
-Target: {trade['target']}
-Time: {now().strftime('%H:%M:%S')}
-""")
+            lines += [
+                x["symbol"],
+                f"1st Candle  H:{x['first']['high']} L:{x['first']['low']} Range%:{x['range_pct']}",
+                f"2nd Candle  H:{x['second']['high']} L:{x['second']['low']}",
+                f"BUY  -> Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']} Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
+                f"SELL -> Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']} Result:{s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
+                "",
+            ]
 
-            # EXIT
-            if trade:
-                if trade["side"] == "BUY":
-                    if ltp >= trade["target"]:
-                        send(f"🎯 TARGET HIT BUY @ {ltp}")
-                        trade = None
-                    elif ltp <= trade["sl"]:
-                        send(f"❌ STOPLOSS HIT BUY @ {ltp}")
-                        trade = None
+    if len(lines) == 2:
+        lines.append("No valid setups found.")
 
-                elif trade["side"] == "SELL":
-                    if ltp <= trade["target"]:
-                        send(f"🎯 TARGET HIT SELL @ {ltp}")
-                        trade = None
-                    elif ltp >= trade["sl"]:
-                        send(f"❌ STOPLOSS HIT SELL @ {ltp}")
-                        trade = None
+    return "\n".join(lines).strip()
 
-        time.sleep(CHECK_INTERVAL)
+# ================= RUN MODES =================
+def run_after_market_once():
+    gap_results = []
+    inside_results = []
 
-    except Exception as e:
-        print("Error:", e)
-        time.sleep(5)
+    for sym in SYMBOLS:
+        try:
+            g = analyze_gapup_sell(sym)
+            if g:
+                gap_results.append(g)
+
+            i = analyze_15m_inside(sym)
+            if i:
+                inside_results.append(i)
+        except Exception as e:
+            log(f"After-market scan error {sym}: {e}")
+
+    send(format_gap_summary(gap_results))
+    send(format_15m_summary(inside_results))
+    send(format_after_market_results(gap_results, inside_results))
+
+    nxt = next_market_open_datetime()
+    send(
+        "🌙 Market closed\n\n"
+        f"Next market open:\n{nxt.strftime('%Y-%m-%d %H:%M:%S IST')}"
+    )
+
+def run_live_day():
+    gap_sent = False
+    inside_sent = False
+    eod_sent = False
+
+    while True:
+        if not is_market_open():
+            return
+
+        t = now_ist().time()
+
+        if not gap_sent and t >= dtime(9, 20):
+            gap_results = []
+            for sym in SYMBOLS:
+                try:
+                    r = analyze_gapup_sell(sym)
+                    if r:
+                        gap_results.append(r)
+                except Exception as e:
+                    log(f"Gap scan error {sym}: {e}")
+            send(format_gap_summary(gap_results))
+            gap_sent = True
+
+        if not inside_sent and t >= dtime(9, 45):
+            inside_results = []
+            for sym in SYMBOLS:
+                try:
+                    r = analyze_15m_inside(sym)
+                    if r:
+                        inside_results.append(r)
+                except Exception as e:
+                    log(f"15m scan error {sym}: {e}")
+            send(format_15m_summary(inside_results))
+            inside_sent = True
+
+        if not eod_sent and t >= dtime(15, 25):
+            gap_results = []
+            inside_results = []
+            for sym in SYMBOLS:
+                try:
+                    g = analyze_gapup_sell(sym)
+                    if g:
+                        gap_results.append(g)
+
+                    i = analyze_15m_inside(sym)
+                    if i:
+                        inside_results.append(i)
+                except Exception as e:
+                    log(f"EOD scan error {sym}: {e}")
+
+            send(format_after_market_results(gap_results, inside_results))
+            nxt = next_market_open_datetime()
+            send(
+                "🌙 Market closed\n\n"
+                f"Next market open:\n{nxt.strftime('%Y-%m-%d %H:%M:%S IST')}"
+            )
+            eod_sent = True
+
+        time.sleep(POLL_SECONDS)
+
+# ================= MAIN =================
+def main():
+    profile = check_auth()
+    send(f"🚀 BOT STARTED\nProfile status: {profile.get('s')}")
+
+    while True:
+        if is_market_open():
+            run_live_day()
+        else:
+            if AFTER_MARKET_RUN:
+                run_after_market_once()
+            sleep_until_next_market_open()
+
+if __name__ == "__main__":
+    main()
