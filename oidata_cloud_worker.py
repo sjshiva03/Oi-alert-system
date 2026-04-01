@@ -8,8 +8,8 @@ from fyers_apiv3 import fyersModel
 # ================= ENV =================
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 NSE_HOLIDAYS_RAW = os.getenv(
     "NSE_HOLIDAYS",
     "2026-01-26,2026-03-03,2026-03-26,2026-03-31,2026-04-03,2026-04-14,2026-05-01,2026-05-28,2026-06-26,2026-09-14,2026-10-02,2026-10-20,2026-11-10,2026-11-24,2026-12-25"
@@ -17,8 +17,9 @@ NSE_HOLIDAYS_RAW = os.getenv(
 
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
+
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise Exception("Missing TELEGRAM_TOKEN or CHAT_ID")
+    raise Exception("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 
 # ================= SETTINGS =================
 SYMBOLS = [
