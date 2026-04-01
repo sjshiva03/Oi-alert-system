@@ -21,7 +21,7 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
     raise Exception("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 
 # ================= SETTINGS =================
-SYMBOLS = [
+RAW_SYMBOLS = [
     "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ",
     "NSE:AXISBANK-EQ","NSE:BAJAJ-AUTO-EQ","NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ",
     "NSE:BEL-EQ","NSE:BHARTIARTL-EQ","NSE:BPCL-EQ","NSE:BRITANNIA-EQ",
@@ -47,10 +47,18 @@ TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))
 SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))
 OI_UPDATE_EVERY_SECONDS = int(os.getenv("OI_UPDATE_EVERY_SECONDS", "300"))
 
-# Debug stocks for late-start verification
 DEBUG_STOCKS = {"NSE:M&M-EQ", "NSE:AXISBANK-EQ", "NSE:INFY-EQ"}
 SEND_DEBUG_TO_TELEGRAM = os.getenv("SEND_DEBUG_TO_TELEGRAM", "false").strip().lower() == "true"
 DEBUG_PRINT_DONE_FOR_DAY = False
+
+# ================= SYMBOL NORMALIZE =================
+def normalize_symbol(sym: str) -> str:
+    s = sym.strip().upper()
+    if s == "NSE:M&M-EQ":
+        return "NSE:M&M-EQ"
+    return s
+
+SYMBOLS = [normalize_symbol(s) for s in RAW_SYMBOLS]
 
 # ================= HOLIDAYS / SCHEDULER =================
 def get_holiday_set():
@@ -95,7 +103,6 @@ def is_market_open():
 
 def next_market_open_datetime():
     now = now_ist()
-
     if is_market_day(now) and now < market_open_time(now):
         return market_open_time(now)
 
@@ -130,7 +137,6 @@ class RateLimiter:
 
     def wait(self):
         now = time.time()
-
         while self.sec and now - self.sec[0] > 1:
             self.sec.popleft()
         while self.min and now - self.min[0] > 60:
@@ -139,7 +145,6 @@ class RateLimiter:
         if len(self.sec) >= 8:
             time.sleep(0.2)
             return self.wait()
-
         if len(self.min) >= 150:
             time.sleep(1)
             return self.wait()
@@ -154,7 +159,12 @@ fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, log_path=
 
 def get_quotes():
     rl.wait()
-    data = fyers.quotes({"symbols": ",".join(SYMBOLS)})
+    payload = {"symbols": ",".join(SYMBOLS)}
+    try:
+        data = fyers.quotes(data=payload)
+    except TypeError:
+        data = fyers.quotes(payload)
+
     out = {}
     for item in data.get("d", []):
         try:
@@ -167,19 +177,39 @@ def get_history(symbol, resolution, days=5):
     rl.wait()
     today = now_ist().strftime("%Y-%m-%d")
     past = (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d")
-    data = fyers.history({
+
+    payload = {
         "symbol": symbol,
         "resolution": str(resolution),
         "date_format": "1",
         "range_from": past,
         "range_to": today,
         "cont_flag": "1"
-    })
-    return data.get("candles", [])
+    }
+
+    try:
+        data = fyers.history(data=payload)
+    except TypeError:
+        data = fyers.history(payload)
+    except Exception as e:
+        log(f"HISTORY EXCEPTION {symbol} {resolution}: {e}")
+        return []
+
+    candles = data.get("candles", [])
+
+    if not candles:
+        log(f"HISTORY EMPTY {symbol} {resolution} | response={str(data)[:300]}")
+
+    return candles
 
 def get_option_chain(symbol):
     rl.wait()
-    return fyers.optionchain({"symbol": symbol, "strikecount": STRIKECOUNT})
+    payload = {"symbol": symbol, "strikecount": STRIKECOUNT}
+    try:
+        data = fyers.optionchain(data=payload)
+    except TypeError:
+        data = fyers.optionchain(payload)
+    return data
 
 # ================= TELEGRAM =================
 def send(msg):
@@ -254,8 +284,8 @@ closed_trades = []
 def get_today_candles(symbol, tf):
     candles = cache[tf].get(symbol, [])
     today = today_ist_str()
-
     out = []
+
     for c in candles:
         try:
             dt = candle_dt(c[0])
@@ -292,7 +322,6 @@ def get_previous_daily_candle(symbol):
             pass
 
     parsed.sort(key=lambda x: x[0])
-
     today = today_ist_str()
     prev = [c for dt, c in parsed if dt.strftime("%Y-%m-%d") < today]
     return prev[-1] if prev else None
@@ -892,7 +921,6 @@ def main():
             reset_next_day_state()
             continue
 
-        # Late-start friendly setup
         if gap_setup_done_for_day != today and now.time() >= dtime(9, 20):
             load_gapup_caches()
             gap_setup_done_for_day = today
