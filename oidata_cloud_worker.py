@@ -1,7 +1,7 @@
 import os
 import time
-from datetime import datetime, timedelta, timezone
 import requests
+from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
 
 # ================= CONFIG =================
@@ -11,26 +11,53 @@ CLIENT_ID = (os.getenv("FYERS_CLIENT_ID") or "").strip()
 ACCESS_TOKEN = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-WATCHLIST = (os.getenv("WATCHLIST") or "").strip()
+WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "false").strip().lower() == "true")
 
-# Strategy variables from Railway
-GAPUP_MIN_PCT = float(os.getenv("GAPUP_MIN_PCT", "0.0"))                 # open > prev high is main rule; extra gap % filter optional
-GAPUP_CANDLE_MAX_PCT = float(os.getenv("GAPUP_CANDLE_MAX_PCT", "1.5"))   # 1st 5m candle max range %
+# Holiday list optional
+NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
+
+# Variables from Railway
+GAPUP_MIN_PCT = float(os.getenv("GAPUP_MIN_PCT", "0.0"))                       # extra filter on open vs prev high %
+GAPUP_CANDLE_MAX_PCT = float(os.getenv("GAPUP_CANDLE_MAX_PCT", "1.5"))         # first 5m candle max range %
 INSIDE15_FIRST_CANDLE_MAX_PCT = float(os.getenv("INSIDE15_FIRST_CANDLE_MAX_PCT", "2.0"))
-TARGET_PCT = float(os.getenv("TARGET_PCT", "1.0")) / 100.0               # 1.0 -> 1%
-SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.1")) / 100.0          # 0.1 -> 0.1%
+TARGET_PCT = float(os.getenv("TARGET_PCT", "1.0")) / 100.0                     # 1.0 => 1%
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.1")) / 100.0               # 0.1 => 0.1%
 
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
-if not WATCHLIST:
+if not WATCHLIST_RAW:
     raise Exception("Missing WATCHLIST")
 
-# ================= FYERS =================
-fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, log_path="")
+# ================= WATCHLIST =================
+def convert_symbol(sym: str) -> str:
+    s = sym.strip().upper()
+    if not s:
+        return ""
+    if ":" in s:
+        return s
+    if s in {"NIFTY", "NIFTY50"}:
+        return "NSE:NIFTY50-INDEX"
+    if s == "BANKNIFTY":
+        return "NSE:NIFTYBANK-INDEX"
+    return f"NSE:{s}-EQ"
+
+SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
 
 # ================= HELPERS =================
+def now_ist():
+    return datetime.now(IST)
+
+def today_str():
+    return now_ist().strftime("%Y-%m-%d")
+
+def log(msg: str):
+    print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+def short_name(symbol: str) -> str:
+    return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
+
 def send(msg: str):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print(msg)
@@ -44,194 +71,203 @@ def send(msg: str):
     except Exception:
         print(msg)
 
-def now():
-    return datetime.now(IST)
-
-def today_str():
-    return now().strftime("%Y-%m-%d")
-
-def log(msg: str):
-    print(f"[{now().strftime('%H:%M:%S')}] {msg}", flush=True)
-
-def is_market_open():
-    t = now().time()
-    return t >= datetime.strptime("09:15", "%H:%M").time() and t <= datetime.strptime("15:30", "%H:%M").time()
-
-def convert(sym: str):
-    s = sym.strip().upper()
-    if ":" in s:
-        return s
-    if s in ["NIFTY", "NIFTY50"]:
-        return "NSE:NIFTY50-INDEX"
-    if s == "BANKNIFTY":
-        return "NSE:NIFTYBANK-INDEX"
-    return f"NSE:{s}-EQ"
-
-def short_name(symbol: str):
-    return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
-
-def candle_time(ts: int):
+def candle_dt(ts: int):
     return datetime.fromtimestamp(ts, IST)
 
-def pct_range(high: float, low: float, close: float):
+def pct_range(high: float, low: float, close: float) -> float:
     if close == 0:
         return 0.0
     return ((high - low) / close) * 100.0
 
-SYMBOLS = [convert(s) for s in WATCHLIST.split(",") if s.strip()]
+def fmt2(x: float) -> str:
+    return f"{x:.2f}"
 
-# ================= DATA =================
-def get_history(symbol, res, days=5):
+# ================= MARKET SCHEDULER =================
+def get_holiday_set():
+    out = set()
+    for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
+        p = part.strip()
+        if p:
+            out.add(p)
+    return out
+
+HOLIDAYS = get_holiday_set()
+
+def is_market_day(dt_obj):
+    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in HOLIDAYS
+
+def is_market_open():
+    now = now_ist()
+    return is_market_day(now) and dtime(9, 15) <= now.time() <= dtime(15, 30)
+
+def next_market_open_datetime():
+    now = now_ist()
+    if is_market_day(now) and now.time() < dtime(9, 15):
+        return now.replace(hour=9, minute=15, second=0, microsecond=0)
+
+    candidate = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+    while not is_market_day(candidate):
+        candidate = (candidate + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+    return candidate
+
+# ================= FYERS =================
+fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, log_path="")
+
+def get_history(symbol, resolution, days=10):
     payload = {
         "symbol": symbol,
-        "resolution": str(res),
+        "resolution": str(resolution),
         "date_format": "1",
-        "range_from": (now() - timedelta(days=days)).strftime("%Y-%m-%d"),
-        "range_to": now().strftime("%Y-%m-%d"),
+        "range_from": (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d"),
+        "range_to": now_ist().strftime("%Y-%m-%d"),
         "cont_flag": "1",
     }
     try:
         data = fyers.history(data=payload)
     except TypeError:
         data = fyers.history(payload)
-    return data.get("candles", [])
+    except Exception as e:
+        log(f"HISTORY ERROR {symbol} {resolution}: {e}")
+        return []
 
-def get_today_candles(symbol, res, days=5):
-    candles = get_history(symbol, res, days)
-    out = []
+    candles = data.get("candles", [])
+    if not candles:
+        log(f"HISTORY EMPTY {symbol} {resolution}")
+    return candles
+
+# ================= CANDLE SELECTION =================
+def get_today_candles(symbol, resolution, days=10):
+    candles = get_history(symbol, resolution, days)
     td = today_str()
+    out = []
+
     for c in candles:
         try:
-            if candle_time(c[0]).strftime("%Y-%m-%d") == td:
+            if candle_dt(c[0]).strftime("%Y-%m-%d") == td:
                 out.append(c)
         except Exception:
             pass
+
     out.sort(key=lambda x: x[0])
     return out
 
 def get_previous_daily(symbol):
-    daily = get_history(symbol, "D", 10)
-    parsed = []
+    daily = get_history(symbol, "D", 15)
     td = today_str()
+    out = []
     for c in daily:
         try:
-            dt = candle_time(c[0]).strftime("%Y-%m-%d")
-            if dt < td:
-                parsed.append(c)
+            ds = candle_dt(c[0]).strftime("%Y-%m-%d")
+            if ds < td:
+                out.append(c)
         except Exception:
             pass
-    parsed.sort(key=lambda x: x[0])
-    return parsed[-1] if parsed else None
+    out.sort(key=lambda x: x[0])
+    return out[-1] if out else None
+
+def get_first_5m_candle_today(symbol):
+    c = get_today_candles(symbol, 5, 5)
+    return c[0] if len(c) >= 1 else None
+
+def get_first_two_15m_candles_today(symbol):
+    c = get_today_candles(symbol, 15, 5)
+    if len(c) >= 2:
+        return c[0], c[1]
+    return None, None
 
 # ================= RESULT ENGINE =================
-def evaluate_sell_result(candles, entry, target, stoploss):
+def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
     """
-    candles: list of intraday candles AFTER entry candle
-    Sell logic:
-      target hit if Low <= target
-      stoploss hit if High >= stoploss
-      if both in same candle -> conservative: Stoploss first
+    Conservative rule:
+    If both target and stoploss touched in same candle -> Stoploss first
     """
-    for c in candles:
+    for c in candles_after_entry:
         high = float(c[2])
         low = float(c[3])
 
-        # conservative assumption if both touched same candle
         if high >= stoploss and low <= target:
             return "Stoploss 🛑", stoploss
-
         if high >= stoploss:
             return "Stoploss 🛑", stoploss
-
         if low <= target:
             return "Target 🎯", target
 
-    if candles:
-        last_close = float(candles[-1][4])
-        return "Day End", last_close
+    if candles_after_entry:
+        return "Day End", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
-def evaluate_buy_result(candles, entry, target, stoploss):
+def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
     """
-    Buy logic:
-      target hit if High >= target
-      stoploss hit if Low <= stoploss
-      if both in same candle -> conservative: Stoploss first
+    Conservative rule:
+    If both target and stoploss touched in same candle -> Stoploss first
     """
-    for c in candles:
+    for c in candles_after_entry:
         high = float(c[2])
         low = float(c[3])
 
         if low <= stoploss and high >= target:
             return "Stoploss 🛑", stoploss
-
         if low <= stoploss:
             return "Stoploss 🛑", stoploss
-
         if high >= target:
             return "Target 🎯", target
 
-    if candles:
-        last_close = float(candles[-1][4])
-        return "Day End", last_close
+    if candles_after_entry:
+        return "Day End", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
-# ================= STRATEGY ANALYSIS =================
-def analyze_gapup_sell_after_market(symbol):
+# ================= GAP-UP ANALYSIS =================
+def analyze_gapup_sell(symbol):
     """
     Rule:
-    - today's first 5m candle
-    - open > previous day high
-    - optional gap % filter
-    - first 5m candle range < GAPUP_CANDLE_MAX_PCT
-    - entry = first 5m low breakdown
+    - Open > Previous Day High
+    - gap % >= GAPUP_MIN_PCT
+    - first 5m range % <= GAPUP_CANDLE_MAX_PCT
+    - sell entry = first 5m low
     - target = entry - TARGET_PCT
     - sl = first 5m high + buffer
-    - evaluate outcome from later 5m candles
     """
     prev_day = get_previous_daily(symbol)
-    today_5m = get_today_candles(symbol, 5, 5)
+    first_5m = get_first_5m_candle_today(symbol)
 
-    if prev_day is None or len(today_5m) < 1:
+    if prev_day is None or first_5m is None:
         return None
 
-    first = today_5m[0]
-
     prev_high = float(prev_day[2])
-    open_ = float(first[1])
-    high = float(first[2])
-    low = float(first[3])
-    close = float(first[4])
+    o = float(first_5m[1])
+    h = float(first_5m[2])
+    l = float(first_5m[3])
+    c = float(first_5m[4])
 
-    gap_vs_prev_high_pct = ((open_ - prev_high) / prev_high) * 100 if prev_high else 0.0
-    first_range_pct = pct_range(high, low, close)
+    gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0.0
+    candle_pct = pct_range(h, l, c)
 
     valid = (
-        open_ > prev_high
-        and gap_vs_prev_high_pct >= GAPUP_MIN_PCT
-        and first_range_pct <= GAPUP_CANDLE_MAX_PCT
+        o > prev_high and
+        gap_pct >= GAPUP_MIN_PCT and
+        candle_pct <= GAPUP_CANDLE_MAX_PCT
     )
 
     if not valid:
         return None
 
-    entry = low
+    entry = round(l, 2)
     target = round(entry * (1 - TARGET_PCT), 2)
-    stoploss = round(high * (1 + SL_BUFFER_PCT), 2)
+    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
 
-    later_candles = today_5m[1:]
-    result, exit_price = evaluate_sell_result(later_candles, entry, target, stoploss)
-
+    later_5m = get_today_candles(symbol, 5, 5)[1:]
+    result, exit_price = evaluate_sell_result(later_5m, entry, target, stoploss)
     pl = round(entry - exit_price, 2)
 
     return {
         "symbol": short_name(symbol),
         "strategy": "Gap-Up Breakdown",
         "type": "SELL",
-        "gap_pct": round(gap_vs_prev_high_pct, 2),
-        "entry": round(entry, 2),
+        "gap_pct": round(gap_pct, 2),
+        "candle_pct": round(candle_pct, 2),
+        "entry": entry,
         "target": target,
         "stoploss": stoploss,
         "result": result,
@@ -239,54 +275,67 @@ def analyze_gapup_sell_after_market(symbol):
         "pl": pl,
     }
 
-def analyze_15m_inside_after_market(symbol):
+# ================= 15M INSIDE ANALYSIS =================
+def analyze_15m_inside(symbol):
     """
     Rule:
-    - first 15m candle range < INSIDE15_FIRST_CANDLE_MAX_PCT
-    - second candle inside first
+    - first 15m candle range % <= INSIDE15_FIRST_CANDLE_MAX_PCT
+    - second 15m candle inside first
     - buy above first high
     - sell below first low
-    - evaluate from later 15m candles
+    - evaluate later 15m candles
     """
-    today_15m = get_today_candles(symbol, 15, 5)
-    if len(today_15m) < 2:
+    c1, c2 = get_first_two_15m_candles_today(symbol)
+    if c1 is None or c2 is None:
         return None
 
-    c1 = today_15m[0]
-    c2 = today_15m[1]
+    h1 = float(c1[2])
+    l1 = float(c1[3])
+    c1_close = float(c1[4])
 
-    h1, l1, c1close = float(c1[2]), float(c1[3]), float(c1[4])
-    h2, l2 = float(c2[2]), float(c2[3])
+    h2 = float(c2[2])
+    l2 = float(c2[3])
 
-    range_pct = pct_range(h1, l1, c1close)
+    if c1_close <= 0:
+        return None
+
+    first_range_pct = pct_range(h1, l1, c1_close)
     inside = h2 < h1 and l2 > l1
 
-    if not (range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
+    log(f"15M {short_name(symbol)} | H1:{h1} L1:{l1} H2:{h2} L2:{l2} Range%:{first_range_pct:.2f} Inside:{inside}")
+
+    if not (first_range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
 
-    later = today_15m[2:]
+    later_15m = get_today_candles(symbol, 15, 5)[2:]
 
-    # BUY side
-    buy_entry = h1
+    buy_entry = round(h1, 2)
     buy_target = round(buy_entry * (1 + TARGET_PCT), 2)
     buy_sl = round(l1 * (1 - SL_BUFFER_PCT), 2)
-    buy_result, buy_exit = evaluate_buy_result(later, buy_entry, buy_target, buy_sl)
+    buy_result, buy_exit = evaluate_buy_result(later_15m, buy_entry, buy_target, buy_sl)
     buy_pl = round(buy_exit - buy_entry, 2)
 
-    # SELL side
-    sell_entry = l1
+    sell_entry = round(l1, 2)
     sell_target = round(sell_entry * (1 - TARGET_PCT), 2)
     sell_sl = round(h1 * (1 + SL_BUFFER_PCT), 2)
-    sell_result, sell_exit = evaluate_sell_result(later, sell_entry, sell_target, sell_sl)
+    sell_result, sell_exit = evaluate_sell_result(later_15m, sell_entry, sell_target, sell_sl)
     sell_pl = round(sell_entry - sell_exit, 2)
 
     return {
         "symbol": short_name(symbol),
-        "strategy_buy": "15 Min Inside Candle Breakout",
-        "strategy_sell": "15 Min Inside Candle Breakdown",
+        "range_pct": round(first_range_pct, 2),
+        "first": {
+            "high": round(h1, 2),
+            "low": round(l1, 2),
+        },
+        "second": {
+            "high": round(h2, 2),
+            "low": round(l2, 2),
+        },
         "buy": {
+            "strategy": "15 Min Inside Candle Breakout",
             "type": "BUY",
-            "entry": round(buy_entry, 2),
+            "entry": buy_entry,
             "target": buy_target,
             "stoploss": buy_sl,
             "result": buy_result,
@@ -294,8 +343,9 @@ def analyze_15m_inside_after_market(symbol):
             "pl": buy_pl,
         },
         "sell": {
+            "strategy": "15 Min Inside Candle Breakdown",
             "type": "SELL",
-            "entry": round(sell_entry, 2),
+            "entry": sell_entry,
             "target": sell_target,
             "stoploss": sell_sl,
             "result": sell_result,
@@ -303,68 +353,6 @@ def analyze_15m_inside_after_market(symbol):
             "pl": sell_pl,
         }
     }
-
-def analyze_pivot_rejection_after_market(symbol):
-    """
-    Simple historical pivot rejection summary:
-    - use today's first two 30m candles
-    - check rejection at P/R1/R2/R3
-    - if sell entry triggered, evaluate result using later 30m candles
-    """
-    today_30m = get_today_candles(symbol, 30, 5)
-    if len(today_30m) < 2:
-        return None
-
-    prev_day = get_previous_daily(symbol)
-    if prev_day is None:
-        return None
-
-    ph = float(prev_day[2])
-    pl = float(prev_day[3])
-    pc = float(prev_day[4])
-
-    pivot = (ph + pl + pc) / 3
-    levels = {
-        "P": pivot,
-        "R1": (2 * pivot) - pl,
-        "R2": pivot + (ph - pl),
-        "R3": ph + 2 * (pivot - pl),
-        "S1": (2 * pivot) - ph,
-        "S2": pivot - (ph - pl),
-        "S3": pl - 2 * (ph - pivot),
-    }
-
-    c1 = today_30m[0]
-    c2 = today_30m[1]
-    later = today_30m[2:]
-
-    for level_name, level in levels.items():
-        c1_green = float(c1[4]) > float(c1[1])
-        c2_red = float(c2[4]) < float(c2[1])
-        c1_touch = float(c1[3]) <= level <= float(c1[2])
-        c2_touch = float(c2[3]) <= level <= float(c2[2])
-        c2_below = float(c2[4]) < level
-
-        if c1_green and c1_touch and c2_red and c2_touch and c2_below:
-            entry = float(c2[3])
-            target = round(entry * (1 - TARGET_PCT), 2)
-            stoploss = round(max(float(c1[2]), float(c2[2])) * (1 + SL_BUFFER_PCT), 2)
-            result, exit_price = evaluate_sell_result(later, entry, target, stoploss)
-            pl_value = round(entry - exit_price, 2)
-
-            return {
-                "symbol": short_name(symbol),
-                "strategy": f"Pivot Rejection ({level_name})",
-                "type": "SELL",
-                "entry": round(entry, 2),
-                "target": target,
-                "stoploss": stoploss,
-                "result": result,
-                "exit_price": round(exit_price, 2),
-                "pl": pl_value,
-            }
-
-    return None
 
 # ================= FORMATTERS =================
 def format_gap_summary(items):
@@ -376,25 +364,23 @@ def format_gap_summary(items):
         lines.append(f"{i}. {x['symbol']} ({x['gap_pct']}%)")
     return "\n".join(lines)
 
-def format_inside_summary(items):
+def format_15m_summary(items):
     if not items:
         return "🕯️15 Min Inside Candle🕯️\n\nNone"
 
     lines = ["🕯️15 Min Inside Candle🕯️", ""]
     for i, x in enumerate(items, 1):
-        lines.append(f"{i}. {x['symbol']}")
-    return "\n".join(lines)
+        lines += [
+            f"{i}. {x['symbol']}",
+            f"1st Candle  H:{x['first']['high']} L:{x['first']['low']} Range%:{x['range_pct']}",
+            f"2nd Candle  H:{x['second']['high']} L:{x['second']['low']}",
+            f"BUY Entry:{x['buy']['entry']} Target:{x['buy']['target']} SL:{x['buy']['stoploss']}",
+            f"SELL Entry:{x['sell']['entry']} Target:{x['sell']['target']} SL:{x['sell']['stoploss']}",
+            "",
+        ]
+    return "\n".join(lines).strip()
 
-def format_pivot_summary(items):
-    if not items:
-        return "⛔PIVOT Alert⛔\n\nNone"
-
-    lines = ["⛔PIVOT Alert⛔", ""]
-    for x in items:
-        lines.append(x["symbol"])
-    return "\n".join(lines)
-
-def format_after_market_results(gap_results, inside_results, pivot_results):
+def format_after_market_results(gap_results, inside_results):
     lines = ["📘 AFTER MARKET RESULTS", ""]
 
     if gap_results:
@@ -417,30 +403,15 @@ def format_after_market_results(gap_results, inside_results, pivot_results):
         for x in inside_results:
             b = x["buy"]
             s = x["sell"]
-
             bsign = "+" if b["pl"] > 0 else ""
             ssign = "+" if s["pl"] > 0 else ""
 
             lines += [
                 x["symbol"],
+                f"1st Candle  H:{x['first']['high']} L:{x['first']['low']} Range%:{x['range_pct']}",
+                f"2nd Candle  H:{x['second']['high']} L:{x['second']['low']}",
                 f"BUY  -> Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']} Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
                 f"SELL -> Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']} Result:{s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
-                "",
-            ]
-
-    if pivot_results:
-        lines.append("⛔ PIVOT REJECTION")
-        for x in pivot_results:
-            sign = "+" if x["pl"] > 0 else ""
-            lines += [
-                x["symbol"],
-                f"Strategy : {x['strategy']}",
-                f"Entry    : {x['entry']}",
-                f"Target   : {x['target']}",
-                f"Stoploss : {x['stoploss']}",
-                f"Result   : {x['result']}",
-                f"Exit/LTP : {x['exit_price']}",
-                f"P/L      : {sign}{x['pl']}",
                 "",
             ]
 
@@ -467,24 +438,24 @@ def run_live():
         if not is_market_open():
             return
 
-        t = now().time()
+        t = now_ist().time()
 
-        if not gap_sent and t >= datetime.strptime("09:20", "%H:%M").time():
+        if not gap_sent and t >= dtime(9, 20):
             gap_results = []
             for sym in SYMBOLS:
-                r = analyze_gapup_sell_after_market(sym)
+                r = analyze_gapup_sell(sym)
                 if r:
                     gap_results.append(r)
             send(format_gap_summary(gap_results))
             gap_sent = True
 
-        if not inside_sent and t >= datetime.strptime("09:45", "%H:%M").time():
+        if not inside_sent and t >= dtime(9, 45):
             inside_results = []
             for sym in SYMBOLS:
-                r = analyze_15m_inside_after_market(sym)
+                r = analyze_15m_inside(sym)
                 if r:
                     inside_results.append(r)
-            send(format_inside_summary(inside_results))
+            send(format_15m_summary(inside_results))
             inside_sent = True
 
         time.sleep(30)
@@ -495,32 +466,27 @@ def run_after_market():
 
     gap_results = []
     inside_results = []
-    pivot_results = []
 
     for sym in SYMBOLS:
-        g = analyze_gapup_sell_after_market(sym)
+        g = analyze_gapup_sell(sym)
         if g:
             gap_results.append(g)
 
-        i = analyze_15m_inside_after_market(sym)
+        i = analyze_15m_inside(sym)
         if i:
             inside_results.append(i)
 
-        p = analyze_pivot_rejection_after_market(sym)
-        if p:
-            pivot_results.append(p)
-
     send(format_gap_summary(gap_results))
-    send(format_inside_summary(inside_results))
-    send(format_pivot_summary(pivot_results))
-    send(format_after_market_results(gap_results, inside_results, pivot_results))
+    send(format_15m_summary(inside_results))
+    send(format_after_market_results(gap_results, inside_results))
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    if not is_market_open():
+    if is_market_open():
+        run_live()
+    else:
         if AFTER_MARKET_RUN:
             run_after_market()
         else:
-            log("Market closed. AFTER_MARKET_RUN disabled.")
-    else:
-        run_live()
+            nxt = next_market_open_datetime()
+            log(f"Market closed. AFTER_MARKET_RUN disabled. Next open: {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
