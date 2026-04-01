@@ -17,7 +17,6 @@ NSE_HOLIDAYS_RAW = os.getenv(
 
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing FYERS_CLIENT_ID or FYERS_ACCESS_TOKEN")
-
 if not TELEGRAM_TOKEN or not CHAT_ID:
     raise Exception("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 
@@ -35,17 +34,19 @@ SYMBOLS = [
     "NSE:POWERGRID-EQ","NSE:RELIANCE-EQ","NSE:SBILIFE-EQ","NSE:SHRIRAMFIN-EQ",
     "NSE:SBIN-EQ","NSE:SUNPHARMA-EQ","NSE:TATACONSUM-EQ","NSE:TATAMOTORS-EQ",
     "NSE:TATASTEEL-EQ","NSE:TCS-EQ","NSE:TECHM-EQ","NSE:TITAN-EQ",
-    "NSE:TRENT-EQ","NSE:WIPRO-EQ",
+    "NSE:TRENT-EQ","NSE:WIPRO-EQ"
 ]
 
 IST = timezone(timedelta(hours=5, minutes=30))
-POLL_SECONDS = 20
-STRIKECOUNT = 12
-FIRST_15M_MAX_RANGE_PCT = 2.0
-GAPUP_FIRST_5M_MAX_RANGE_PCT = 1.5
-TARGET_PCT = 0.01
-SL_BUFFER_PCT = 0.001
-OI_UPDATE_EVERY_SECONDS = 300
+
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+STRIKECOUNT = int(os.getenv("STRIKECOUNT", "12"))
+
+FIRST_15M_MAX_RANGE_PCT = float(os.getenv("FIRST_15M_MAX_RANGE_PCT", "2.0"))
+GAPUP_FIRST_5M_MAX_RANGE_PCT = float(os.getenv("GAPUP_FIRST_5M_MAX_RANGE_PCT", "1.5"))
+TARGET_PCT = float(os.getenv("TARGET_PCT", "0.01"))
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.001"))
+OI_UPDATE_EVERY_SECONDS = int(os.getenv("OI_UPDATE_EVERY_SECONDS", "300"))
 
 # ================= HOLIDAYS / SCHEDULER =================
 def get_holiday_set():
@@ -66,6 +67,9 @@ def today_ist_str():
 
 def ist_time_str():
     return now_ist().strftime("%H:%M:%S")
+
+def log(msg):
+    print(f"[{ist_time_str()}] {msg}", flush=True)
 
 def is_weekend(dt_obj):
     return dt_obj.weekday() >= 5
@@ -103,18 +107,16 @@ _last_sleep_log_for = None
 
 def sleep_until_next_market_open():
     global _last_sleep_log_for
-
     nxt = next_market_open_datetime()
     nxt_key = nxt.strftime("%Y-%m-%d %H:%M:%S")
 
     if _last_sleep_log_for != nxt_key:
-        print(f"[{ist_time_str()}] Market closed. Sleeping until {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}", flush=True)
+        log(f"Market closed. Sleeping until {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
         _last_sleep_log_for = nxt_key
 
     while True:
         remaining = (nxt - now_ist()).total_seconds()
         if remaining <= 1:
-            print(f"[{ist_time_str()}] Market opening now...", flush=True)
             _last_sleep_log_for = None
             break
         time.sleep(min(60, max(1, int(remaining))))
@@ -152,13 +154,18 @@ fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, log_path=
 def get_quotes():
     rl.wait()
     data = fyers.quotes({"symbols": ",".join(SYMBOLS)})
-    return {i["n"]: i["v"]["lp"] for i in data.get("d", [])}
+    out = {}
+    for item in data.get("d", []):
+        try:
+            out[item["n"]] = float(item["v"]["lp"])
+        except Exception:
+            pass
+    return out
 
 def get_history(symbol, resolution, days=5):
     rl.wait()
     today = now_ist().strftime("%Y-%m-%d")
     past = (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d")
-
     data = fyers.history({
         "symbol": symbol,
         "resolution": str(resolution),
@@ -167,7 +174,6 @@ def get_history(symbol, resolution, days=5):
         "range_to": today,
         "cont_flag": "1"
     })
-
     return data.get("candles", [])
 
 def get_option_chain(symbol):
@@ -183,8 +189,7 @@ def send(msg):
             timeout=20
         )
     except Exception as e:
-        print("Telegram error:", e, flush=True)
-        print(msg, flush=True)
+        log(f"Telegram error: {e}")
 
 # ================= UTIL =================
 def name(sym):
@@ -215,6 +220,46 @@ def arrow(v):
         return "↓"
     return "→"
 
+def is_same_day_epoch(ts, date_str):
+    dt = datetime.fromtimestamp(ts, IST)
+    return dt.strftime("%Y-%m-%d") == date_str
+
+def get_today_completed_5m_first(symbol):
+    candles = cache["5m"].get(symbol, [])
+    today = today_ist_str()
+    for c in candles:
+        ts = c[0]
+        dt = datetime.fromtimestamp(ts, IST)
+        if dt.strftime("%Y-%m-%d") == today and dt.time() == dtime(9, 15):
+            return c
+    return None
+
+def get_today_first_two_15m(symbol):
+    candles = cache["15m"].get(symbol, [])
+    today = today_ist_str()
+    today_candles = []
+    for c in candles:
+        ts = c[0]
+        dt = datetime.fromtimestamp(ts, IST)
+        if dt.strftime("%Y-%m-%d") == today:
+            today_candles.append(c)
+    today_candles.sort(key=lambda x: x[0])
+    if len(today_candles) >= 2:
+        return today_candles[0], today_candles[1]
+    return None, None
+
+def get_today_30m_candles(symbol):
+    candles = cache["30m"].get(symbol, [])
+    today = today_ist_str()
+    out = []
+    for c in candles:
+        ts = c[0]
+        dt = datetime.fromtimestamp(ts, IST)
+        if dt.strftime("%Y-%m-%d") == today:
+            out.append(c)
+    out.sort(key=lambda x: x[0])
+    return out
+
 # ================= CACHE =================
 cache = {
     "quotes": {},
@@ -223,24 +268,36 @@ cache = {
     "30m": {},
     "daily": {},
 }
+
 gapup_summary_sent_for_day = None
 inside15_summary_sent_for_day = None
 pivot_alert_seen_for_day = set()
 eod_sent_for_day = None
+
+gap_setup_done_for_day = None
+full_setup_done_for_day = None
+
 active_trades = {}
 closed_trades = []
 
 # ================= DATA LOADERS =================
-def load_morning_caches():
-    print(f"[{ist_time_str()}] Loading morning caches...", flush=True)
+def load_gapup_caches():
+    log("Loading gap-up caches...")
     for batch in chunk(SYMBOLS, 5):
         for s in batch:
+            cache["daily"][s] = get_history(s, "D", 7)
             cache["5m"][s] = get_history(s, 5, 5)
+        time.sleep(1)
+    log("Gap-up caches loaded.")
+
+def load_full_caches():
+    log("Loading 15m/30m caches...")
+    for batch in chunk(SYMBOLS, 5):
+        for s in batch:
             cache["15m"][s] = get_history(s, 15, 5)
             cache["30m"][s] = get_history(s, 30, 5)
-            cache["daily"][s] = get_history(s, "D", 7)
         time.sleep(1)
-    print(f"[{ist_time_str()}] Morning caches loaded.", flush=True)
+    log("15m/30m caches loaded.")
 
 def refresh_quotes_only():
     cache["quotes"] = get_quotes()
@@ -250,11 +307,11 @@ def get_oi_snapshot(symbol, ltp):
     data = get_option_chain(symbol)
     rows = data.get("data", {}).get("optionsChain", [])
     if not rows:
-        return [], "NO DATA", "WAIT"
+        return []
 
     strikes = sorted(set(r["strike_price"] for r in rows if r.get("strike_price") is not None))
     if not strikes:
-        return [], "NO DATA", "WAIT"
+        return []
 
     near = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(near)
@@ -278,7 +335,7 @@ def get_oi_snapshot(symbol, ltp):
             "pe_text": f"{human_oi(pe)} {arrow(pe)}",
         })
 
-    return result, "", ""
+    return result
 
 def classify_bias(snapshot, side):
     strong = 0
@@ -315,6 +372,7 @@ def classify_bias(snapshot, side):
 # ================= SUMMARIES =================
 def send_gapup_summary_if_due():
     global gapup_summary_sent_for_day
+
     if now_ist().time() < dtime(9, 20):
         return
     if gapup_summary_sent_for_day == today_ist_str():
@@ -323,12 +381,11 @@ def send_gapup_summary_if_due():
     found = []
     for s in SYMBOLS:
         d = cache["daily"].get(s, [])
-        f5 = cache["5m"].get(s, [])
-        if len(d) < 2 or len(f5) < 1:
+        c1 = get_today_completed_5m_first(s)
+        if len(d) < 2 or c1 is None:
             continue
 
         prev_day_high = d[-2][2]
-        c1 = f5[0]
         o, h, l, c = c1[1], c1[2], c1[3], c1[4]
         if c <= 0:
             continue
@@ -349,18 +406,18 @@ def send_gapup_summary_if_due():
 
 def send_inside15_summary_if_due():
     global inside15_summary_sent_for_day
-    if now_ist().time() < dtime(9, 50):
+
+    if now_ist().time() < dtime(9, 45):
         return
     if inside15_summary_sent_for_day == today_ist_str():
         return
 
     found = []
     for s in SYMBOLS:
-        c15 = cache["15m"].get(s, [])
-        if len(c15) < 2:
+        c1, c2 = get_today_first_two_15m(s)
+        if c1 is None or c2 is None:
             continue
 
-        c1, c2 = c15[0], c15[1]
         h1, l1, c1c = c1[2], c1[3], c1[4]
         h2, l2 = c2[2], c2[3]
         if c1c <= 0:
@@ -449,11 +506,11 @@ def maybe_send_oi_update(trade, ltp):
     if time.time() - trade["last_oi_update_ts"] < OI_UPDATE_EVERY_SECONDS:
         return
 
-    snapshot, _, _ = get_oi_snapshot(trade["symbol"], ltp)
+    snapshot = get_oi_snapshot(trade["symbol"], ltp)
     if not snapshot:
         return
-    bias, action = classify_bias(snapshot, trade["side"])
 
+    bias, action = classify_bias(snapshot, trade["side"])
     lines = [
         "📊 OI UPDATE (5 MIN)",
         "",
@@ -521,8 +578,13 @@ def build_eod_summary():
 
 def reset_next_day_state():
     global gapup_summary_sent_for_day, inside15_summary_sent_for_day
+    global gap_setup_done_for_day, full_setup_done_for_day
+
     gapup_summary_sent_for_day = None
     inside15_summary_sent_for_day = None
+    gap_setup_done_for_day = None
+    full_setup_done_for_day = None
+
     pivot_alert_seen_for_day.clear()
     active_trades.clear()
     closed_trades.clear()
@@ -530,12 +592,11 @@ def reset_next_day_state():
 # ================= STRATEGY CHECKS =================
 def check_gapup_sell(symbol, ltp):
     d = cache["daily"].get(symbol, [])
-    f5 = cache["5m"].get(symbol, [])
-    if len(d) < 2 or len(f5) < 1:
+    c1 = get_today_completed_5m_first(symbol)
+    if len(d) < 2 or c1 is None:
         return
 
     prev_day_high = d[-2][2]
-    c1 = f5[0]
     o, h, low, c = c1[1], c1[2], c1[3], c1[4]
     if c <= 0:
         return
@@ -544,7 +605,7 @@ def check_gapup_sell(symbol, ltp):
     valid = o > prev_day_high and rng_pct < GAPUP_FIRST_5M_MAX_RANGE_PCT
 
     if valid and ltp < low and trade_key("Gap-Up Breakdown", symbol) not in active_trades:
-        oi_snapshot, _, _ = get_oi_snapshot(symbol, ltp)
+        oi_snapshot = get_oi_snapshot(symbol, ltp)
         bias, action = classify_bias(oi_snapshot, "SELL")
         entry = low
         target = entry * (1 - TARGET_PCT)
@@ -572,11 +633,10 @@ def check_gapup_sell(symbol, ltp):
         register_trade("Gap-Up Breakdown", symbol, "SELL", entry, target, stoploss, oi_snapshot)
 
 def check_15m_breakout(symbol, ltp):
-    c15 = cache["15m"].get(symbol, [])
-    if len(c15) < 2:
+    c1, c2 = get_today_first_two_15m(symbol)
+    if c1 is None or c2 is None:
         return
 
-    c1, c2 = c15[0], c15[1]
     h1, l1, c1c = c1[2], c1[3], c1[4]
     h2, l2 = c2[2], c2[3]
     if c1c <= 0:
@@ -588,7 +648,7 @@ def check_15m_breakout(symbol, ltp):
         return
 
     if ltp > h1 and trade_key("15 Min Breakout", symbol) not in active_trades:
-        oi_snapshot, _, _ = get_oi_snapshot(symbol, ltp)
+        oi_snapshot = get_oi_snapshot(symbol, ltp)
         bias, action = classify_bias(oi_snapshot, "BUY")
         entry = h1
         target = entry * (1 + TARGET_PCT)
@@ -617,7 +677,7 @@ def check_15m_breakout(symbol, ltp):
         return
 
     if ltp < l1 and trade_key("15 Min Breakdown", symbol) not in active_trades:
-        oi_snapshot, _, _ = get_oi_snapshot(symbol, ltp)
+        oi_snapshot = get_oi_snapshot(symbol, ltp)
         bias, action = classify_bias(oi_snapshot, "SELL")
         entry = l1
         target = entry * (1 - TARGET_PCT)
@@ -645,7 +705,7 @@ def check_15m_breakout(symbol, ltp):
         register_trade("15 Min Breakdown", symbol, "SELL", entry, target, stoploss, oi_snapshot)
 
 def check_pivot_sell(symbol, ltp, new_pivot_names):
-    c30 = cache["30m"].get(symbol, [])
+    c30 = get_today_30m_candles(symbol)
     if len(c30) < 2:
         return
 
@@ -653,8 +713,8 @@ def check_pivot_sell(symbol, ltp, new_pivot_names):
     lows = [c[3] for c in c30[:-1]]
     if not highs or not lows:
         return
-    close_prev = c30[-2][4]
 
+    close_prev = c30[-2][4]
     h = max(highs)
     l = min(lows)
     p = (h + l + close_prev) / 3
@@ -682,7 +742,7 @@ def check_pivot_sell(symbol, ltp, new_pivot_names):
 
             entry = c2[3]
             if ltp <= entry and trade_key("Pivot Rejection", symbol) not in active_trades:
-                oi_snapshot, _, _ = get_oi_snapshot(symbol, ltp)
+                oi_snapshot = get_oi_snapshot(symbol, ltp)
                 bias, action = classify_bias(oi_snapshot, "SELL")
                 target = entry * (1 - TARGET_PCT)
                 stoploss = max(c1[2], c2[2]) * (1 + SL_BUFFER_PCT)
@@ -713,12 +773,10 @@ def check_pivot_sell(symbol, ltp, new_pivot_names):
 
 # ================= MAIN =================
 def main():
-    global eod_sent_for_day
+    global eod_sent_for_day, gap_setup_done_for_day, full_setup_done_for_day
 
-    print(f"[{ist_time_str()}] Bot started.", flush=True)
-    send("🚀 Ultimate bot started with scheduler + holidays + rate limit protection")
-
-    morning_loaded_for_day = None
+    log("Bot started.")
+    send("🚀 Ultimate bot started with late-start summary logic + scheduler + holidays + rate limit protection")
 
     while True:
         now = now_ist()
@@ -730,52 +788,62 @@ def main():
                     refresh_quotes_only()
                     close_all_open_trades_day_end()
                 except Exception as e:
-                    print(f"EOD close error: {e}", flush=True)
+                    log(f"EOD close error: {e}")
 
                 send(build_eod_summary())
                 eod_sent_for_day = today
                 sleep_until_next_market_open()
                 reset_next_day_state()
-                morning_loaded_for_day = None
                 continue
 
             sleep_until_next_market_open()
             reset_next_day_state()
-            morning_loaded_for_day = None
             continue
 
-        if morning_loaded_for_day != today and now.time() >= dtime(9, 45):
-            load_morning_caches()
-            morning_loaded_for_day = today
+        # If started late, this still loads and sends correctly
+        if gap_setup_done_for_day != today and now.time() >= dtime(9, 20):
+            load_gapup_caches()
+            gap_setup_done_for_day = today
+            send_gapup_summary_if_due()
+
+        if full_setup_done_for_day != today and now.time() >= dtime(9, 45):
+            load_full_caches()
+            full_setup_done_for_day = today
+            send_inside15_summary_if_due()
 
         refresh_quotes_only()
 
-        if morning_loaded_for_day == today:
-            send_gapup_summary_if_due()
-            send_inside15_summary_if_due()
+        if gap_setup_done_for_day == today:
+            for symbol, ltp in cache["quotes"].items():
+                try:
+                    check_gapup_sell(symbol, ltp)
+                except Exception as e:
+                    log(f"Gap strategy error {symbol}: {e}")
 
+        if full_setup_done_for_day == today:
             new_pivot_names = set()
 
             for symbol, ltp in cache["quotes"].items():
                 try:
-                    check_gapup_sell(symbol, ltp)
                     check_15m_breakout(symbol, ltp)
                     check_pivot_sell(symbol, ltp, new_pivot_names)
                 except Exception as e:
-                    print(f"Strategy error {symbol}: {e}", flush=True)
+                    log(f"15m/pivot strategy error {symbol}: {e}")
 
             if new_pivot_names:
                 pivot_alert_seen_for_day.update(new_pivot_names)
                 send_pivot_watch_summary_if_new(new_pivot_names)
 
-            for key in list(active_trades.keys()):
-                trade = active_trades.get(key)
-                if not trade:
-                    continue
-                ltp = float(cache["quotes"].get(trade["symbol"], trade["entry"]))
-                manage_trade_by_price(trade, ltp)
-                if key in active_trades:
-                    maybe_send_oi_update(active_trades[key], ltp)
+        for key in list(active_trades.keys()):
+            trade = active_trades.get(key)
+            if not trade:
+                continue
+
+            ltp = float(cache["quotes"].get(trade["symbol"], trade["entry"]))
+            manage_trade_by_price(trade, ltp)
+
+            if key in active_trades:
+                maybe_send_oi_update(active_trades[key], ltp)
 
         time.sleep(POLL_SECONDS)
 
