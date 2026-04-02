@@ -606,7 +606,6 @@ def run_after_market_once():
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
 
 def run_live_day():
-def run_live_day():
     gap_sent = False
     inside_sent = False
     pivot_sent = False
