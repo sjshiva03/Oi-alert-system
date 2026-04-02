@@ -646,3 +646,24 @@ def run_live_day():
             eod_sent = True
 
         time.sleep(POLL_SECONDS)
+
+# ================= MAIN =================
+def main():
+    profile = check_auth()
+    send(
+        f"🚀 BOT STARTED\n"
+        f"Profile status: {profile.get('s')}\n"
+        f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
+        f"Analysis day={analysis_date_str()}"
+    )
+
+    while True:
+        if is_market_open():
+            run_live_day()
+        else:
+            if AFTER_MARKET_RUN:
+                run_after_market_once()
+            sleep_until_next_market_open()
+
+if __name__ == "__main__":
+    main()
