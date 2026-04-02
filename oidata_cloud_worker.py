@@ -63,6 +63,18 @@ def send(msg: str):
     except Exception as e:
         log(f"Telegram error: {e}")
 
+def send_long_message(text: str, chunk_size: int = 3500):
+    if not text:
+        return
+    while len(text) > chunk_size:
+        cut = text.rfind("\n", 0, chunk_size)
+        if cut == -1:
+            cut = chunk_size
+        send(text[:cut])
+        text = text[cut:].lstrip()
+    if text:
+        send(text)
+
 def short_name(symbol: str) -> str:
     return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
 
@@ -86,7 +98,7 @@ def dedupe_candles_by_ts(candles):
     out.sort(key=lambda x: x[0])
     return out
 
-# ================= HOLIDAYS / MARKET TIME =================
+# ================= MARKET TIME =================
 def get_holiday_set():
     out = set()
     for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
@@ -163,8 +175,7 @@ def get_history(symbol, resolution, days=10):
     except Exception as e:
         log(f"HISTORY ERROR {symbol} {resolution}: {e}")
         return []
-    candles = data.get("candles", [])
-    return dedupe_candles_by_ts(candles)
+    return dedupe_candles_by_ts(data.get("candles", []))
 
 # ================= CANDLE HELPERS =================
 def get_analysis_day_candles(symbol, resolution, days=10):
@@ -301,13 +312,6 @@ def analyze_15m_inside(symbol):
     range_pct = pct_range(h1, l1, c1_close)
     inside = h2 <= h1 and l2 >= l1
 
-    log(
-        f"15M {short_name(symbol)} | "
-        f"C1 H:{h1} L:{l1} C:{c1_close} | "
-        f"C2 H:{h2} L:{l2} | "
-        f"Range%:{range_pct:.2f} | Inside:{inside}"
-    )
-
     if not (range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
 
@@ -350,7 +354,7 @@ def analyze_15m_inside(symbol):
         }
     }
 
-# ================= FORMATTERS =================
+# ================= MESSAGE FORMATTERS =================
 def format_gapup_message(gap_items):
     if not gap_items:
         return "⚡ GAP UP PLUS STOCKS (%) ⚡\n\nNone"
@@ -368,46 +372,46 @@ def format_inside_list_message(inside_items):
     for i, x in enumerate(inside_items, 1):
         lines += [
             f"{i}. {x['symbol']}",
-            f"1st Candle  H:{x['first_high']} L:{x['first_low']} Range%:{x['range_pct']}",
-            f"2nd Candle  H:{x['second_high']} L:{x['second_low']}",
+            f"1st Candle H:{x['first_high']} L:{x['first_low']} Range%:{x['range_pct']}",
+            f"2nd Candle H:{x['second_high']} L:{x['second_low']}",
             ""
         ]
     return "\n".join(lines).strip()
 
-def format_entry_outcome_message(gap_items, inside_items):
-    lines = ["📘 IF ENTRY TAKEN, WHAT HAPPENED", ""]
+def format_gapup_results(gap_items):
+    if not gap_items:
+        return "📘 GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
 
-    if gap_items:
-        lines.append("⚡ GAP UP PLUS")
-        for x in gap_items:
-            sign = "+" if x["pl"] > 0 else ""
-            lines += [
-                x["symbol"],
-                f"SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
-                f"Result:{x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
-                ""
-            ]
+    lines = ["📘 GAP UP PLUS - IF ENTRY TAKEN", ""]
+    for x in gap_items:
+        sign = "+" if x["pl"] > 0 else ""
+        lines += [
+            x["symbol"],
+            f"SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"Result:{x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
+            ""
+        ]
+    return "\n".join(lines).strip()
 
-    if inside_items:
-        lines.append("🕯️ 15 MIN INSIDE CANDLE")
-        for x in inside_items:
-            b = x["buy"]
-            s = x["sell"]
-            bsign = "+" if b["pl"] > 0 else ""
-            ssign = "+" if s["pl"] > 0 else ""
+def format_inside_results(inside_items):
+    if not inside_items:
+        return "📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
 
-            lines += [
-                x["symbol"],
-                f"BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
-                f"     Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
-                f"SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
-                f"     Result:{s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
-                ""
-            ]
+    lines = ["📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
+    for x in inside_items:
+        b = x["buy"]
+        s = x["sell"]
+        bsign = "+" if b["pl"] > 0 else ""
+        ssign = "+" if s["pl"] > 0 else ""
 
-    if len(lines) == 2:
-        lines.append("No valid setups found.")
-
+        lines += [
+            x["symbol"],
+            f"BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
+            f"     Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
+            f"SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
+            f"     Result:{s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
+            ""
+        ]
     return "\n".join(lines).strip()
 
 # ================= RUNNERS =================
@@ -432,14 +436,17 @@ def run_after_market_once():
         except Exception as e:
             log(f"15M ERROR {sym}: {e}")
 
-    # Message 1
-    send(format_gapup_message(gap_items))
+    # 1
+    send_long_message(format_gapup_message(gap_items))
 
-    # Message 2
-    send(format_inside_list_message(inside_items))
+    # 2
+    send_long_message(format_inside_list_message(inside_items))
 
-    # Message 3
-    send(format_entry_outcome_message(gap_items, inside_items))
+    # 3
+    send_long_message(format_gapup_results(gap_items))
+
+    # 4
+    send_long_message(format_inside_results(inside_items))
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
@@ -464,7 +471,7 @@ def run_live_day():
                         gap_items.append(g)
                 except Exception as e:
                     log(f"LIVE GAP ERROR {sym}: {e}")
-            send(format_gapup_message(gap_items))
+            send_long_message(format_gapup_message(gap_items))
             gap_sent = True
 
         if not inside_sent and t >= dtime(9, 45):
@@ -476,7 +483,7 @@ def run_live_day():
                         inside_items.append(i)
                 except Exception as e:
                     log(f"LIVE 15M ERROR {sym}: {e}")
-            send(format_inside_list_message(inside_items))
+            send_long_message(format_inside_list_message(inside_items))
             inside_sent = True
 
         if not eod_sent and t >= dtime(15, 25):
@@ -498,7 +505,9 @@ def run_live_day():
                 except Exception:
                     pass
 
-            send(format_entry_outcome_message(gap_items, inside_items))
+            send_long_message(format_gapup_results(gap_items))
+            send_long_message(format_inside_results(inside_items))
+
             nxt = next_market_open_datetime()
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
