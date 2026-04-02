@@ -98,6 +98,17 @@ def dedupe_candles_by_ts(candles):
     out.sort(key=lambda x: x[0])
     return out
 
+def result_icon(result_text: str) -> str:
+    if result_text.startswith("Target"):
+        return "🎯"
+    if result_text.startswith("Stoploss"):
+        return "🛑"
+    if result_text.startswith("Day End"):
+        return "⚪"
+    if result_text.startswith("No Entry"):
+        return "⚪"
+    return "⚪"
+
 # ================= MARKET TIME =================
 def get_holiday_set():
     out = set()
@@ -223,7 +234,7 @@ def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
             return "Target 🎯", target
 
     if candles_after_entry:
-        return "Day End", float(candles_after_entry[-1][4])
+        return "Day End ⚪", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -240,7 +251,7 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
             return "Target 🎯", target
 
     if candles_after_entry:
-        return "Day End", float(candles_after_entry[-1][4])
+        return "Day End ⚪", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -332,8 +343,6 @@ def analyze_15m_inside(symbol):
     return {
         "symbol": short_name(symbol),
         "range_pct": round(range_pct, 2),
-        "first_high": round(h1, 2),
-        "first_low": round(l1, 2),
         "buy": {
             "entry": buy_entry,
             "target": buy_target,
@@ -352,7 +361,7 @@ def analyze_15m_inside(symbol):
         }
     }
 
-# ================= 30M PIVOT STRATEGY =================
+# ================= 30M PIVOT STRATEGY (SELL ONLY) =================
 def compute_r_levels(prev_day):
     h = float(prev_day[2])
     l = float(prev_day[3])
@@ -374,6 +383,11 @@ def compute_r_levels(prev_day):
         "R5": round(r5, 2),
     }
 
+def candle_touches_level(candle, level):
+    high = float(candle[2])
+    low = float(candle[3])
+    return low <= level <= high
+
 def analyze_30m_pivot(symbol):
     prev_day = get_previous_daily(symbol)
     day_30m = get_analysis_day_candles(symbol, 30, 7)
@@ -385,38 +399,43 @@ def analyze_30m_pivot(symbol):
     c2 = day_30m[1]
     c3 = day_30m[2]
 
-    prev_close = float(prev_day[4])
-
     c1_open = float(c1[1]); c1_close = float(c1[4])
-    c2_open = float(c2[1]); c2_high = float(c2[2]); c2_low = float(c2[3]); c2_close = float(c2[4])
-    c3_high = float(c3[2])
+    c2_open = float(c2[1]); c2_close = float(c2[4])
+    c2_high = float(c2[2]); c2_low = float(c2[3])
+    c3_low = float(c3[3])
 
-    cond_first_close = c1_close > prev_close * 1.01
-    cond_first_green = c1_close > c1_open
-    cond_second_red = c2_close < c2_open
-
-    if not (cond_first_close and cond_first_green and cond_second_red):
+    # first green, second red
+    if not (c1_close > c1_open and c2_close < c2_open):
         return None
 
     r_levels = compute_r_levels(prev_day)
-    entry = round(c2_high, 2)
-    stoploss = round(c2_low, 2)
 
-    if entry <= stoploss:
+    touched_levels = []
+    for name, value in r_levels.items():
+        if candle_touches_level(c1, value) and candle_touches_level(c2, value):
+            touched_levels.append((name, value))
+
+    if not touched_levels:
         return None
 
-    crossed = [(k, v) for k, v in r_levels.items() if entry >= v]
-    if not crossed:
+    # highest touched R level
+    pivot_name, pivot_value = touched_levels[-1]
+
+    # SELL ONLY
+    entry = round(c2_low, 2)
+    stoploss = round(c2_high, 2)
+
+    if stoploss <= entry:
         return None
 
-    active_r_name, active_r_value = crossed[-1]
-    target = round(entry + (entry - stoploss), 2)
+    target = round(entry - (stoploss - entry), 2)
 
-    if c3_high < entry:
+    # entry only on 3rd candle, not later candles
+    if c3_low > entry:
         return {
             "symbol": short_name(symbol),
-            "pivot_name": active_r_name,
-            "pivot_value": active_r_value,
+            "pivot_name": pivot_name,
+            "pivot_value": pivot_value,
             "entry": entry,
             "target": target,
             "stoploss": stoploss,
@@ -425,14 +444,28 @@ def analyze_30m_pivot(symbol):
             "pl": 0.0
         }
 
-    later = day_30m[2:]
-    result, exit_price = evaluate_buy_result(later, entry, target, stoploss)
-    pl = round(exit_price - entry, 2)
+    # Only 3rd candle decides target/SL hit first
+    c3_high = float(c3[2])
+
+    if c3_high >= stoploss and c3_low <= target:
+        result = "Stoploss 🛑"
+        exit_price = stoploss
+    elif c3_high >= stoploss:
+        result = "Stoploss 🛑"
+        exit_price = stoploss
+    elif c3_low <= target:
+        result = "Target 🎯"
+        exit_price = target
+    else:
+        result = "Day End ⚪"
+        exit_price = float(c3[4])
+
+    pl = round(entry - exit_price, 2)
 
     return {
         "symbol": short_name(symbol),
-        "pivot_name": active_r_name,
-        "pivot_value": active_r_value,
+        "pivot_name": pivot_name,
+        "pivot_value": pivot_value,
         "entry": entry,
         "target": target,
         "stoploss": stoploss,
@@ -488,35 +521,35 @@ def format_inside_results(inside_items):
 
         lines += [
             f"{x['symbol']} ({x['range_pct']}%)",
-            f"BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
-            f"     Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
-            f"SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
-            f"     Result:{s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
+            f"🟢 BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
+            f"      {b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
+            f"🔴 SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
+            f"      {s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
             ""
         ]
     return "\n".join(lines).strip()
 
 def format_pivot_list_message(pivot_items):
     if not pivot_items:
-        return "📍 30 MIN PIVOT STOCKS\n\nNone"
+        return "📍 30 MIN PIVOT SELL STOCKS\n\nNone"
 
-    lines = ["📍 30 MIN PIVOT STOCKS", ""]
+    lines = ["📍 30 MIN PIVOT SELL STOCKS", ""]
     for i, x in enumerate(pivot_items, 1):
         lines.append(f"{i}. {x['symbol']} ({x['pivot_name']}={x['pivot_value']})")
     return "\n".join(lines)
 
 def format_pivot_results(pivot_items):
     if not pivot_items:
-        return "📘 30 MIN PIVOT - IF ENTRY TAKEN\n\nNone"
+        return "📘 30 MIN PIVOT SELL - IF ENTRY TAKEN\n\nNone"
 
-    lines = ["📘 30 MIN PIVOT - IF ENTRY TAKEN", ""]
+    lines = ["📘 30 MIN PIVOT SELL - IF ENTRY TAKEN", ""]
     for x in pivot_items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
             x["symbol"],
             f"Level:{x['pivot_name']} ({x['pivot_value']})",
-            f"BUY Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
-            f"Result:{x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
+            f"🔴 SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"      {x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
             ""
         ]
     return "\n".join(lines).strip()
@@ -621,49 +654,4 @@ def run_live_day():
                     if g:
                         gap_items.append(g)
                 except Exception:
-                    pass
-
-                try:
-                    i = analyze_15m_inside(sym)
-                    if i:
-                        inside_items.append(i)
-                except Exception:
-                    pass
-
-                try:
-                    p = analyze_30m_pivot(sym)
-                    if p:
-                        pivot_items.append(p)
-                except Exception:
-                    pass
-
-            send_long_message(format_gapup_results(gap_items))
-            send_long_message(format_inside_results(inside_items))
-            send_long_message(format_pivot_results(pivot_items))
-
-            nxt = next_market_open_datetime()
-            send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
-            eod_sent = True
-
-        time.sleep(POLL_SECONDS)
-
-# ================= MAIN =================
-def main():
-    profile = check_auth()
-    send(
-        f"🚀 BOT STARTED\n"
-        f"Profile status: {profile.get('s')}\n"
-        f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
-        f"Analysis day={analysis_date_str()}"
-    )
-
-    while True:
-        if is_market_open():
-            run_live_day()
-        else:
-            if AFTER_MARKET_RUN:
-                run_after_market_once()
-            sleep_until_next_market_open()
-
-if __name__ == "__main__":
-    main()
+             
