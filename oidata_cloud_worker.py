@@ -27,18 +27,19 @@ INSIDE15_FIRST_CANDLE_MAX_PCT = float(os.getenv("INSIDE15_FIRST_CANDLE_MAX_PCT",
 RISK_AMOUNT = float(os.getenv("RISK_AMOUNT", "500"))
 LEVERAGE = float(os.getenv("LEVERAGE", "5"))
 TARGET_RR = float(os.getenv("TARGET_RR", "1.0"))
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.1")) / 100.0
 MAX_QTY = int(os.getenv("MAX_QTY", "100000"))
 
 # Live tracking
-LTP_INTERVAL_PER_STOCK = int(os.getenv("LTP_INTERVAL_PER_STOCK", "2"))      # 2 sec
-OI_INTERVAL_SECONDS = int(os.getenv("OI_INTERVAL_SECONDS", "180"))          # 3 min
-OI_STOCK_GAP_SECONDS = int(os.getenv("OI_STOCK_GAP_SECONDS", "10"))         # 10 sec between stocks
-ALERT_GAP_SECONDS = int(os.getenv("ALERT_GAP_SECONDS", "300"))              # 5 min
+LTP_INTERVAL_PER_STOCK = int(os.getenv("LTP_INTERVAL_PER_STOCK", "2"))
+OI_INTERVAL_SECONDS = int(os.getenv("OI_INTERVAL_SECONDS", "180"))
+OI_STOCK_GAP_SECONDS = int(os.getenv("OI_STOCK_GAP_SECONDS", "10"))
+ALERT_GAP_SECONDS = int(os.getenv("ALERT_GAP_SECONDS", "300"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
-PIVOT_MIN_YDAY_TURNOVER = float(os.getenv("PIVOT_MIN_YDAY_TURNOVER", "0"))  # optional turnover filter
+PIVOT_MIN_YDAY_TURNOVER = float(os.getenv("PIVOT_MIN_YDAY_TURNOVER", "0"))
 
 NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
 
@@ -64,10 +65,10 @@ def convert_symbol(sym: str) -> str:
 SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
 
 # ================= GLOBAL STATE =================
-watch_candidates = {}     # key=symbol -> dict(strategy, ...)
-active_trades = {}        # key=symbol -> dict(...)
-closed_for_day = set()    # stocks done for day
-blocked_entries = []      # list of blocked trades by OI
+watch_candidates = {}
+active_trades = {}
+closed_for_day = set()
+blocked_entries = []
 pattern_summary = {
     "gapup": [],
     "inside15": [],
@@ -81,7 +82,7 @@ eod_stats = {
     "blocked": [],
     "closed": []
 }
-last_alert_time = {}      # key like f"{symbol}|{kind}" -> epoch
+last_alert_time = {}
 pivot_scan_done_keys = set()
 
 # ================= HELPERS =================
@@ -456,7 +457,6 @@ def calc_position(entry, stoploss):
     if risk_per_share <= 0:
         return 0, 0.0, 0.0, 0.0
 
-    # nearest sizing to user preference
     qty = max(1, int(round(RISK_AMOUNT / risk_per_share)))
     qty = min(qty, MAX_QTY)
 
@@ -600,8 +600,6 @@ def eligible_for_pivot_scan(symbol):
 
     yesterday_close = float(prev_day[4])
     today_ltp = q.get("ltp", 0.0)
-
-    # optional turnover filter using yesterday volume * close
     prev_turnover = safe_float(prev_day[5], 0.0) * yesterday_close if len(prev_day) > 5 else 0.0
 
     if PIVOT_MIN_YDAY_TURNOVER > 0 and prev_turnover < PIVOT_MIN_YDAY_TURNOVER:
@@ -623,7 +621,6 @@ def scan_30m_pivot_sell(symbol):
         return None
 
     c1 = day_30m[0]; c2 = day_30m[1]
-
     c1_open = float(c1[1]); c1_close = float(c1[4])
     c2_open = float(c2[1]); c2_close = float(c2[4])
     c2_high = float(c2[2]); c2_low = float(c2[3])
@@ -757,7 +754,6 @@ def try_entry_for_candidate(symbol):
     c = watch_candidates[symbol]
     strategy = c["strategy"]
 
-    # GAP UP SELL
     if strategy == "GAPUP_PLUS":
         if ltp <= c["entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
@@ -785,9 +781,7 @@ def try_entry_for_candidate(symbol):
             del watch_candidates[symbol]
         return
 
-    # INSIDE 15M BUY / SELL
     if strategy == "INSIDE_15M":
-        # BUY first priority if hits first
         if ltp >= c["buy_entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BULLISH":
@@ -838,7 +832,6 @@ def try_entry_for_candidate(symbol):
             del watch_candidates[symbol]
             return
 
-    # PIVOT SELL ONLY - entry only on 3rd candle is already handled in scanner timing logic
     if strategy == "PIVOT_30M_WEEKLY_SELL":
         if ltp <= c["entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
@@ -875,7 +868,6 @@ def close_trade(symbol, reason, exit_price):
     trade["close_reason"] = reason
     trade["exit_price"] = round(exit_price, 2)
     trade["close_time"] = now_ist().strftime("%H:%M:%S")
-    closed_for_day.add(symbol)
     closed_for_day.add(symbol)
 
     qty = trade.get("qty", 0)
@@ -928,7 +920,6 @@ def track_active_trade(symbol):
     if ltp <= 0:
         return
 
-    # target/sl check first
     if trade["side"] == "BUY":
         if ltp <= trade["stoploss"]:
             close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
@@ -944,13 +935,11 @@ def track_active_trade(symbol):
             close_trade(symbol, "Target 🎯", trade["target"])
             return
 
-    # OI tracking every 3 min, stock by stock
     if now_epoch() - trade.get("last_oi_check", 0) >= OI_INTERVAL_SECONDS:
         oi_rows, bias = get_oi_snapshot(symbol, ltp)
         status = hold_status(trade["side"], bias)
         trade["last_oi_check"] = now_epoch()
 
-        # only alert every 5 minutes per stock
         if throttle_ok(f"{symbol}|live_oi"):
             side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
             send_long_message(
@@ -966,7 +955,6 @@ def track_active_trade(symbol):
                 f"{format_oi_snapshot(oi_rows)}"
             )
 
-        # optional OI-based exit signal alert
         if status == "Exit ⚪" and throttle_ok(f"{symbol}|oi_exit"):
             send(
                 f"⚪ OI EXIT SIGNAL\n\n"
@@ -1006,9 +994,7 @@ def scan_inside15_once():
 
 def pivot_scan_key():
     now = now_ist()
-    # 30-min boundary key for today
-    minute = 15 if now.minute < 15 else 45 if now.minute < 45 else 45
-    return f"{now.strftime('%Y-%m-%d')}-{now.hour:02d}-{minute:02d}"
+    return f"{now.strftime('%Y-%m-%d')}-{now.hour:02d}-{now.minute:02d}"
 
 def should_run_pivot_scan():
     now = now_ist().time()
@@ -1050,7 +1036,6 @@ def run_live_day():
 
         nowt = now_ist().time()
 
-        # 1) summary scans
         if not gap_summary_sent and nowt >= dtime(9, 20):
             scan_gapup_once()
             gap_summary_sent = True
@@ -1059,11 +1044,9 @@ def run_live_day():
             scan_inside15_once()
             inside_summary_sent = True
 
-        # 2) pivot scan every 30m boundary
         if should_run_pivot_scan():
             scan_pivot_30m_once()
 
-        # 3) try entry for watched stocks, 1 stock per second style
         for sym in list(watch_candidates.keys()):
             if sym in closed_for_day or sym in active_trades:
                 continue
@@ -1073,7 +1056,6 @@ def run_live_day():
                 log(f"ENTRY ERROR {sym}: {e}")
             time.sleep(1)
 
-        # 4) track active trades
         for sym in list(active_trades.keys()):
             try:
                 track_active_trade(sym)
@@ -1081,7 +1063,6 @@ def run_live_day():
                 log(f"TRACK ERROR {sym}: {e}")
             time.sleep(LTP_INTERVAL_PER_STOCK)
 
-        # 5) EOD report
         if not eod_sent and nowt >= dtime(15, 28):
             send_long_message(build_eod_report())
             nxt = next_market_open_datetime()
@@ -1302,24 +1283,10 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    # summary first
-    send_long_message(format_gapup_summary([{
-        "symbol": f"NSE:{x['symbol']}-EQ",
-        "gap_pct": x["gap_pct"]
-    } for x in gap_items]))
+    send_long_message(format_gapup_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "gap_pct": x["gap_pct"]} for x in gap_items]))
+    send_long_message(format_inside_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "range_pct": x["range_pct"]} for x in inside_items]))
+    send_long_message(format_pivot_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "pivot_name": x["pivot_name"], "pivot_value": x["pivot_value"]} for x in pivot_items]))
 
-    send_long_message(format_inside_summary([{
-        "symbol": f"NSE:{x['symbol']}-EQ",
-        "range_pct": x["range_pct"]
-    } for x in inside_items]))
-
-    send_long_message(format_pivot_summary([{
-        "symbol": f"NSE:{x['symbol']}-EQ",
-        "pivot_name": x["pivot_name"],
-        "pivot_value": x["pivot_value"]
-    } for x in pivot_items]))
-
-    # then what happened
     send_long_message(format_gapup_results(gap_items))
     send_long_message(format_inside_results(inside_items))
     send_long_message(format_pivot_results(pivot_items))
