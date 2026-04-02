@@ -654,4 +654,49 @@ def run_live_day():
                     if g:
                         gap_items.append(g)
                 except Exception:
-             
+                    pass
+
+                try:
+                    i = analyze_15m_inside(sym)
+                    if i:
+                        inside_items.append(i)
+                except Exception:
+                    pass
+
+                try:
+                    p = analyze_30m_pivot(sym)
+                    if p:
+                        pivot_items.append(p)
+                except Exception:
+                    pass
+
+            send_long_message(format_gapup_results(gap_items))
+            send_long_message(format_inside_results(inside_items))
+            send_long_message(format_pivot_results(pivot_items))
+
+            nxt = next_market_open_datetime()
+            send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+            eod_sent = True
+
+        time.sleep(POLL_SECONDS)
+
+# ================= MAIN =================
+def main():
+    profile = check_auth()
+    send(
+        f"🚀 BOT STARTED\n"
+        f"Profile status: {profile.get('s')}\n"
+        f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
+        f"Analysis day={analysis_date_str()}"
+    )
+
+    while True:
+        if is_market_open():
+            run_live_day()
+        else:
+            if AFTER_MARKET_RUN:
+                run_after_market_once()
+            sleep_until_next_market_open()
+
+if __name__ == "__main__":
+    main()
