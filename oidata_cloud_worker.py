@@ -334,8 +334,6 @@ def analyze_15m_inside(symbol):
         "range_pct": round(range_pct, 2),
         "first_high": round(h1, 2),
         "first_low": round(l1, 2),
-        "second_high": round(h2, 2),
-        "second_low": round(l2, 2),
         "buy": {
             "entry": buy_entry,
             "target": buy_target,
@@ -369,7 +367,6 @@ def compute_r_levels(prev_day):
     r5 = r4 + step
 
     return {
-        "P": round(p, 2),
         "R1": round(r1, 2),
         "R2": round(r2, 2),
         "R3": round(r3, 2),
@@ -390,11 +387,10 @@ def analyze_30m_pivot(symbol):
 
     prev_close = float(prev_day[4])
 
-    c1_open = float(c1[1]); c1_high = float(c1[2]); c1_low = float(c1[3]); c1_close = float(c1[4])
+    c1_open = float(c1[1]); c1_close = float(c1[4])
     c2_open = float(c2[1]); c2_high = float(c2[2]); c2_low = float(c2[3]); c2_close = float(c2[4])
     c3_high = float(c3[2])
 
-    # Rules from your earlier pivot setup
     cond_first_close = c1_close > prev_close * 1.01
     cond_first_green = c1_close > c1_open
     cond_second_red = c2_close < c2_open
@@ -403,38 +399,32 @@ def analyze_30m_pivot(symbol):
         return None
 
     r_levels = compute_r_levels(prev_day)
-
     entry = round(c2_high, 2)
     stoploss = round(c2_low, 2)
 
     if entry <= stoploss:
         return None
 
-    # Only consider above R1 to R5
-    valid_levels = [(k, v) for k, v in r_levels.items() if k.startswith("R")]
-    crossed = [(k, v) for k, v in valid_levels if entry >= v]
+    crossed = [(k, v) for k, v in r_levels.items() if entry >= v]
     if not crossed:
         return None
 
     active_r_name, active_r_value = crossed[-1]
+    target = round(entry + (entry - stoploss), 2)
 
-    # Entry must happen only on 3rd candle
     if c3_high < entry:
         return {
             "symbol": short_name(symbol),
             "pivot_name": active_r_name,
             "pivot_value": active_r_value,
             "entry": entry,
-            "target": round(entry + (entry - stoploss), 2),
+            "target": target,
             "stoploss": stoploss,
             "result": "No Entry",
             "exit_price": entry,
             "pl": 0.0
         }
 
-    target = round(entry + (entry - stoploss), 2)
-
-    # Evaluate from 3rd candle onward because entry is on 3rd candle
     later = day_30m[2:]
     result, exit_price = evaluate_buy_result(later, entry, target, stoploss)
     pl = round(exit_price - entry, 2)
@@ -463,17 +453,12 @@ def format_gapup_message(gap_items):
 
 def format_inside_list_message(inside_items):
     if not inside_items:
-        return "🕯️ 15 MIN INSIDE CANDLE STOCKS 🕯️\n\nNone"
+        return "🕯️ 15 MIN INSIDE CANDLE STOCKS (%) 🕯️\n\nNone"
 
-    lines = ["🕯️ 15 MIN INSIDE CANDLE STOCKS 🕯️", ""]
-    for i, x in enumerate(inside_items, 1):
-        lines += [
-            f"{i}. {x['symbol']}",
-            f"1st Candle H:{x['first_high']} L:{x['first_low']} Range%:{x['range_pct']}",
-            f"2nd Candle H:{x['second_high']} L:{x['second_low']}",
-            ""
-        ]
-    return "\n".join(lines).strip()
+    lines = ["🕯️ 15 MIN INSIDE CANDLE STOCKS (%) 🕯️", ""]
+    for i, x in enumerate(sorted(inside_items, key=lambda z: z["range_pct"]), 1):
+        lines.append(f"{i}. {x['symbol']} ({x['range_pct']}%)")
+    return "\n".join(lines)
 
 def format_gapup_results(gap_items):
     if not gap_items:
@@ -502,7 +487,7 @@ def format_inside_results(inside_items):
         ssign = "+" if s["pl"] > 0 else ""
 
         lines += [
-            x["symbol"],
+            f"{x['symbol']} ({x['range_pct']}%)",
             f"BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
             f"     Result:{b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
             f"SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
@@ -660,25 +645,4 @@ def run_live_day():
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
 
-        time.sleep(POLL_SECONDS)
-
-# ================= MAIN =================
-def main():
-    profile = check_auth()
-    send(
-        f"🚀 BOT STARTED\n"
-        f"Profile status: {profile.get('s')}\n"
-        f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
-        f"Analysis day={analysis_date_str()}"
-    )
-
-    while True:
-        if is_market_open():
-            run_live_day()
-        else:
-            if AFTER_MARKET_RUN:
-                run_after_market_once()
-            sleep_until_next_market_open()
-
-if __name__ == "__main__":
-    main()
+        time.sleep(POL
