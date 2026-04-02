@@ -12,6 +12,8 @@ ACCESS_TOKEN = (os.getenv("ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 
+WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
+
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
 
 GAPUP_MIN_PCT = float(os.getenv("GAPUP_MIN_PCT", "0.0"))
@@ -26,22 +28,23 @@ NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing CLIENT_ID or ACCESS_TOKEN")
 
-# ================= NIFTY 50 =================
-SYMBOLS = [
-    "NSE:ADANIENT-EQ", "NSE:ADANIPORTS-EQ", "NSE:APOLLOHOSP-EQ", "NSE:ASIANPAINT-EQ",
-    "NSE:AXISBANK-EQ", "NSE:BAJAJ-AUTO-EQ", "NSE:BAJFINANCE-EQ", "NSE:BAJAJFINSV-EQ",
-    "NSE:BEL-EQ", "NSE:BHARTIARTL-EQ", "NSE:BPCL-EQ", "NSE:BRITANNIA-EQ",
-    "NSE:CIPLA-EQ", "NSE:COALINDIA-EQ", "NSE:DRREDDY-EQ", "NSE:EICHERMOT-EQ",
-    "NSE:ETERNAL-EQ", "NSE:GRASIM-EQ", "NSE:HCLTECH-EQ", "NSE:HDFCBANK-EQ",
-    "NSE:HDFCLIFE-EQ", "NSE:HEROMOTOCO-EQ", "NSE:HINDALCO-EQ", "NSE:HINDUNILVR-EQ",
-    "NSE:ICICIBANK-EQ", "NSE:INDIGO-EQ", "NSE:INFY-EQ", "NSE:ITC-EQ",
-    "NSE:JSWSTEEL-EQ", "NSE:KOTAKBANK-EQ", "NSE:LT-EQ", "NSE:M&M-EQ",
-    "NSE:MARUTI-EQ", "NSE:NESTLEIND-EQ", "NSE:NTPC-EQ", "NSE:ONGC-EQ",
-    "NSE:POWERGRID-EQ", "NSE:RELIANCE-EQ", "NSE:SBILIFE-EQ", "NSE:SHRIRAMFIN-EQ",
-    "NSE:SBIN-EQ", "NSE:SUNPHARMA-EQ", "NSE:TATACONSUM-EQ", "NSE:TATAMOTORS-EQ",
-    "NSE:TATASTEEL-EQ", "NSE:TCS-EQ", "NSE:TECHM-EQ", "NSE:TITAN-EQ",
-    "NSE:TRENT-EQ", "NSE:WIPRO-EQ"
-]
+if not WATCHLIST_RAW:
+    raise Exception("Missing WATCHLIST. Example: WATCHLIST=RELIANCE,TCS,HDFCBANK,ICICIBANK,INFY,M&M")
+
+# ================= WATCHLIST =================
+def convert_symbol(sym: str) -> str:
+    s = sym.strip().upper()
+    if not s:
+        return ""
+    if ":" in s:
+        return s
+    if s in {"NIFTY", "NIFTY50"}:
+        return "NSE:NIFTY50-INDEX"
+    if s == "BANKNIFTY":
+        return "NSE:NIFTYBANK-INDEX"
+    return f"NSE:{s}-EQ"
+
+SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
 
 # ================= HELPERS =================
 def now_ist():
@@ -76,7 +79,8 @@ def send_long_message(text: str, chunk_size: int = 3500):
         send(text)
 
 def short_name(symbol: str) -> str:
-    return symbol.split(":")[1].replace("-EQ", "").replace("-INDEX", "")
+    right = symbol.split(":")[1]
+    return right.replace("-EQ", "").replace("-INDEX", "")
 
 def candle_dt(ts: int):
     return datetime.fromtimestamp(ts, IST)
@@ -97,17 +101,6 @@ def dedupe_candles_by_ts(candles):
     out = list(seen.values())
     out.sort(key=lambda x: x[0])
     return out
-
-def result_icon(result_text: str) -> str:
-    if result_text.startswith("Target"):
-        return "🎯"
-    if result_text.startswith("Stoploss"):
-        return "🛑"
-    if result_text.startswith("Day End"):
-        return "⚪"
-    if result_text.startswith("No Entry"):
-        return "⚪"
-    return "⚪"
 
 # ================= MARKET TIME =================
 def get_holiday_set():
@@ -170,7 +163,7 @@ def check_auth():
         raise Exception(f"FYERS auth failed: {profile}")
     return profile
 
-def get_history(symbol, resolution, days=10):
+def get_history(symbol, resolution, days=20):
     payload = {
         "symbol": symbol,
         "resolution": str(resolution),
@@ -189,7 +182,7 @@ def get_history(symbol, resolution, days=10):
     return dedupe_candles_by_ts(data.get("candles", []))
 
 # ================= CANDLE HELPERS =================
-def get_analysis_day_candles(symbol, resolution, days=10):
+def get_analysis_day_candles(symbol, resolution, days=20):
     candles = get_history(symbol, resolution, days)
     target_day = analysis_date_str()
 
@@ -205,8 +198,23 @@ def get_analysis_day_candles(symbol, resolution, days=10):
     out.sort(key=lambda x: x[0])
     return out
 
+def get_previous_daily(symbol):
+    daily = get_history(symbol, "D", 30)
+    target_day = analysis_date_str()
+
+    prev = []
+    for c in daily:
+        try:
+            if candle_dt(c[0]).strftime("%Y-%m-%d") < target_day:
+                prev.append(c)
+        except Exception:
+            pass
+
+    prev.sort(key=lambda x: x[0])
+    return prev[-1] if prev else None
+
 def get_previous_weekly(symbol):
-    weekly = get_history(symbol, "W", 30)
+    weekly = get_history(symbol, "W", 60)
     target_day = analysis_date_str()
 
     prev = []
@@ -255,10 +263,10 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
 
     return "No Data", entry
 
-# ================= STRATEGIES =================
+# ================= GAP UP PLUS =================
 def analyze_gapup_sell(symbol):
     prev_day = get_previous_daily(symbol)
-    day_5m = get_analysis_day_candles(symbol, 5, 5)
+    day_5m = get_analysis_day_candles(symbol, 5, 7)
 
     if prev_day is None or len(day_5m) < 1:
         return None
@@ -302,8 +310,9 @@ def analyze_gapup_sell(symbol):
         "pl": pl
     }
 
+# ================= 15 MIN INSIDE =================
 def analyze_15m_inside(symbol):
-    day_15m = get_analysis_day_candles(symbol, 15, 5)
+    day_15m = get_analysis_day_candles(symbol, 15, 7)
     if len(day_15m) < 2:
         return None
 
@@ -361,10 +370,36 @@ def analyze_15m_inside(symbol):
         }
     }
 
-# ================= 30M PIVOT STRATEGY (SELL ONLY) =================
+# ================= 30 MIN PIVOT SELL ONLY (WEEKLY) =================
+def compute_weekly_r_levels(prev_week):
+    h = float(prev_week[2])
+    l = float(prev_week[3])
+    c = float(prev_week[4])
+
+    p = (h + l + c) / 3.0
+    r1 = 2 * p - l
+    r2 = p + (h - l)
+    r3 = h + 2 * (p - l)
+    step = r2 - r1
+    r4 = r3 + step
+    r5 = r4 + step
+
+    return {
+        "R1": round(r1, 2),
+        "R2": round(r2, 2),
+        "R3": round(r3, 2),
+        "R4": round(r4, 2),
+        "R5": round(r5, 2),
+    }
+
+def candle_touches_level(candle, level):
+    high = float(candle[2])
+    low = float(candle[3])
+    return low <= level <= high
+
 def analyze_30m_pivot(symbol):
     prev_week = get_previous_weekly(symbol)
-    day_30m = get_analysis_day_candles(symbol, 30, 14)
+    day_30m = get_analysis_day_candles(symbol, 30, 21)
 
     if prev_week is None or len(day_30m) < 3:
         return None
@@ -376,14 +411,13 @@ def analyze_30m_pivot(symbol):
     c1_open = float(c1[1]); c1_close = float(c1[4])
     c2_open = float(c2[1]); c2_close = float(c2[4])
     c2_high = float(c2[2]); c2_low = float(c2[3])
-    c3_low = float(c3[3])
-    c3_high = float(c3[2])
+    c3_low = float(c3[3]); c3_high = float(c3[2])
 
     # first green, second red
     if not (c1_close > c1_open and c2_close < c2_open):
         return None
 
-    r_levels = compute_r_levels(prev_week)
+    r_levels = compute_weekly_r_levels(prev_week)
 
     touched_levels = []
     for name, value in r_levels.items():
@@ -404,7 +438,7 @@ def analyze_30m_pivot(symbol):
 
     target = round(entry - (stoploss - entry), 2)
 
-    # entry only on 3rd candle
+    # entry only on 3rd candle, not later candles
     if c3_low > entry:
         return {
             "symbol": short_name(symbol),
@@ -443,32 +477,7 @@ def analyze_30m_pivot(symbol):
         "result": result,
         "exit_price": round(exit_price, 2),
         "pl": pl
-    }    h = float(prev_week[2])
-    l = float(prev_week[3])
-    c = float(prev_week[4])
-
-    p = (h + l + c) / 3.0
-    r1 = 2 * p - l
-    r2 = p + (h - l)
-    r3 = h + 2 * (p - l)
-    step = r2 - r1
-    r4 = r3 + step
-    r5 = r4 + step
-
-    return {
-        "R1": round(r1, 2),
-        "R2": round(r2, 2),
-        "R3": round(r3, 2),
-        "R4": round(r4, 2),
-        "R5": round(r5, 2),
     }
-
-def candle_touches_level(candle, level):
-    high = float(candle[2])
-    low = float(candle[3])
-    return low <= level <= high
-
-
 
 # ================= MESSAGE FORMATTERS =================
 def format_gapup_message(gap_items):
@@ -527,18 +536,18 @@ def format_inside_results(inside_items):
 
 def format_pivot_list_message(pivot_items):
     if not pivot_items:
-        return "📍 30 MIN PIVOT SELL STOCKS\n\nNone"
+        return "📍 30 MIN WEEKLY PIVOT SELL STOCKS\n\nNone"
 
-    lines = ["📍 30 MIN PIVOT SELL STOCKS", ""]
+    lines = ["📍 30 MIN WEEKLY PIVOT SELL STOCKS", ""]
     for i, x in enumerate(pivot_items, 1):
         lines.append(f"{i}. {x['symbol']} ({x['pivot_name']}={x['pivot_value']})")
     return "\n".join(lines)
 
 def format_pivot_results(pivot_items):
     if not pivot_items:
-        return "📘 30 MIN PIVOT SELL - IF ENTRY TAKEN\n\nNone"
+        return "📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
 
-    lines = ["📘 30 MIN PIVOT SELL - IF ENTRY TAKEN", ""]
+    lines = ["📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
     for x in pivot_items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
@@ -683,7 +692,8 @@ def main():
         f"🚀 BOT STARTED\n"
         f"Profile status: {profile.get('s')}\n"
         f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
-        f"Analysis day={analysis_date_str()}"
+        f"Analysis day={analysis_date_str()}\n"
+        f"WATCHLIST={WATCHLIST_RAW}"
     )
 
     while True:
