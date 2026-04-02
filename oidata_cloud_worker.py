@@ -645,4 +645,4 @@ def run_live_day():
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
 
-        time.sleep(POL
+        time.sleep(POLL_SECONDS)
