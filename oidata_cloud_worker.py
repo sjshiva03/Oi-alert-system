@@ -205,12 +205,12 @@ def get_analysis_day_candles(symbol, resolution, days=10):
     out.sort(key=lambda x: x[0])
     return out
 
-def get_previous_daily(symbol):
-    daily = get_history(symbol, "D", 20)
+def get_previous_weekly(symbol):
+    weekly = get_history(symbol, "W", 30)
     target_day = analysis_date_str()
 
     prev = []
-    for c in daily:
+    for c in weekly:
         try:
             if candle_dt(c[0]).strftime("%Y-%m-%d") < target_day:
                 prev.append(c)
@@ -362,37 +362,12 @@ def analyze_15m_inside(symbol):
     }
 
 # ================= 30M PIVOT STRATEGY (SELL ONLY) =================
-def compute_r_levels(prev_day):
-    h = float(prev_day[2])
-    l = float(prev_day[3])
-    c = float(prev_day[4])
-
-    p = (h + l + c) / 3.0
-    r1 = 2 * p - l
-    r2 = p + (h - l)
-    r3 = h + 2 * (p - l)
-    step = r2 - r1
-    r4 = r3 + step
-    r5 = r4 + step
-
-    return {
-        "R1": round(r1, 2),
-        "R2": round(r2, 2),
-        "R3": round(r3, 2),
-        "R4": round(r4, 2),
-        "R5": round(r5, 2),
-    }
-
-def candle_touches_level(candle, level):
-    high = float(candle[2])
-    low = float(candle[3])
-    return low <= level <= high
-
+def compute_r_levels(prev_week):
 def analyze_30m_pivot(symbol):
-    prev_day = get_previous_daily(symbol)
-    day_30m = get_analysis_day_candles(symbol, 30, 7)
+    prev_week = get_previous_weekly(symbol)
+    day_30m = get_analysis_day_candles(symbol, 30, 14)
 
-    if prev_day is None or len(day_30m) < 3:
+    if prev_week is None or len(day_30m) < 3:
         return None
 
     c1 = day_30m[0]
@@ -403,12 +378,13 @@ def analyze_30m_pivot(symbol):
     c2_open = float(c2[1]); c2_close = float(c2[4])
     c2_high = float(c2[2]); c2_low = float(c2[3])
     c3_low = float(c3[3])
+    c3_high = float(c3[2])
 
     # first green, second red
     if not (c1_close > c1_open and c2_close < c2_open):
         return None
 
-    r_levels = compute_r_levels(prev_day)
+    r_levels = compute_r_levels(prev_week)
 
     touched_levels = []
     for name, value in r_levels.items():
@@ -418,7 +394,6 @@ def analyze_30m_pivot(symbol):
     if not touched_levels:
         return None
 
-    # highest touched R level
     pivot_name, pivot_value = touched_levels[-1]
 
     # SELL ONLY
@@ -430,7 +405,7 @@ def analyze_30m_pivot(symbol):
 
     target = round(entry - (stoploss - entry), 2)
 
-    # entry only on 3rd candle, not later candles
+    # entry only on 3rd candle
     if c3_low > entry:
         return {
             "symbol": short_name(symbol),
@@ -443,9 +418,6 @@ def analyze_30m_pivot(symbol):
             "exit_price": entry,
             "pl": 0.0
         }
-
-    # Only 3rd candle decides target/SL hit first
-    c3_high = float(c3[2])
 
     if c3_high >= stoploss and c3_low <= target:
         result = "Stoploss 🛑"
@@ -472,7 +444,32 @@ def analyze_30m_pivot(symbol):
         "result": result,
         "exit_price": round(exit_price, 2),
         "pl": pl
+    }    h = float(prev_week[2])
+    l = float(prev_week[3])
+    c = float(prev_week[4])
+
+    p = (h + l + c) / 3.0
+    r1 = 2 * p - l
+    r2 = p + (h - l)
+    r3 = h + 2 * (p - l)
+    step = r2 - r1
+    r4 = r3 + step
+    r5 = r4 + step
+
+    return {
+        "R1": round(r1, 2),
+        "R2": round(r2, 2),
+        "R3": round(r3, 2),
+        "R4": round(r4, 2),
+        "R5": round(r5, 2),
     }
+
+def candle_touches_level(candle, level):
+    high = float(candle[2])
+    low = float(candle[3])
+    return low <= level <= high
+
+
 
 # ================= MESSAGE FORMATTERS =================
 def format_gapup_message(gap_items):
