@@ -362,7 +362,6 @@ def analyze_15m_inside(symbol):
     }
 
 # ================= 30M PIVOT STRATEGY (SELL ONLY) =================
-def compute_r_levels(prev_week):
 def analyze_30m_pivot(symbol):
     prev_week = get_previous_weekly(symbol)
     day_30m = get_analysis_day_candles(symbol, 30, 14)
