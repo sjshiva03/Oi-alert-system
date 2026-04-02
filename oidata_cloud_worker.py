@@ -563,10 +563,8 @@ def format_pivot_results(pivot_items):
 def run_after_market_once():
     send("📡 Running after-market scan...")
 
+    # ================= 1) GAP UP PLUS =================
     gap_items = []
-    inside_items = []
-    pivot_items = []
-
     for sym in SYMBOLS:
         try:
             g = analyze_gapup_sell(sym)
@@ -575,6 +573,12 @@ def run_after_market_once():
         except Exception as e:
             log(f"GAP ERROR {sym}: {e}")
 
+    send_long_message(format_gapup_message(gap_items))
+    send_long_message(format_gapup_results(gap_items))
+
+    # ================= 2) 15 MIN INSIDE =================
+    inside_items = []
+    for sym in SYMBOLS:
         try:
             i = analyze_15m_inside(sym)
             if i:
@@ -582,6 +586,12 @@ def run_after_market_once():
         except Exception as e:
             log(f"15M ERROR {sym}: {e}")
 
+    send_long_message(format_inside_list_message(inside_items))
+    send_long_message(format_inside_results(inside_items))
+
+    # ================= 3) 30 MIN WEEKLY PIVOT SELL =================
+    pivot_items = []
+    for sym in SYMBOLS:
         try:
             p = analyze_30m_pivot(sym)
             if p:
@@ -589,22 +599,21 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT ERROR {sym}: {e}")
 
-    send_long_message(format_gapup_message(gap_items))
-    send_long_message(format_inside_list_message(inside_items))
     send_long_message(format_pivot_list_message(pivot_items))
-
-    send_long_message(format_gapup_results(gap_items))
-    send_long_message(format_inside_results(inside_items))
     send_long_message(format_pivot_results(pivot_items))
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
 
 def run_live_day():
+def run_live_day():
     gap_sent = False
     inside_sent = False
     pivot_sent = False
-    eod_sent = False
+    eod_gap_sent = False
+    eod_inside_sent = False
+    eod_pivot_sent = False
+    close_sent = False
 
     while True:
         if not is_market_open():
@@ -612,6 +621,7 @@ def run_live_day():
 
         t = now_ist().time()
 
+        # 1) GAP UP LIST
         if not gap_sent and t >= dtime(9, 20):
             gap_items = []
             for sym in SYMBOLS:
@@ -621,9 +631,11 @@ def run_live_day():
                         gap_items.append(g)
                 except Exception as e:
                     log(f"LIVE GAP ERROR {sym}: {e}")
+
             send_long_message(format_gapup_message(gap_items))
             gap_sent = True
 
+        # 2) 15M INSIDE LIST
         if not inside_sent and t >= dtime(9, 45):
             inside_items = []
             for sym in SYMBOLS:
@@ -633,9 +645,11 @@ def run_live_day():
                         inside_items.append(i)
                 except Exception as e:
                     log(f"LIVE 15M ERROR {sym}: {e}")
+
             send_long_message(format_inside_list_message(inside_items))
             inside_sent = True
 
+        # 3) 30M PIVOT LIST
         if not pivot_sent and t >= dtime(10, 30):
             pivot_items = []
             for sym in SYMBOLS:
@@ -645,46 +659,59 @@ def run_live_day():
                         pivot_items.append(p)
                 except Exception as e:
                     log(f"LIVE PIVOT ERROR {sym}: {e}")
+
             send_long_message(format_pivot_list_message(pivot_items))
             pivot_sent = True
 
-        if not eod_sent and t >= dtime(15, 25):
+        # 4) EOD GAP RESULTS
+        if not eod_gap_sent and t >= dtime(15, 25):
             gap_items = []
-            inside_items = []
-            pivot_items = []
-
             for sym in SYMBOLS:
                 try:
                     g = analyze_gapup_sell(sym)
                     if g:
                         gap_items.append(g)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"EOD GAP ERROR {sym}: {e}")
 
+            send_long_message(format_gapup_results(gap_items))
+            eod_gap_sent = True
+
+        # 5) EOD 15M RESULTS
+        if not eod_inside_sent and t >= dtime(15, 26):
+            inside_items = []
+            for sym in SYMBOLS:
                 try:
                     i = analyze_15m_inside(sym)
                     if i:
                         inside_items.append(i)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"EOD 15M ERROR {sym}: {e}")
 
+            send_long_message(format_inside_results(inside_items))
+            eod_inside_sent = True
+
+        # 6) EOD PIVOT RESULTS
+        if not eod_pivot_sent and t >= dtime(15, 27):
+            pivot_items = []
+            for sym in SYMBOLS:
                 try:
                     p = analyze_30m_pivot(sym)
                     if p:
                         pivot_items.append(p)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"EOD PIVOT ERROR {sym}: {e}")
 
-            send_long_message(format_gapup_results(gap_items))
-            send_long_message(format_inside_results(inside_items))
             send_long_message(format_pivot_results(pivot_items))
+            eod_pivot_sent = True
 
+        # 7) MARKET CLOSED MESSAGE
+        if not close_sent and t >= dtime(15, 28):
             nxt = next_market_open_datetime()
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
-            eod_sent = True
+            close_sent = True
 
         time.sleep(POLL_SECONDS)
-
 # ================= MAIN =================
 def main():
     profile = check_auth()
