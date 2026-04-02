@@ -354,6 +354,103 @@ def analyze_15m_inside(symbol):
         }
     }
 
+# ================= 30M PIVOT STRATEGY =================
+def compute_r_levels(prev_day):
+    h = float(prev_day[2])
+    l = float(prev_day[3])
+    c = float(prev_day[4])
+
+    p = (h + l + c) / 3.0
+    r1 = 2 * p - l
+    r2 = p + (h - l)
+    r3 = h + 2 * (p - l)
+    step = r2 - r1
+    r4 = r3 + step
+    r5 = r4 + step
+
+    return {
+        "P": round(p, 2),
+        "R1": round(r1, 2),
+        "R2": round(r2, 2),
+        "R3": round(r3, 2),
+        "R4": round(r4, 2),
+        "R5": round(r5, 2),
+    }
+
+def analyze_30m_pivot(symbol):
+    prev_day = get_previous_daily(symbol)
+    day_30m = get_analysis_day_candles(symbol, 30, 7)
+
+    if prev_day is None or len(day_30m) < 3:
+        return None
+
+    c1 = day_30m[0]
+    c2 = day_30m[1]
+    c3 = day_30m[2]
+
+    prev_close = float(prev_day[4])
+
+    c1_open = float(c1[1]); c1_high = float(c1[2]); c1_low = float(c1[3]); c1_close = float(c1[4])
+    c2_open = float(c2[1]); c2_high = float(c2[2]); c2_low = float(c2[3]); c2_close = float(c2[4])
+    c3_high = float(c3[2])
+
+    # Rules from your earlier pivot setup
+    cond_first_close = c1_close > prev_close * 1.01
+    cond_first_green = c1_close > c1_open
+    cond_second_red = c2_close < c2_open
+
+    if not (cond_first_close and cond_first_green and cond_second_red):
+        return None
+
+    r_levels = compute_r_levels(prev_day)
+
+    entry = round(c2_high, 2)
+    stoploss = round(c2_low, 2)
+
+    if entry <= stoploss:
+        return None
+
+    # Only consider above R1 to R5
+    valid_levels = [(k, v) for k, v in r_levels.items() if k.startswith("R")]
+    crossed = [(k, v) for k, v in valid_levels if entry >= v]
+    if not crossed:
+        return None
+
+    active_r_name, active_r_value = crossed[-1]
+
+    # Entry must happen only on 3rd candle
+    if c3_high < entry:
+        return {
+            "symbol": short_name(symbol),
+            "pivot_name": active_r_name,
+            "pivot_value": active_r_value,
+            "entry": entry,
+            "target": round(entry + (entry - stoploss), 2),
+            "stoploss": stoploss,
+            "result": "No Entry",
+            "exit_price": entry,
+            "pl": 0.0
+        }
+
+    target = round(entry + (entry - stoploss), 2)
+
+    # Evaluate from 3rd candle onward because entry is on 3rd candle
+    later = day_30m[2:]
+    result, exit_price = evaluate_buy_result(later, entry, target, stoploss)
+    pl = round(exit_price - entry, 2)
+
+    return {
+        "symbol": short_name(symbol),
+        "pivot_name": active_r_name,
+        "pivot_value": active_r_value,
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": result,
+        "exit_price": round(exit_price, 2),
+        "pl": pl
+    }
+
 # ================= MESSAGE FORMATTERS =================
 def format_gapup_message(gap_items):
     if not gap_items:
@@ -414,12 +511,38 @@ def format_inside_results(inside_items):
         ]
     return "\n".join(lines).strip()
 
+def format_pivot_list_message(pivot_items):
+    if not pivot_items:
+        return "📍 30 MIN PIVOT STOCKS\n\nNone"
+
+    lines = ["📍 30 MIN PIVOT STOCKS", ""]
+    for i, x in enumerate(pivot_items, 1):
+        lines.append(f"{i}. {x['symbol']} ({x['pivot_name']}={x['pivot_value']})")
+    return "\n".join(lines)
+
+def format_pivot_results(pivot_items):
+    if not pivot_items:
+        return "📘 30 MIN PIVOT - IF ENTRY TAKEN\n\nNone"
+
+    lines = ["📘 30 MIN PIVOT - IF ENTRY TAKEN", ""]
+    for x in pivot_items:
+        sign = "+" if x["pl"] > 0 else ""
+        lines += [
+            x["symbol"],
+            f"Level:{x['pivot_name']} ({x['pivot_value']})",
+            f"BUY Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"Result:{x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
+            ""
+        ]
+    return "\n".join(lines).strip()
+
 # ================= RUNNERS =================
 def run_after_market_once():
     send("📡 Running after-market scan...")
 
     gap_items = []
     inside_items = []
+    pivot_items = []
 
     for sym in SYMBOLS:
         try:
@@ -436,17 +559,20 @@ def run_after_market_once():
         except Exception as e:
             log(f"15M ERROR {sym}: {e}")
 
-    # 1
+        try:
+            p = analyze_30m_pivot(sym)
+            if p:
+                pivot_items.append(p)
+        except Exception as e:
+            log(f"PIVOT ERROR {sym}: {e}")
+
     send_long_message(format_gapup_message(gap_items))
-
-    # 2
     send_long_message(format_inside_list_message(inside_items))
+    send_long_message(format_pivot_list_message(pivot_items))
 
-    # 3
     send_long_message(format_gapup_results(gap_items))
-
-    # 4
     send_long_message(format_inside_results(inside_items))
+    send_long_message(format_pivot_results(pivot_items))
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
@@ -454,6 +580,7 @@ def run_after_market_once():
 def run_live_day():
     gap_sent = False
     inside_sent = False
+    pivot_sent = False
     eod_sent = False
 
     while True:
@@ -486,9 +613,22 @@ def run_live_day():
             send_long_message(format_inside_list_message(inside_items))
             inside_sent = True
 
+        if not pivot_sent and t >= dtime(10, 30):
+            pivot_items = []
+            for sym in SYMBOLS:
+                try:
+                    p = analyze_30m_pivot(sym)
+                    if p:
+                        pivot_items.append(p)
+                except Exception as e:
+                    log(f"LIVE PIVOT ERROR {sym}: {e}")
+            send_long_message(format_pivot_list_message(pivot_items))
+            pivot_sent = True
+
         if not eod_sent and t >= dtime(15, 25):
             gap_items = []
             inside_items = []
+            pivot_items = []
 
             for sym in SYMBOLS:
                 try:
@@ -505,8 +645,16 @@ def run_live_day():
                 except Exception:
                     pass
 
+                try:
+                    p = analyze_30m_pivot(sym)
+                    if p:
+                        pivot_items.append(p)
+                except Exception:
+                    pass
+
             send_long_message(format_gapup_results(gap_items))
             send_long_message(format_inside_results(inside_items))
+            send_long_message(format_pivot_results(pivot_items))
 
             nxt = next_market_open_datetime()
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
