@@ -133,20 +133,6 @@ def _wrap_text(draw, value, font, max_width):
     lines.append(current)
     return lines
 
-# ================= TELEGRAM SEND =================
-def send(msg: str):
-    print(msg, flush=True)
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=30
-        )
-    except Exception as e:
-        print(f"Telegram error: {e}")
-
 
 def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
     fonts = _load_fonts()
@@ -251,7 +237,20 @@ def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
     return bio
 
 
-def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASHBOARD"):
+def _dashboard_pages(items, page_size=4):
+    items = list(items or [])
+    if not items:
+        return [[{
+            "symbol": "NO SETUPS",
+            "range_pct": "",
+            "buy": {"entry": ""},
+            "sell": {"entry": ""},
+            "strategy": "No setup"
+        }]]
+    return [items[i:i+page_size] for i in range(0, len(items), page_size)]
+
+
+def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASHBOARD", page_no=1, total_pages=1):
     fonts = _load_fonts()
     W, H = 1080, 1700
     img = Image.new("RGB", (W, H), (244, 247, 252))
@@ -272,10 +271,15 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
     dark_panel = (33, 43, 54)
     accent = (255, 193, 7)
 
+    # Header closer to the sample image
     draw.rounded_rectangle((24, 24, W - 24, 190), radius=28, fill=header_bg)
-    draw.text((55, 42), title, font=fonts["title"], fill="white")
-    draw.text((58, 112), subtitle, font=fonts["sub"], fill="white")
-    draw.text((W - 240, 112), now_ist().strftime("%a, %b %d").upper(), font=fonts["sub"], fill=(255, 235, 235))
+    draw.text((55, 40), title, font=fonts["title"], fill="white")
+    draw.text((55, 106), subtitle, font=fonts["sub"], fill="white")
+    right_txt = now_ist().strftime("%a, %b %d").upper()
+    if total_pages > 1:
+        right_txt += f"  P{page_no}/{total_pages}"
+    right_w = _text_size(draw, right_txt, fonts["sub"])[0]
+    draw.text((W - 55 - right_w, 106), right_txt, font=fonts["sub"], fill=(255, 235, 235))
 
     watch = len(pattern_summary.get("gapup", [])) + len(pattern_summary.get("inside15", [])) + len(pattern_summary.get("pivot30", []))
     active_n = len(active_trades)
@@ -293,11 +297,12 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
         draw.text((x, 255), val, font=fonts["card"], fill=color)
         x += 165
 
+    # ranking from all items on this page only
     ranked = []
     for item in items:
-        score = 0
-        buy = item.get("buy", {})
-        sell = item.get("sell", {})
+        score = 90
+        buy = item.get("buy", {}) or {}
+        sell = item.get("sell", {}) or {}
         for side_data in (buy, sell):
             if side_data:
                 result = str(side_data.get("result", ""))
@@ -314,11 +319,12 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
 
     draw.rounded_rectangle((24, 330, W - 24, 420), radius=20, fill=panel_bg, outline=border, width=2)
     draw.text((48, 352), "TOP RANKED SETUPS", font=fonts["card"], fill=text_dark)
-    rx = 335
+    rank_x = 320
     for idx, (name, score) in enumerate(ranked, 1):
         fill = profit if idx != 2 else loss
-        draw.text((rx, 356), f"{idx}) {name} {score}%", font=fonts["small"], fill=fill)
-        rx += 190
+        label = f"{idx}) {name} {score}%"
+        draw.text((rank_x, 356), label, font=fonts["small"], fill=fill)
+        rank_x += 210
     draw.text((48, 386), "Smart filter: only strongest OI-confirmed setups shown first", font=fonts["tiny"], fill=muted)
 
     def result_color(txt):
@@ -362,87 +368,70 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
             return f"{side} • DAY END"
         return f"{side} • HOLD"
 
-    def block_lines(data, rows, side):
-        if not data or data.get("entry", "") == "":
-            return []
-        status = infer_status(data, side)
-        return {
-            "status": status,
-            "entry": data.get("entry", ""),
-            "sl": data.get("stoploss", ""),
-            "target": data.get("target", ""),
-            "qty": data.get("qty", ""),
-            "pl": data.get("pl", ""),
-            "result": data.get("result", ""),
-            "oi_rows": rows[:3],
-        }
-
-    def card(x, y, item):
+    def primary_block(item):
         buy, sell = normalize_side_data(item)
-        buy_rows = item.get("buy_oi_rows", []) or []
-        sell_rows = item.get("sell_oi_rows", []) or []
-        buy_block = block_lines(buy, buy_rows, "BUY")
-        sell_block = block_lines(sell, sell_rows, "SELL")
-        score = next((s for n, s in ranked if n == item.get("symbol", "")), 90)
+        if buy and buy.get("entry", "") != "":
+            return "BUY", buy, item.get("buy_oi_rows", []) or []
+        if sell and sell.get("entry", "") != "":
+            return "SELL", sell, item.get("sell_oi_rows", []) or []
+        return "WATCH", {"entry": "", "target": "", "stoploss": "", "result": "", "exit_price": "", "pl": "", "qty": ""}, []
 
+    def draw_card(x, y, item):
+        side, data, rows = primary_block(item)
+        score = next((s for n, s in ranked if n == item.get("symbol", "")), 90)
         box_h = 390
         draw.rounded_rectangle((x, y, x + 500, y + box_h), radius=24, fill=panel_bg, outline=border, width=2)
-        heading = str(item.get("symbol", ""))
-        rp = str(item.get("range_pct", "")).strip()
-        if rp not in ("", "None"):
-            heading = f"{heading}"
 
-        header_fill = buy_bar if buy_block else sell_bar
-        title_fill = text_dark if buy_block else "white"
+        header_fill = buy_bar if side == "BUY" else sell_bar if side == "SELL" else accent
+        title_fill = text_dark if side in ("BUY", "WATCH") else "white"
         draw.rounded_rectangle((x + 16, y + 16, x + 484, y + 66), radius=16, fill=header_fill)
-        draw.text((x + 30, y + 28), heading, font=fonts["card"], fill=title_fill)
+        draw.text((x + 28, y + 28), str(item.get("symbol", "")), font=fonts["card"], fill=title_fill)
         draw.text((x + 390, y + 28), f"{score}%", font=fonts["card"], fill=title_fill)
 
-        primary = buy_block if buy_block else sell_block
-        side_fill = buy_box if buy_block else sell_box
-        draw.rounded_rectangle((x + 16, y + 82, x + 484, y + 128), radius=14, fill=side_fill)
-        draw.text((x + 28, y + 94), primary["status"], font=fonts["text"], fill=result_color(primary["result"] or primary["status"]))
+        status = infer_status(data, side)
+        soft_box = buy_box if side == "BUY" else sell_box if side == "SELL" else (255, 245, 230)
+        draw.rounded_rectangle((x + 16, y + 82, x + 484, y + 128), radius=14, fill=soft_box)
+        draw.text((x + 28, y + 94), status, font=fonts["text"], fill=result_color(data.get("result", "") or status))
 
-        draw.text((x + 28, y + 148), f"Entry: {primary['entry']}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 180, y + 148), f"SL: {primary['sl']}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 300, y + 148), f"Target: {primary['target']}", font=fonts["text"], fill=text_dark)
+        draw.text((x + 28, y + 148), f"Entry: {data.get('entry', '')}", font=fonts["text"], fill=text_dark)
+        draw.text((x + 180, y + 148), f"SL: {data.get('stoploss', '')}", font=fonts["text"], fill=text_dark)
+        draw.text((x + 300, y + 148), f"Target: {data.get('target', '')}", font=fonts["text"], fill=text_dark)
 
-        qty_text = primary["qty"] if primary["qty"] != "" else "-"
+        qty_text = data.get("qty", "") if data.get("qty", "") != "" else "-"
         draw.text((x + 28, y + 182), f"Qty: {qty_text}", font=fonts["text"], fill=text_dark)
-        pl_value = primary["pl"] if primary["pl"] != "" else "-"
-        pl_fill = profit if str(pl_value).startswith("+") or (isinstance(pl_value, (int, float)) and pl_value >= 0) else loss
+        pl_value = data.get("pl", "") if data.get("pl", "") != "" else "-"
+        pl_fill = profit if str(pl_value).startswith("+") or (isinstance(pl_value, (int, float)) and pl_value >= 0) else loss if pl_value != "-" else neutral
         draw.text((x + 180, y + 182), f"P/L: {pl_value}", font=fonts["text"], fill=pl_fill)
         draw.text((x + 330, y + 182), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
 
         draw.text((x + 28, y + 220), "Signal reason", font=fonts["small"], fill=muted)
         reason = item.get("reason") or item.get("strategy") or "Pattern + OI confirmation"
-        reason_lines = _wrap_text(draw, reason, fonts["tiny"], 430)[:2]
-        ry = y + 246
-        for line in reason_lines:
-            draw.text((x + 28, ry), line, font=fonts["tiny"], fill=text_dark)
-            ry += 20
+        for idx, line in enumerate(_wrap_text(draw, reason, fonts["tiny"], 430)[:2]):
+            draw.text((x + 28, y + 246 + idx * 20), line, font=fonts["tiny"], fill=text_dark)
 
         draw.rounded_rectangle((x + 16, y + 282, x + 484, y + 366), radius=14, fill=(248, 250, 252))
         draw.text((x + 28, y + 294), "Strike      PE OICh         | CE OICh", font=fonts["tiny"], fill=muted)
+        if not rows:
+            rows = ["ATM rows not stored", "Will show in live tracking", ""]
         oy = y + 320
-        rows = primary["oi_rows"] or ["ATM rows not stored", "Will show in live tracking", ""]
         for row in rows[:3]:
             draw.text((x + 28, oy), row, font=fonts["tiny"], fill=text_dark)
             oy += 20
 
     positions = [(40, 450), (540, 450), (40, 870), (540, 870)]
-    display_items = items[:4]
+    display_items = list(items[:4])
     while len(display_items) < 4:
-        display_items.append({"symbol": "EMPTY", "buy": {"entry": ""}, "sell": {"entry": ""}, "strategy": "No setup"})
+        display_items.append({"symbol": "", "buy": {"entry": ""}, "sell": {"entry": ""}, "strategy": ""})
     for pos, item in zip(positions, display_items):
-        card(pos[0], pos[1], item)
+        if item.get("symbol"):
+            draw_card(pos[0], pos[1], item)
 
     draw.rounded_rectangle((24, 1540, W - 24, 1660), radius=20, fill=dark_panel)
     draw.text((42, 1565), "ULTIMATE FEATURES", font=fonts["card"], fill="white")
     draw.text((42, 1602), "• Ranked by confidence  • OI mini table  • Risk/Qty  • Live hold/exit state  • Mobile-ready layout", font=fonts["small"], fill=(220, 225, 235))
 
     bio = BytesIO()
-    bio.name = "ultimate_dashboard.png"
+    bio.name = f"ultimate_dashboard_p{page_no}.png"
     img.save(bio, format="PNG")
     bio.seek(0)
     return bio
@@ -522,10 +511,16 @@ def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        img_bytes = make_dashboard_image(items, title=title, subtitle=subtitle)
-        files = {"photo": ("ultimate_dashboard.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+        pages = _dashboard_pages(items, page_size=4)
+        total_pages = len(pages)
+        for idx, page_items in enumerate(pages, 1):
+            img_bytes = make_dashboard_image(page_items, title=title, subtitle=subtitle, page_no=idx, total_pages=total_pages)
+            files = {"photo": (f"ultimate_dashboard_p{idx}.png", img_bytes, "image/png")}
+            page_caption = caption
+            if total_pages > 1:
+                page_caption = f"{caption} ({idx}/{total_pages})" if caption else f"Page {idx}/{total_pages}"
+            data = {"chat_id": CHAT_ID, "caption": page_caption[:1024] if page_caption else ""}
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
     except Exception as e:
         log(f"Dashboard image error: {e}")
 
