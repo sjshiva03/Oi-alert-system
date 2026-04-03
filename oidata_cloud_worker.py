@@ -250,15 +250,65 @@ def dedupe_candles_by_ts(candles):
     return out
 
 # ================= MARKET TIME =================
+def fetch_nse_holidays_from_web(year=None):
+    if year is None:
+        year = now_ist().year
+
+    url = "https://www.nseindia.com/resources/exchange-communication-holidays"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/"
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        session.get("https://www.nseindia.com", timeout=20)
+        r = session.get(url, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        log(f"Holiday fetch failed: {e}")
+        return set()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    text = soup.get_text("\n", strip=True)
+
+    holidays = set()
+    for token in text.replace(",", " ").split():
+        token = token.strip()
+        try:
+            dt = datetime.strptime(token, "%d-%b-%Y")
+            if dt.year == year:
+                holidays.add(dt.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+
+    return holidays
+
+
 def get_holiday_set():
-    out = set()
+    env_holidays = set()
     for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
         p = part.strip()
         if p:
-            out.add(p)
-    return out
+            env_holidays.add(p)
 
-HOLIDAYS = get_holiday_set()
+    web_holidays = fetch_nse_holidays_from_web(now_ist().year)
+    merged = env_holidays | web_holidays
+
+    log(f"NSE holidays loaded: {sorted(list(merged))}")
+    return merged
+
+
+try:
+    HOLIDAYS = get_holiday_set()
+except Exception as e:
+    log(f"Holiday init failed: {e}")
+    HOLIDAYS = set()
 
 def is_market_day(dt_obj):
     return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in HOLIDAYS
@@ -288,12 +338,14 @@ def sleep_until_next_market_open():
 
 def analysis_date_str():
     now = now_ist()
-    if now.time() < dtime(9, 15):
-        d = now - timedelta(days=1)
-        while not is_market_day(d):
-            d = d - timedelta(days=1)
-        return d.strftime("%Y-%m-%d")
-    return now.strftime("%Y-%m-%d")
+
+    if is_market_day(now) and now.time() >= dtime(9, 15):
+        return now.strftime("%Y-%m-%d")
+
+    d = now - timedelta(days=1)
+    while not is_market_day(d):
+        d = d - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -343,29 +395,21 @@ def get_analysis_day_candles(symbol, resolution, days=20):
 
 def get_previous_daily(symbol):
     daily = get_history(symbol, "D", 40)
-    target_day = analysis_date_str()
+    today_str = now_ist().strftime("%Y-%m-%d")
+
     prev = []
     for c in daily:
         try:
-            if candle_dt(c[0]).strftime("%Y-%m-%d") < target_day:
+            c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
+            if c_day < today_str:
                 prev.append(c)
         except Exception:
             pass
+
     prev.sort(key=lambda x: x[0])
     return prev[-1] if prev else None
 
-def get_previous_weekly(symbol):
-    weekly = get_history(symbol, "W", 80)
-    target_day = analysis_date_str()
-    prev = []
-    for c in weekly:
-        try:
-            if candle_dt(c[0]).strftime("%Y-%m-%d") < target_day:
-                prev.append(c)
-        except Exception:
-            pass
-    prev.sort(key=lambda x: x[0])
-    return prev[-1] if prev else None
+
 
 def fetch_quotes(symbol):
     payload = {"symbols": symbol}
@@ -385,7 +429,21 @@ def fetch_quotes(symbol):
     vals = item.get("v") or {}
 
     return {
-        "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),
+        "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_pdef get_previous_weekly(symbol):
+    weekly = get_history(symbol, "W", 80)
+    today_str = now_ist().strftime("%Y-%m-%d")
+
+    prev = []
+    for c in weekly:
+        try:
+            c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
+            if c_day < today_str:
+                prev.append(c)
+        except Exception:
+            pass
+
+    prev.sort(key=lambda x: x[0])
+    return prev[-1] if prev else Nonerice"), 0.0),
         "open": safe_float(vals.get("open_price") or vals.get("open") or vals.get("openPrice"), 0.0),
         "high": safe_float(vals.get("high_price") or vals.get("high") or vals.get("highPrice"), 0.0),
         "low": safe_float(vals.get("low_price") or vals.get("low") or vals.get("lowPrice"), 0.0),
