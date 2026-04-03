@@ -272,12 +272,16 @@ def sleep_until_next_market_open():
 
 def analysis_date_str():
     now = now_ist()
-    if now.time() < dtime(9, 15):
-        d = now - timedelta(days=1)
-        while not is_market_day(d):
-            d = d - timedelta(days=1)
-        return d.strftime("%Y-%m-%d")
-    return now.strftime("%Y-%m-%d")
+
+    # during or after market hours, use today
+    if now.time() >= dtime(9, 15):
+        return now.strftime("%Y-%m-%d")
+
+    # before market open, use last market day
+    d = now - timedelta(days=1)
+    while not is_market_day(d):
+        d = d - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -327,27 +331,33 @@ def get_analysis_day_candles(symbol, resolution, days=20):
 
 def get_previous_daily(symbol):
     daily = get_history(symbol, "D", 40)
-    target_day = analysis_date_str()
+    today_str = now_ist().strftime("%Y-%m-%d")
+
     prev = []
     for c in daily:
         try:
-            if candle_dt(c[0]).strftime("%Y-%m-%d") < target_day:
+            c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
+            if c_day < today_str:
                 prev.append(c)
         except Exception:
             pass
+
     prev.sort(key=lambda x: x[0])
     return prev[-1] if prev else None
 
 def get_previous_weekly(symbol):
     weekly = get_history(symbol, "W", 80)
-    target_day = analysis_date_str()
+    today_str = now_ist().strftime("%Y-%m-%d")
+
     prev = []
     for c in weekly:
         try:
-            if candle_dt(c[0]).strftime("%Y-%m-%d") < target_day:
+            c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
+            if c_day < today_str:
                 prev.append(c)
         except Exception:
             pass
+
     prev.sort(key=lambda x: x[0])
     return prev[-1] if prev else None
 
