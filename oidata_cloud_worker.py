@@ -528,6 +528,131 @@ def send_after_market_summary_image(caption="After Market Summary"):
         log(f"After market summary image error: {e}")
 
 
+def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_title="LIVE TRADE UPDATE", reason_text=""):
+    fonts = _load_fonts()
+    W, H = 1080, 980
+    img = Image.new("RGB", (W, H), (244, 247, 252))
+    draw = ImageDraw.Draw(img)
+
+    header_bg = (229, 57, 53)
+    panel_bg = (255, 255, 255)
+    buy_bar = (32, 201, 151)
+    sell_bar = (239, 83, 80)
+    buy_box = (232, 250, 242)
+    sell_box = (253, 236, 234)
+    text_dark = (28, 33, 40)
+    muted = (96, 108, 122)
+    border = (222, 228, 235)
+    profit = (18, 140, 85)
+    loss = (211, 47, 47)
+    neutral = (120, 130, 140)
+    dark_panel = (33, 43, 54)
+    accent = (255, 193, 7)
+
+    side = str(trade.get("side", "")).upper()
+    side_is_buy = side == "BUY"
+    side_color = buy_bar if side_is_buy else sell_bar
+    soft_box = buy_box if side_is_buy else sell_box
+    header_fill = text_dark if side_is_buy else (255, 255, 255)
+
+    draw.rounded_rectangle((24, 24, W - 24, 170), radius=28, fill=header_bg)
+    draw.text((55, 42), "STOCKS TO WATCH", font=fonts["title"], fill="white")
+    draw.text((58, 112), header_title, font=fonts["sub"], fill="white")
+    draw.text((W - 240, 112), now_ist().strftime("%a, %b %d").upper(), font=fonts["sub"], fill=(255, 235, 235))
+
+    draw.rounded_rectangle((24, 190, W - 24, 290), radius=22, fill=dark_panel)
+    metric_items = [
+        ("Stock", short_name(trade.get("symbol", ""))),
+        ("Strategy", trade.get("strategy", "")),
+        ("Side", side),
+        ("LTP", "-" if ltp is None else str(round(float(ltp), 2))),
+        ("Status", status or trade.get("close_reason", "ACTIVE")),
+    ]
+    mx = 42
+    for label, value in metric_items:
+        draw.text((mx, 210), label, font=fonts["small"], fill=(190, 205, 220))
+        val_fill = "white"
+        val_text = str(value)
+        if label == "Status":
+            low = val_text.lower()
+            if "target" in low or "hold" in low or "entry" in low:
+                val_fill = (124, 255, 183)
+            elif "stoploss" in low:
+                val_fill = (255, 138, 128)
+            elif "exit" in low or "day end" in low:
+                val_fill = (240, 240, 240)
+        draw.text((mx, 242), val_text, font=fonts["card"], fill=val_fill)
+        mx += 200
+
+    draw.rounded_rectangle((24, 312, W - 24, H - 24), radius=24, fill=panel_bg, outline=border, width=2)
+    draw.rounded_rectangle((48, 336, W - 48, 396), radius=18, fill=side_color)
+    draw.text((66, 349), short_name(trade.get("symbol", "")), font=fonts["card"], fill=header_fill)
+    draw.text((W - 220, 349), str(trade.get("confidence", "LIVE")), font=fonts["card"], fill=header_fill)
+
+    draw.rounded_rectangle((48, 420, W - 48, 478), radius=16, fill=soft_box)
+    status_fill = neutral
+    low = str(status or "").lower()
+    if "hold" in low or "target" in low or "entry" in low:
+        status_fill = profit
+    elif "stoploss" in low:
+        status_fill = loss
+    elif "exit" in low:
+        status_fill = neutral
+    draw.text((64, 437), f"{side}  •  {(status or 'ACTIVE')}", font=fonts["text"], fill=status_fill)
+
+    draw.text((64, 515), f"Entry: {trade.get('entry', '')}", font=fonts["text"], fill=text_dark)
+    draw.text((300, 515), f"SL: {trade.get('stoploss', '')}", font=fonts["text"], fill=text_dark)
+    draw.text((520, 515), f"Target: {trade.get('target', '')}", font=fonts["text"], fill=text_dark)
+
+    pnl = trade.get("pnl", "")
+    pnl_fill = neutral
+    try:
+        pnl_fill = profit if float(pnl) >= 0 else loss
+    except Exception:
+        pass
+    draw.text((64, 560), f"Qty: {trade.get('qty', '')}", font=fonts["text"], fill=text_dark)
+    draw.text((250, 560), f"P/L: {pnl}", font=fonts["text"], fill=pnl_fill)
+    draw.text((470, 560), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
+
+    draw.text((64, 618), "Signal reason", font=fonts["small"], fill=muted)
+    reason = reason_text or trade.get("close_reason", "OI-confirmed trade update")
+    if len(reason) > 90:
+        reason = reason[:87] + '...'
+    draw.text((64, 648), reason, font=fonts["tiny"], fill=text_dark)
+
+    draw.rounded_rectangle((48, 748, W - 48, 920), radius=16, fill=(248, 250, 252))
+    draw.text((64, 766), "Strike      PE OICh         | CE OICh", font=fonts["tiny"], fill=muted)
+    oy = 804
+    if oi_rows:
+        for row in oi_rows[:4]:
+            if isinstance(row, dict):
+                row_txt = f"{row.get('strike','')}      {human_format(row.get('put_oich',0))}{arrow(row.get('put_oich',0))}         | {human_format(row.get('call_oich',0))}{arrow(row.get('call_oich',0))}"
+            else:
+                row_txt = str(row)
+            draw.text((64, oy), row_txt, font=fonts["tiny"], fill=text_dark)
+            oy += 28
+    else:
+        draw.text((64, 804), "No OI rows", font=fonts["tiny"], fill=muted)
+
+    bio = BytesIO()
+    bio.name = "live_trade_dashboard.png"
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
+
+def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_title="LIVE TRADE UPDATE", reason_text="", caption=""):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    try:
+        img_bytes = build_live_trade_image(trade, ltp=ltp, status=status, oi_rows=oi_rows, header_title=header_title, reason_text=reason_text)
+        files = {"photo": ("live_trade_dashboard.png", img_bytes, "image/png")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+    except Exception as e:
+        log(f"Live trade dashboard image error: {e}")
+
+
 def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
     lines = str(text).split("\n")
     try:
@@ -1387,26 +1512,16 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
     trade["margin"] = round(margin, 2)
     trade["risk_per_share"] = round(risk_per_share, 2)
 
-    side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
-    strategy_name = trade["strategy"]
-
-    msg = (
-        f"{side_icon} ENTRY CONFIRMED\n\n"
-        f"Stock: {short_name(symbol)}\n"
-        f"Strategy: {strategy_name}\n"
-        f"Side: {trade['side']}\n\n"
-        f"Entry: {trade['entry']}\n"
-        f"Target: {trade['target']}\n"
-        f"Stoploss: {trade['stoploss']}\n\n"
-        f"Risk: ₹{int(RISK_AMOUNT)}\n"
-        f"Risk/Share: {trade['risk_per_share']}\n"
-        f"Qty: {qty}\n"
-        f"Exposure: {round(exposure)}\n"
-        f"Margin(~{int(LEVERAGE)}X): {round(margin)}\n\n"
-        f"OI: {oi_bias} ✅\n"
-        f"{format_oi_snapshot(oi_rows)}"
+    reason = f"Risk ₹{int(RISK_AMOUNT)} | Qty {qty} | Margin ~{round(margin)} | OI {oi_bias}"
+    send_live_trade_image(
+        trade,
+        ltp=trade["entry"],
+        status="ENTRY CONFIRMED",
+        oi_rows=oi_rows,
+        header_title="LIVE + OI + RISK + ENTRY",
+        reason_text=reason,
+        caption=f"{short_name(symbol)} Entry Confirmed"
     )
-    send_long_message(msg)
 
 def try_entry_for_candidate(symbol):
     if symbol in closed_for_day:
@@ -1549,13 +1664,10 @@ def close_trade(symbol, reason, exit_price):
 
     if reason.startswith("Target"):
         eod_stats["targets"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "🎯"
     elif reason.startswith("Stoploss"):
         eod_stats["stoplosses"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "🛑"
     else:
         eod_stats["dayend"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "⚪"
 
     eod_stats["closed"].append({
         "symbol": short_name(symbol),
@@ -1567,17 +1679,14 @@ def close_trade(symbol, reason, exit_price):
         "reason": reason
     })
 
-    side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
-    send(
-        f"{icon} TRADE CLOSED\n\n"
-        f"Stock: {short_name(symbol)}\n"
-        f"Strategy: {trade['strategy']}\n"
-        f"Side: {trade['side']} {side_icon}\n"
-        f"Entry: {trade['entry']}\n"
-        f"Exit: {trade['exit_price']}\n"
-        f"Qty: {qty}\n"
-        f"P/L: {pnl}\n"
-        f"Reason: {reason}"
+    send_live_trade_image(
+        trade,
+        ltp=trade["exit_price"],
+        status=reason,
+        oi_rows=[],
+        header_title="TRADE CLOSED",
+        reason_text=f"Exit {trade['exit_price']} | Qty {qty} | P/L {pnl}",
+        caption=f"{short_name(symbol)} {reason}"
     )
 
 def track_active_trade(symbol):
@@ -1611,29 +1720,27 @@ def track_active_trade(symbol):
         trade["last_oi_check"] = now_epoch()
 
         if throttle_ok(f"{symbol}|live_oi"):
-            side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
-            send_long_message(
-                f"{side_icon} LIVE TRADE TRACKING\n\n"
-                f"Stock: {short_name(symbol)}\n"
-                f"Side: {trade['side']}\n"
-                f"Strategy: {trade['strategy']}\n"
-                f"Entry: {trade['entry']}\n"
-                f"SL: {trade['stoploss']}\n"
-                f"Target: {trade['target']}\n"
-                f"LTP: {ltp}\n\n"
-                f"Status: {status}\n\n"
-                f"{format_oi_snapshot(oi_rows)}"
+            send_live_trade_image(
+                trade,
+                ltp=ltp,
+                status=status,
+                oi_rows=oi_rows,
+                header_title="LIVE + OI + RISK + RANKING",
+                reason_text=f"Strategy {trade['strategy']} | OI bias {bias}",
+                caption=f"{short_name(symbol)} {status}"
             )
 
         if status == "Exit ⚪" and throttle_ok(f"{symbol}|oi_exit"):
-            send(
-                f"⚪ OI EXIT SIGNAL\n\n"
-                f"Stock: {short_name(symbol)}\n"
-                f"Side: {trade['side']}\n"
-                f"Strategy: {trade['strategy']}\n"
-                f"LTP: {ltp}\n"
-                f"Reason: OI turned against trade"
+            send_live_trade_image(
+                trade,
+                ltp=ltp,
+                status=status,
+                oi_rows=oi_rows,
+                header_title="OI EXIT SIGNAL",
+                reason_text="OI turned against trade",
+                caption=f"{short_name(symbol)} OI Exit"
             )
+
 
 # ================= SCAN SCHEDULERS =================
 def scan_gapup_once():
