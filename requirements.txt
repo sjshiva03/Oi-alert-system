@@ -1,3 +1,4 @@
 fyers-apiv3
 requests
 twilio
+beautifulsoup
