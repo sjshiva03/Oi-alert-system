@@ -369,15 +369,19 @@ def log_analysis_date_debug():
     ref_symbol = get_reference_symbol()
     candles = get_history(ref_symbol, 5, 10)
 
-    if candles:
-        last_dt = candle_dt(candles[-1][0]).strftime("%Y-%m-%d %H:%M")
-        log(f"Reference symbol: {ref_symbol}")
-        log(f"Latest available 5m candle from FYERS: {last_dt}")
-        log(f"Analysis date selected: {analysis_date_str()}")
+    if candles and isinstance(candles[-1], list) and len(candles[-1]) > 0:
+        try:
+            ts = int(candles[-1][0])
+            last_dt = candle_dt(ts).strftime("%Y-%m-%d %H:%M")
+
+            log(f"Reference symbol: {ref_symbol}")
+            log(f"Latest candle from FYERS: {last_dt}")
+            log(f"Analysis date selected: {analysis_date_str()}")
+
+        except Exception as e:
+            log(f"Debug parse error: {e}")
     else:
-        log(f"Reference symbol: {ref_symbol}")
-        log("No 5m candles returned from FYERS")
-        log(f"Analysis date fallback: {analysis_date_str()}")
+        log("No valid candles returned from FYERS")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
