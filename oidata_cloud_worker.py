@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
+from bs4 import BeautifulSoup
 
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -369,7 +370,7 @@ def log_analysis_date_debug():
     candles = get_history(ref_symbol, 5, 10)
 
     if candles:
-        last_dt = candle_dt(candles[-1]).strftime("%Y-%m-%d %H:%M")
+        last_dt = candle_dt(candles[-1][0]).strftime("%Y-%m-%d %H:%M")
         log(f"Reference symbol: {ref_symbol}")
         log(f"Latest available 5m candle from FYERS: {last_dt}")
         log(f"Analysis date selected: {analysis_date_str()}")
