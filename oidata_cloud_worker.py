@@ -99,13 +99,8 @@ def log(msg: str):
     print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def make_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT"):
-    from PIL import Image, ImageDraw, ImageFont
-    from io import BytesIO
-    import math
-
-    # ---------- fonts ----------
     try:
-        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 42)
+        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 40)
         sub_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
         text_font = ImageFont.truetype("DejaVuSans.ttf", 24)
         small_font = ImageFont.truetype("DejaVuSans.ttf", 22)
@@ -115,44 +110,32 @@ def make_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT"):
         text_font = ImageFont.load_default()
         small_font = ImageFont.load_default()
 
-    # ---------- layout ----------
-    W = 1400
-    OUTER = 30
+    W = 1200
+    OUTER = 28
     HEADER_H = 110
-    GAP = 20
-    CARD_W = (W - OUTER * 2 - GAP) // 2
-    CARD_INNER = 18
-    LINE_GAP = 10
+    GAP = 18
+    CARD_W = W - OUTER * 2
+    CARD_INNER = 20
 
-    # ---------- helpers ----------
-    def text_size(draw, text, font):
-        b = draw.textbbox((0, 0), text, font=font)
-        return b[2] - b[0], b[3] - b[1]
+    def text_size(draw, value, font):
+        bbox = draw.textbbox((0, 0), str(value), font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-    def wrap_text(draw, text, font, max_width):
-        words = str(text).split()
+    def wrap_text(draw, value, font, max_width):
+        words = str(value).split()
         if not words:
             return [""]
         lines = []
-        cur = words[0]
-        for w in words[1:]:
-            test = cur + " " + w
+        current = words[0]
+        for word in words[1:]:
+            test = current + " " + word
             if text_size(draw, test, font)[0] <= max_width:
-                cur = test
+                current = test
             else:
-                lines.append(cur)
-                cur = w
-        lines.append(cur)
+                lines.append(current)
+                current = word
+        lines.append(current)
         return lines
-
-    def line(draw, x, y, txt, font, fill):
-        draw.text((x, y), txt, font=font, fill=fill)
-        return text_size(draw, txt, font)[1]
-
-    def info_block(draw, x, y, label, value, font, fill=(35, 35, 35)):
-        txt = f"{label}: {value}"
-        draw.text((x, y), txt, font=font, fill=fill)
-        return text_size(draw, txt, font)[1]
 
     def result_color(txt):
         t = str(txt).lower()
@@ -160,139 +143,109 @@ def make_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT"):
             return (18, 120, 60)
         if "stoploss" in t:
             return (190, 45, 45)
-        return (100, 100, 100)
+        if "day end" in t:
+            return (100, 100, 100)
+        return (70, 70, 70)
 
-    # ---------- normalize items ----------
-    # expected shape:
-    # {
-    #   symbol, range_pct,
-    #   buy: {entry,target,stoploss,result,exit_price,pl},
-    #   sell:{entry,target,stoploss,result,exit_price,pl}
-    # }
+    def block_height(draw, label, data):
+        if not data or data.get("entry", "") == "":
+            return 0
+        h = 14
+        h += text_size(draw, label, text_font)[1] + 10
+        rows = [
+            f"Entry: {data.get('entry', '')}",
+            f"Target: {data.get('target', '')}",
+            f"SL: {data.get('stoploss', '')}",
+            f"Result: {data.get('result', '')} | Exit: {data.get('exit_price', '')} | P/L: {data.get('pl', '')}",
+        ]
+        for row in rows:
+            for line in wrap_text(draw, row, small_font, CARD_W - CARD_INNER * 2 - 24):
+                h += text_size(draw, line, small_font)[1] + 5
+            h += 3
+        return max(h, 120)
+
     dummy = Image.new("RGB", (W, 1000), "white")
     d0 = ImageDraw.Draw(dummy)
-
     card_heights = []
     for item in items:
-        h = CARD_INNER
-        symbol = f"{item.get('symbol','')} ({item.get('range_pct','') }%)"
-        h += text_size(d0, symbol, sub_font)[1] + 14
+        card_h = CARD_INNER
+        heading = str(item.get("symbol", ""))
+        rp = str(item.get("range_pct", "")).strip()
+        if rp not in ("", "None"):
+            heading = f"{heading} ({rp}%)"
+        card_h += text_size(d0, heading, sub_font)[1] + 16
+        bh = block_height(d0, "BUY", item.get("buy", {}))
+        sh = block_height(d0, "SELL", item.get("sell", {}))
+        if bh > 0:
+            card_h += bh + 14
+        if sh > 0:
+            card_h += sh + 14
+        card_heights.append(max(card_h + CARD_INNER, 220))
 
-        # BUY block
-        buy = item.get("buy", {})
-        buy_lines = [
-            f"BUY",
-            f"Entry: {buy.get('entry','')}",
-            f"Target: {buy.get('target','')}",
-            f"SL: {buy.get('stoploss','')}",
-            f"Result: {buy.get('result','')} | Exit: {buy.get('exit_price','')} | P/L: {buy.get('pl','')}",
-        ]
-        for t in buy_lines:
-            for wrapped in wrap_text(d0, t, text_font if t == "BUY" else small_font, CARD_W - CARD_INNER * 2 - 20):
-                h += text_size(d0, wrapped, text_font if t == "BUY" else small_font)[1] + LINE_GAP
-
-        h += 12
-
-        # SELL block
-        sell = item.get("sell", {})
-        sell_lines = [
-            f"SELL",
-            f"Entry: {sell.get('entry','')}",
-            f"Target: {sell.get('target','')}",
-            f"SL: {sell.get('stoploss','')}",
-            f"Result: {sell.get('result','')} | Exit: {sell.get('exit_price','')} | P/L: {sell.get('pl','')}",
-        ]
-        for t in sell_lines:
-            for wrapped in wrap_text(d0, t, text_font if t == "SELL" else small_font, CARD_W - CARD_INNER * 2 - 20):
-                h += text_size(d0, wrapped, text_font if t == "SELL" else small_font)[1] + LINE_GAP
-
-        h += CARD_INNER
-        card_heights.append(max(h, 320))
-
-    rows = math.ceil(len(items) / 2) if items else 1
-    row_heights = []
-    for r in range(rows):
-        left_i = r * 2
-        right_i = left_i + 1
-        vals = []
-        if left_i < len(card_heights):
-            vals.append(card_heights[left_i])
-        if right_i < len(card_heights):
-            vals.append(card_heights[right_i])
-        row_heights.append(max(vals) if vals else 320)
-
-    H = OUTER + HEADER_H + GAP + sum(row_heights) + GAP * (rows - 1) + OUTER
-    img = Image.new("RGB", (W, H), (245, 247, 250))
+    total_h = OUTER + HEADER_H + GAP + sum(card_heights) + GAP * max(0, len(card_heights) - 1) + OUTER
+    img = Image.new("RGB", (W, total_h), (245, 247, 250))
     draw = ImageDraw.Draw(img)
 
-    # ---------- header ----------
     draw.rounded_rectangle((OUTER, OUTER, W - OUTER, OUTER + HEADER_H), radius=24, fill=(30, 41, 59))
     draw.text((OUTER + 24, OUTER + 18), title, font=title_font, fill="white")
-    draw.text((OUTER + 24, OUTER + 66), f"Stocks: {len(items)}", font=small_font, fill=(220, 225, 235))
+    draw.text((OUTER + 24, OUTER + 68), f"Cards: {len(items)}", font=small_font, fill=(220, 225, 235))
 
-    # ---------- cards ----------
     y = OUTER + HEADER_H + GAP
-    for r in range(rows):
-        x_positions = [OUTER, OUTER + CARD_W + GAP]
-        for c in range(2):
-            idx = r * 2 + c
-            if idx >= len(items):
-                continue
+    for idx, item in enumerate(items):
+        card_h = card_heights[idx]
+        x = OUTER
+        draw.rounded_rectangle((x, y, x + CARD_W, y + card_h), radius=24, fill="white", outline=(220, 224, 230), width=2)
 
-            item = items[idx]
-            card_h = row_heights[r]
-            x = x_positions[c]
+        cx = x + CARD_INNER
+        cy = y + CARD_INNER
 
-            # card shell
-            draw.rounded_rectangle((x, y, x + CARD_W, y + card_h), radius=24, fill="white", outline=(220, 224, 230), width=2)
+        heading = str(item.get("symbol", ""))
+        rp = str(item.get("range_pct", "")).strip()
+        if rp not in ("", "None"):
+            heading = f"{heading} ({rp}%)"
+        draw.text((cx, cy), heading, font=sub_font, fill=(20, 25, 35))
+        cy += text_size(draw, heading, sub_font)[1] + 16
 
-            cy = y + CARD_INNER
-            cx = x + CARD_INNER
-
-            # title
-            stock_title = f"{item.get('symbol','')} ({item.get('range_pct','')}%)"
-            draw.text((cx, cy), stock_title, font=sub_font, fill=(20, 25, 35))
-            cy += text_size(draw, stock_title, sub_font)[1] + 14
-
-            # BUY box
-            buy = item.get("buy", {})
-            buy_box_h = 120
-            draw.rounded_rectangle((cx, cy, x + CARD_W - CARD_INNER, cy + buy_box_h), radius=18, fill=(235, 247, 238))
+        buy = item.get("buy", {})
+        if buy and buy.get("entry", "") != "":
+            bh = block_height(draw, "BUY", buy)
+            draw.rounded_rectangle((cx, cy, x + CARD_W - CARD_INNER, cy + bh), radius=18, fill=(235, 247, 238))
             ty = cy + 10
             draw.text((cx + 12, ty), "BUY", font=text_font, fill=(18, 120, 60))
             ty += text_size(draw, "BUY", text_font)[1] + 8
-            ty += info_block(draw, cx + 12, ty, "Entry", buy.get("entry", ""), small_font)
-            ty += 6
-            ty += info_block(draw, cx + 12, ty, "Target", buy.get("target", ""), small_font)
-            ty += 6
-            ty += info_block(draw, cx + 12, ty, "SL", buy.get("stoploss", ""), small_font)
-            ty += 6
-            res_txt = f"Result: {buy.get('result','')} | Exit: {buy.get('exit_price','')} | P/L: {buy.get('pl','')}"
-            for wline in wrap_text(draw, res_txt, small_font, CARD_W - CARD_INNER * 2 - 24):
-                draw.text((cx + 12, ty), wline, font=small_font, fill=result_color(buy.get("result", "")))
-                ty += text_size(draw, wline, small_font)[1] + 4
+            for row in [
+                f"Entry: {buy.get('entry', '')}",
+                f"Target: {buy.get('target', '')}",
+                f"SL: {buy.get('stoploss', '')}",
+                f"Result: {buy.get('result', '')} | Exit: {buy.get('exit_price', '')} | P/L: {buy.get('pl', '')}",
+            ]:
+                for line in wrap_text(draw, row, small_font, CARD_W - CARD_INNER * 2 - 24):
+                    color = result_color(buy.get("result", "")) if row.startswith("Result:") else (35, 35, 35)
+                    draw.text((cx + 12, ty), line, font=small_font, fill=color)
+                    ty += text_size(draw, line, small_font)[1] + 5
+                ty += 3
+            cy += bh + 14
 
-            cy += buy_box_h + 14
-
-            # SELL box
-            sell = item.get("sell", {})
-            sell_box_h = 120
-            draw.rounded_rectangle((cx, cy, x + CARD_W - CARD_INNER, cy + sell_box_h), radius=18, fill=(252, 239, 239))
+        sell = item.get("sell", {})
+        if sell and sell.get("entry", "") != "":
+            sh = block_height(draw, "SELL", sell)
+            draw.rounded_rectangle((cx, cy, x + CARD_W - CARD_INNER, cy + sh), radius=18, fill=(252, 239, 239))
             ty = cy + 10
             draw.text((cx + 12, ty), "SELL", font=text_font, fill=(190, 45, 45))
             ty += text_size(draw, "SELL", text_font)[1] + 8
-            ty += info_block(draw, cx + 12, ty, "Entry", sell.get("entry", ""), small_font)
-            ty += 6
-            ty += info_block(draw, cx + 12, ty, "Target", sell.get("target", ""), small_font)
-            ty += 6
-            ty += info_block(draw, cx + 12, ty, "SL", sell.get("stoploss", ""), small_font)
-            ty += 6
-            res_txt = f"Result: {sell.get('result','')} | Exit: {sell.get('exit_price','')} | P/L: {sell.get('pl','')}"
-            for wline in wrap_text(draw, res_txt, small_font, CARD_W - CARD_INNER * 2 - 24):
-                draw.text((cx + 12, ty), wline, font=small_font, fill=result_color(sell.get("result", "")))
-                ty += text_size(draw, wline, small_font)[1] + 4
+            for row in [
+                f"Entry: {sell.get('entry', '')}",
+                f"Target: {sell.get('target', '')}",
+                f"SL: {sell.get('stoploss', '')}",
+                f"Result: {sell.get('result', '')} | Exit: {sell.get('exit_price', '')} | P/L: {sell.get('pl', '')}",
+            ]:
+                for line in wrap_text(draw, row, small_font, CARD_W - CARD_INNER * 2 - 24):
+                    color = result_color(sell.get("result", "")) if row.startswith("Result:") else (35, 35, 35)
+                    draw.text((cx + 12, ty), line, font=small_font, fill=color)
+                    ty += text_size(draw, line, small_font)[1] + 5
+                ty += 3
 
-        y += row_heights[r] + GAP
+        y += card_h + GAP
 
     bio = BytesIO()
     bio.name = "dashboard.png"
@@ -305,13 +258,14 @@ def send(msg: str):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-  requests.post(
+        requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg},
             timeout=30
         )
     except Exception as e:
         log(f"Telegram error: {e}")
+
 
 def send_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT", caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -320,10 +274,7 @@ def send_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT", caption="")
     try:
         img_bytes = make_dashboard_image(items, title=title)
         files = {"photo": ("dashboard.png", img_bytes, "image/png")}
-        data = {
-            "chat_id": CHAT_ID,
-            "caption": caption[:1024] if caption else ""
-        }
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
             data=data,
@@ -334,9 +285,122 @@ def send_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT", caption="")
         log(f"Dashboard image error: {e}")
 
 
+def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
+    lines = str(text).split("\n")
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
+
+    dummy = Image.new("RGB", (width, 100), "white")
+    draw = ImageDraw.Draw(dummy)
+    line_heights = []
+    max_width = 0
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        line_heights.append(h)
+        max_width = max(max_width, w)
+
+    img_width = max(width, max_width + padding * 2)
+    img_height = padding * 2 + sum(line_heights) + line_gap * max(0, len(lines) - 1)
+
+    img = Image.new("RGB", (img_width, img_height), "white")
+    draw = ImageDraw.Draw(img)
+    y = padding
+    for i, line in enumerate(lines):
+        draw.text((padding, y), line, fill="black", font=font)
+        y += line_heights[i] + line_gap
+
+    bio = BytesIO()
+    bio.name = "report.png"
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
 
 def send_photo_from_text(text, caption=""):
+    print(text, flush=True)
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    try:
+        img_bytes = text_to_image_bytes(text)
+        files = {"photo": ("report.png", img_bytes, "image/png")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data=data,
+            files=files,
+            timeout=60
+        )
+    except Exception as e:
+        log(f"Telegram photo error: {e}")
 
+
+def convert_inside_items_for_dashboard(inside_items):
+    cards = []
+    for x in inside_items:
+        cards.append({
+            "symbol": x.get("symbol", ""),
+            "range_pct": x.get("range_pct", ""),
+            "buy": {
+                "entry": x.get("buy", {}).get("entry", ""),
+                "target": x.get("buy", {}).get("target", ""),
+                "stoploss": x.get("buy", {}).get("stoploss", ""),
+                "result": x.get("buy", {}).get("result", ""),
+                "exit_price": x.get("buy", {}).get("exit_price", ""),
+                "pl": x.get("buy", {}).get("pl", ""),
+            },
+            "sell": {
+                "entry": x.get("sell", {}).get("entry", ""),
+                "target": x.get("sell", {}).get("target", ""),
+                "stoploss": x.get("sell", {}).get("stoploss", ""),
+                "result": x.get("sell", {}).get("result", ""),
+                "exit_price": x.get("sell", {}).get("exit_price", ""),
+                "pl": x.get("sell", {}).get("pl", ""),
+            },
+        })
+    return cards
+
+
+def convert_gapup_items_for_dashboard(gap_items):
+    cards = []
+    for x in gap_items:
+        cards.append({
+            "symbol": x.get("symbol", ""),
+            "range_pct": x.get("gap_pct", ""),
+            "buy": {},
+            "sell": {
+                "entry": x.get("entry", ""),
+                "target": x.get("target", ""),
+                "stoploss": x.get("stoploss", ""),
+                "result": x.get("result", ""),
+                "exit_price": x.get("exit_price", ""),
+                "pl": x.get("pl", ""),
+            },
+        })
+    return cards
+
+
+def convert_pivot_items_for_dashboard(pivot_items):
+    cards = []
+    for x in pivot_items:
+        level_txt = f"{x.get('pivot_name', '')}={x.get('pivot_value', '')}"
+        cards.append({
+            "symbol": f"{x.get('symbol', '')} [{level_txt}]",
+            "range_pct": "",
+            "buy": {},
+            "sell": {
+                "entry": x.get("entry", ""),
+                "target": x.get("target", ""),
+                "stoploss": x.get("stoploss", ""),
+                "result": x.get("result", ""),
+                "exit_price": x.get("exit_price", ""),
+                "pl": x.get("pl", ""),
+            },
+        })
+    return cards
 
 def send_long_message(text: str, chunk_size: int = 3500):
     if not text:
@@ -394,10 +458,10 @@ def human_format(n):
 def arrow(v):
     v = safe_float(v, 0.0)
     if v > 0:
-        return "↑"
+        return "â†‘"
     if v < 0:
-        return "↓"
-    return "→"
+        return "â†“"
+    return "â†’"
 
 def dedupe_candles_by_ts(candles):
     seen = {}
@@ -499,17 +563,11 @@ def sleep_until_next_market_open():
         time.sleep(min(60, max(1, int(rem))))
 
 def get_reference_symbol():
-    # prefer index if present, else first stock in watchlist
     for sym in SYMBOLS:
         if sym.endswith("-INDEX"):
             return sym
     return SYMBOLS[0]
 
-def get_reference_symbol():
-    for sym in SYMBOLS:
-        if sym.endswith("-INDEX"):
-            return sym
-    return SYMBOLS[0]
 
 
 def get_last_available_session_date():
@@ -778,10 +836,10 @@ def format_oi_snapshot(rows):
 
 def hold_status(side, bias):
     if side == "BUY":
-        return "Buy Hold 🟢" if bias == "BULLISH" else "Exit ⚪"
+        return "Buy Hold ðŸŸ¢" if bias == "BULLISH" else "Exit âšª"
     if side == "SELL":
-        return "Sell Hold 🔴" if bias == "BEARISH" else "Exit ⚪"
-    return "Exit ⚪"
+        return "Sell Hold ðŸ”´" if bias == "BEARISH" else "Exit âšª"
+    return "Exit âšª"
 
 # ================= POSITION SIZE =================
 def calc_position(entry, stoploss):
@@ -803,14 +861,14 @@ def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if high >= stoploss and low <= target:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss ðŸ›‘", stoploss
         if high >= stoploss:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss ðŸ›‘", stoploss
         if low <= target:
-            return "Target 🎯", target
+            return "Target ðŸŽ¯", target
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        return "Day End âšª", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -819,14 +877,14 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if low <= stoploss and high >= target:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss ðŸ›‘", stoploss
         if low <= stoploss:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss ðŸ›‘", stoploss
         if high >= target:
-            return "Target 🎯", target
+            return "Target ðŸŽ¯", target
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        return "Day End âšª", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -992,24 +1050,24 @@ def scan_30m_pivot_sell(symbol):
 # ================= SUMMARY FORMATTERS =================
 def format_gapup_summary(items):
     if not items:
-        return "⚡ GAP UP PLUS STOCKS (%) ⚡\n\nNone"
-    lines = ["⚡ GAP UP PLUS STOCKS (%) ⚡", ""]
+        return "âš¡ GAP UP PLUS STOCKS (%) âš¡\n\nNone"
+    lines = ["âš¡ GAP UP PLUS STOCKS (%) âš¡", ""]
     for i, x in enumerate(sorted(items, key=lambda z: z["gap_pct"], reverse=True), 1):
         lines.append(f"{i}. {short_name(x['symbol'])} ({x['gap_pct']}%)")
     return "\n".join(lines)
 
 def format_inside_summary(items):
     if not items:
-        return "🕯️ 15 MIN INSIDE CANDLE STOCKS (%) 🕯️\n\nNone"
-    lines = ["🕯️ 15 MIN INSIDE CANDLE STOCKS (%) 🕯️", ""]
+        return "ðŸ•¯ï¸ 15 MIN INSIDE CANDLE STOCKS (%) ðŸ•¯ï¸\n\nNone"
+    lines = ["ðŸ•¯ï¸ 15 MIN INSIDE CANDLE STOCKS (%) ðŸ•¯ï¸", ""]
     for i, x in enumerate(sorted(items, key=lambda z: z["range_pct"]), 1):
         lines.append(f"{i}. {short_name(x['symbol'])} ({x['range_pct']}%)")
     return "\n".join(lines)
 
 def format_pivot_summary(items):
     if not items:
-        return "📍 30 MIN WEEKLY PIVOT SELL STOCKS\n\nNone"
-    lines = ["📍 30 MIN WEEKLY PIVOT SELL STOCKS", ""]
+        return "ðŸ“ 30 MIN WEEKLY PIVOT SELL STOCKS\n\nNone"
+    lines = ["ðŸ“ 30 MIN WEEKLY PIVOT SELL STOCKS", ""]
     for i, x in enumerate(items, 1):
         lines.append(f"{i}. {short_name(x['symbol'])} ({x['pivot_name']}={x['pivot_value']})")
     return "\n".join(lines)
@@ -1049,7 +1107,7 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
     trade["margin"] = round(margin, 2)
     trade["risk_per_share"] = round(risk_per_share, 2)
 
-    side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
+    side_icon = "ðŸŸ¢" if trade["side"] == "BUY" else "ðŸ”´"
     strategy_name = trade["strategy"]
 
     msg = (
@@ -1060,12 +1118,12 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
         f"Entry: {trade['entry']}\n"
         f"Target: {trade['target']}\n"
         f"Stoploss: {trade['stoploss']}\n\n"
-        f"Risk: ₹{int(RISK_AMOUNT)}\n"
+        f"Risk: â‚¹{int(RISK_AMOUNT)}\n"
         f"Risk/Share: {trade['risk_per_share']}\n"
         f"Qty: {qty}\n"
         f"Exposure: {round(exposure)}\n"
         f"Margin(~{int(LEVERAGE)}X): {round(margin)}\n\n"
-        f"OI: {oi_bias} ✅\n"
+        f"OI: {oi_bias} âœ…\n"
         f"{format_oi_snapshot(oi_rows)}"
     )
     send_long_message(msg)
@@ -1091,7 +1149,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
+                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
                 block_trade(symbol, strategy, "SELL", "OI against SELL")
                 del watch_candidates[symbol]
                 return
@@ -1118,7 +1176,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BULLISH":
                 if throttle_ok(f"{symbol}|blocked|BUY"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nBUY trigger hit, but OI is against BUY")
+                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nBUY trigger hit, but OI is against BUY")
                 block_trade(symbol, strategy, "BUY", "OI against BUY")
                 return
 
@@ -1143,7 +1201,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
+                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
                 block_trade(symbol, strategy, "SELL", "OI against SELL")
                 return
 
@@ -1169,7 +1227,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|PIVOTSELL"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
+                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
                 block_trade(symbol, strategy, "SELL", "OI against SELL")
                 del watch_candidates[symbol]
                 return
@@ -1211,13 +1269,13 @@ def close_trade(symbol, reason, exit_price):
 
     if reason.startswith("Target"):
         eod_stats["targets"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "🎯"
+        icon = "ðŸŽ¯"
     elif reason.startswith("Stoploss"):
         eod_stats["stoplosses"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "🛑"
+        icon = "ðŸ›‘"
     else:
         eod_stats["dayend"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "⚪"
+        icon = "âšª"
 
     eod_stats["closed"].append({
         "symbol": short_name(symbol),
@@ -1229,7 +1287,7 @@ def close_trade(symbol, reason, exit_price):
         "reason": reason
     })
 
-    side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
+    side_icon = "ðŸŸ¢" if trade["side"] == "BUY" else "ðŸ”´"
     send(
         f"{icon} TRADE CLOSED\n\n"
         f"Stock: {short_name(symbol)}\n"
@@ -1254,17 +1312,17 @@ def track_active_trade(symbol):
 
     if trade["side"] == "BUY":
         if ltp <= trade["stoploss"]:
-            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
+            close_trade(symbol, "Stoploss ðŸ›‘", trade["stoploss"])
             return
         if ltp >= trade["target"]:
-            close_trade(symbol, "Target 🎯", trade["target"])
+            close_trade(symbol, "Target ðŸŽ¯", trade["target"])
             return
     else:
         if ltp >= trade["stoploss"]:
-            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
+            close_trade(symbol, "Stoploss ðŸ›‘", trade["stoploss"])
             return
         if ltp <= trade["target"]:
-            close_trade(symbol, "Target 🎯", trade["target"])
+            close_trade(symbol, "Target ðŸŽ¯", trade["target"])
             return
 
     if now_epoch() - trade.get("last_oi_check", 0) >= OI_INTERVAL_SECONDS:
@@ -1273,7 +1331,7 @@ def track_active_trade(symbol):
         trade["last_oi_check"] = now_epoch()
 
         if throttle_ok(f"{symbol}|live_oi"):
-            side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
+            side_icon = "ðŸŸ¢" if trade["side"] == "BUY" else "ðŸ”´"
             send_long_message(
                 f"{side_icon} LIVE TRADE TRACKING\n\n"
                 f"Stock: {short_name(symbol)}\n"
@@ -1287,9 +1345,9 @@ def track_active_trade(symbol):
                 f"{format_oi_snapshot(oi_rows)}"
             )
 
-        if status == "Exit ⚪" and throttle_ok(f"{symbol}|oi_exit"):
+        if status == "Exit âšª" and throttle_ok(f"{symbol}|oi_exit"):
             send(
-                f"⚪ OI EXIT SIGNAL\n\n"
+                f"âšª OI EXIT SIGNAL\n\n"
                 f"Stock: {short_name(symbol)}\n"
                 f"Side: {trade['side']}\n"
                 f"Strategy: {trade['strategy']}\n"
@@ -1398,7 +1456,7 @@ def run_live_day():
         if not eod_sent and nowt >= dtime(15, 28):
             send_photo_from_text(build_eod_report(), "End of Day Report")
             nxt = next_market_open_datetime()
-            send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+            send(f"ðŸŒ™ Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
 
         time.sleep(POLL_SECONDS)
@@ -1511,19 +1569,19 @@ def evaluate_pivot_after_market(symbol):
         exit_price = entry
         pl = 0.0
     elif c3_high >= stoploss and c3_low <= target:
-        result = "Stoploss 🛑"
+        result = "Stoploss ðŸ›‘"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_high >= stoploss:
-        result = "Stoploss 🛑"
+        result = "Stoploss ðŸ›‘"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_low <= target:
-        result = "Target 🎯"
+        result = "Target ðŸŽ¯"
         exit_price = target
         pl = round(entry - exit_price, 2)
     else:
-        result = "Day End ⚪"
+        result = "Day End âšª"
         exit_price = float(c3[4])
         pl = round(entry - exit_price, 2)
 
@@ -1541,8 +1599,8 @@ def evaluate_pivot_after_market(symbol):
 
 def format_gapup_results(items):
     if not items:
-        return "📘 GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
-    lines = ["📘 GAP UP PLUS - IF ENTRY TAKEN", ""]
+        return "ðŸ“˜ GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
+    lines = ["ðŸ“˜ GAP UP PLUS - IF ENTRY TAKEN", ""]
     for x in items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
@@ -1555,17 +1613,17 @@ def format_gapup_results(items):
 
 def format_inside_results(items):
     if not items:
-        return "📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
-    lines = ["📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
+        return "ðŸ“˜ 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
+    lines = ["ðŸ“˜ 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
     for x in items:
         b = x["buy"]; s = x["sell"]
         bsign = "+" if b["pl"] > 0 else ""
         ssign = "+" if s["pl"] > 0 else ""
         lines += [
             f"{x['symbol']} ({x['range_pct']}%)",
-            f"🟢 BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
+            f"ðŸŸ¢ BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
             f"      {b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
-            f"🔴 SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
+            f"ðŸ”´ SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
             f"      {s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
             ""
         ]
@@ -1573,21 +1631,21 @@ def format_inside_results(items):
 
 def format_pivot_results(items):
     if not items:
-        return "📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
-    lines = ["📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
+        return "ðŸ“˜ 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
+    lines = ["ðŸ“˜ 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
     for x in items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
             x["symbol"],
             f"Level:{x['pivot_name']} ({x['pivot_value']})",
-            f"🔴 SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"ðŸ”´ SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
             f"      {x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
             ""
         ]
     return "\n".join(lines).strip()
 
 def run_after_market_once():
-    send("📡 Running after-market scan...")
+    send("ðŸ“¡ Running after-market scan...")
 
     gap_items = []
     inside_items = []
@@ -1619,18 +1677,18 @@ def run_after_market_once():
     send_long_message(format_inside_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "range_pct": x["range_pct"]} for x in inside_items]))
     send_long_message(format_pivot_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "pivot_name": x["pivot_name"], "pivot_value": x["pivot_value"]} for x in pivot_items]))
 
-    send_photo_from_text(format_gapup_results(gap_items), "Gap Up Result")
-    send_dashboard_image(inside_items, title="15 MIN INSIDE CANDLE REPORT", caption="15 Min Inside Result")
-    send_photo_from_text(format_pivot_results(pivot_items), "Pivot Result")
+    send_dashboard_image(convert_gapup_items_for_dashboard(gap_items), title="GAP UP PLUS REPORT", caption="Gap Up Result")
+    send_dashboard_image(convert_inside_items_for_dashboard(inside_items), title="15 MIN INSIDE CANDLE REPORT", caption="15 Min Inside Result")
+    send_dashboard_image(convert_pivot_items_for_dashboard(pivot_items), title="30 MIN WEEKLY PIVOT REPORT", caption="Pivot Result")
 
     nxt = next_market_open_datetime()
-    send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    send(f"ðŸŒ™ Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
 
 # ================= EOD REPORT =================
 def build_eod_report():
     total_pnl = round(sum(x.get("pnl", 0.0) for x in eod_stats["closed"]), 2)
 
-    lines = ["📊 END OF DAY REPORT", ""]
+    lines = ["ðŸ“Š END OF DAY REPORT", ""]
 
     lines += [
         f"Patterns Found:",
@@ -1671,7 +1729,7 @@ def main():
     profile = check_auth()
     log_analysis_date_debug()
     send(
-        f"🚀 BOT STARTED\n"
+        f"ðŸš€ BOT STARTED\n"
         f"Profile status: {profile.get('s')}\n"
         f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
         f"Analysis day={analysis_date_str()}\n"
