@@ -88,6 +88,20 @@ eod_stats = {
 last_alert_time = {}
 pivot_scan_done_keys = set()
 
+# ================= TELEGRAM SEND =================
+def send(msg: str):
+    print(msg, flush=True)
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=30
+        )
+    except Exception as e:
+        print(f"Telegram error: {e}")
+
 # ================= HELPERS =================
 def now_ist():
     return datetime.now(IST)
