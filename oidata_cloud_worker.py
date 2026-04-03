@@ -98,12 +98,214 @@ def now_epoch():
 def log(msg: str):
     print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+def make_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT"):
+    from PIL import Image, ImageDraw, ImageFont
+    from io import BytesIO
+    import math
+
+    # ---------- fonts ----------
+    try:
+        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 42)
+        sub_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
+        text_font = ImageFont.truetype("DejaVuSans.ttf", 24)
+        small_font = ImageFont.truetype("DejaVuSans.ttf", 22)
+    except Exception:
+        title_font = ImageFont.load_default()
+        sub_font = ImageFont.load_default()
+        text_font = ImageFont.load_default()
+        small_font = ImageFont.load_default()
+
+    # ---------- layout ----------
+    W = 1400
+    OUTER = 30
+    HEADER_H = 110
+    GAP = 20
+    CARD_W = (W - OUTER * 2 - GAP) // 2
+    CARD_INNER = 18
+    LINE_GAP = 10
+
+    # ---------- helpers ----------
+    def text_size(draw, text, font):
+        b = draw.textbbox((0, 0), text, font=font)
+        return b[2] - b[0], b[3] - b[1]
+
+    def wrap_text(draw, text, font, max_width):
+        words = str(text).split()
+        if not words:
+            return [""]
+        lines = []
+        cur = words[0]
+        for w in words[1:]:
+            test = cur + " " + w
+            if text_size(draw, test, font)[0] <= max_width:
+                cur = test
+            else:
+                lines.append(cur)
+                cur = w
+        lines.append(cur)
+        return lines
+
+    def line(draw, x, y, txt, font, fill):
+        draw.text((x, y), txt, font=font, fill=fill)
+        return text_size(draw, txt, font)[1]
+
+    def info_block(draw, x, y, label, value, font, fill=(35, 35, 35)):
+        txt = f"{label}: {value}"
+        draw.text((x, y), txt, font=font, fill=fill)
+        return text_size(draw, txt, font)[1]
+
+    def result_color(txt):
+        t = str(txt).lower()
+        if "target" in t:
+            return (18, 120, 60)
+        if "stoploss" in t:
+            return (190, 45, 45)
+        return (100, 100, 100)
+
+    # ---------- normalize items ----------
+    # expected shape:
+    # {
+    #   symbol, range_pct,
+    #   buy: {entry,target,stoploss,result,exit_price,pl},
+    #   sell:{entry,target,stoploss,result,exit_price,pl}
+    # }
+    dummy = Image.new("RGB", (W, 1000), "white")
+    d0 = ImageDraw.Draw(dummy)
+
+    card_heights = []
+    for item in items:
+        h = CARD_INNER
+        symbol = f"{item.get('symbol','')} ({item.get('range_pct','') }%)"
+        h += text_size(d0, symbol, sub_font)[1] + 14
+
+        # BUY block
+        buy = item.get("buy", {})
+        buy_lines = [
+            f"BUY",
+            f"Entry: {buy.get('entry','')}",
+            f"Target: {buy.get('target','')}",
+            f"SL: {buy.get('stoploss','')}",
+            f"Result: {buy.get('result','')} | Exit: {buy.get('exit_price','')} | P/L: {buy.get('pl','')}",
+        ]
+        for t in buy_lines:
+            for wrapped in wrap_text(d0, t, text_font if t == "BUY" else small_font, CARD_W - CARD_INNER * 2 - 20):
+                h += text_size(d0, wrapped, text_font if t == "BUY" else small_font)[1] + LINE_GAP
+
+        h += 12
+
+        # SELL block
+        sell = item.get("sell", {})
+        sell_lines = [
+            f"SELL",
+            f"Entry: {sell.get('entry','')}",
+            f"Target: {sell.get('target','')}",
+            f"SL: {sell.get('stoploss','')}",
+            f"Result: {sell.get('result','')} | Exit: {sell.get('exit_price','')} | P/L: {sell.get('pl','')}",
+        ]
+        for t in sell_lines:
+            for wrapped in wrap_text(d0, t, text_font if t == "SELL" else small_font, CARD_W - CARD_INNER * 2 - 20):
+                h += text_size(d0, wrapped, text_font if t == "SELL" else small_font)[1] + LINE_GAP
+
+        h += CARD_INNER
+        card_heights.append(max(h, 320))
+
+    rows = math.ceil(len(items) / 2) if items else 1
+    row_heights = []
+    for r in range(rows):
+        left_i = r * 2
+        right_i = left_i + 1
+        vals = []
+        if left_i < len(card_heights):
+            vals.append(card_heights[left_i])
+        if right_i < len(card_heights):
+            vals.append(card_heights[right_i])
+        row_heights.append(max(vals) if vals else 320)
+
+    H = OUTER + HEADER_H + GAP + sum(row_heights) + GAP * (rows - 1) + OUTER
+    img = Image.new("RGB", (W, H), (245, 247, 250))
+    draw = ImageDraw.Draw(img)
+
+    # ---------- header ----------
+    draw.rounded_rectangle((OUTER, OUTER, W - OUTER, OUTER + HEADER_H), radius=24, fill=(30, 41, 59))
+    draw.text((OUTER + 24, OUTER + 18), title, font=title_font, fill="white")
+    draw.text((OUTER + 24, OUTER + 66), f"Stocks: {len(items)}", font=small_font, fill=(220, 225, 235))
+
+    # ---------- cards ----------
+    y = OUTER + HEADER_H + GAP
+    for r in range(rows):
+        x_positions = [OUTER, OUTER + CARD_W + GAP]
+        for c in range(2):
+            idx = r * 2 + c
+            if idx >= len(items):
+                continue
+
+            item = items[idx]
+            card_h = row_heights[r]
+            x = x_positions[c]
+
+            # card shell
+            draw.rounded_rectangle((x, y, x + CARD_W, y + card_h), radius=24, fill="white", outline=(220, 224, 230), width=2)
+
+            cy = y + CARD_INNER
+            cx = x + CARD_INNER
+
+            # title
+            stock_title = f"{item.get('symbol','')} ({item.get('range_pct','')}%)"
+            draw.text((cx, cy), stock_title, font=sub_font, fill=(20, 25, 35))
+            cy += text_size(draw, stock_title, sub_font)[1] + 14
+
+            # BUY box
+            buy = item.get("buy", {})
+            buy_box_h = 120
+            draw.rounded_rectangle((cx, cy, x + CARD_W - CARD_INNER, cy + buy_box_h), radius=18, fill=(235, 247, 238))
+            ty = cy + 10
+            draw.text((cx + 12, ty), "BUY", font=text_font, fill=(18, 120, 60))
+            ty += text_size(draw, "BUY", text_font)[1] + 8
+            ty += info_block(draw, cx + 12, ty, "Entry", buy.get("entry", ""), small_font)
+            ty += 6
+            ty += info_block(draw, cx + 12, ty, "Target", buy.get("target", ""), small_font)
+            ty += 6
+            ty += info_block(draw, cx + 12, ty, "SL", buy.get("stoploss", ""), small_font)
+            ty += 6
+            res_txt = f"Result: {buy.get('result','')} | Exit: {buy.get('exit_price','')} | P/L: {buy.get('pl','')}"
+            for wline in wrap_text(draw, res_txt, small_font, CARD_W - CARD_INNER * 2 - 24):
+                draw.text((cx + 12, ty), wline, font=small_font, fill=result_color(buy.get("result", "")))
+                ty += text_size(draw, wline, small_font)[1] + 4
+
+            cy += buy_box_h + 14
+
+            # SELL box
+            sell = item.get("sell", {})
+            sell_box_h = 120
+            draw.rounded_rectangle((cx, cy, x + CARD_W - CARD_INNER, cy + sell_box_h), radius=18, fill=(252, 239, 239))
+            ty = cy + 10
+            draw.text((cx + 12, ty), "SELL", font=text_font, fill=(190, 45, 45))
+            ty += text_size(draw, "SELL", text_font)[1] + 8
+            ty += info_block(draw, cx + 12, ty, "Entry", sell.get("entry", ""), small_font)
+            ty += 6
+            ty += info_block(draw, cx + 12, ty, "Target", sell.get("target", ""), small_font)
+            ty += 6
+            ty += info_block(draw, cx + 12, ty, "SL", sell.get("stoploss", ""), small_font)
+            ty += 6
+            res_txt = f"Result: {sell.get('result','')} | Exit: {sell.get('exit_price','')} | P/L: {sell.get('pl','')}"
+            for wline in wrap_text(draw, res_txt, small_font, CARD_W - CARD_INNER * 2 - 24):
+                draw.text((cx + 12, ty), wline, font=small_font, fill=result_color(sell.get("result", "")))
+                ty += text_size(draw, wline, small_font)[1] + 4
+
+        y += row_heights[r] + GAP
+
+    bio = BytesIO()
+    bio.name = "dashboard.png"
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
 def send(msg: str):
     print(msg, flush=True)
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        requests.post(
+  requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg},
             timeout=30
@@ -111,63 +313,17 @@ def send(msg: str):
     except Exception as e:
         log(f"Telegram error: {e}")
 
-
-def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=26):
-    lines = text.split("\n")
-
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-    except Exception:
-        font = ImageFont.load_default()
-
-    dummy = Image.new("RGB", (width, 100), "white")
-    draw = ImageDraw.Draw(dummy)
-
-    line_heights = []
-    max_width = 0
-
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-        line_heights.append(h)
-        max_width = max(max_width, w)
-
-    img_width = max(width, max_width + padding * 2)
-    img_height = padding * 2 + sum(line_heights) + line_gap * max(0, len(lines) - 1)
-
-    img = Image.new("RGB", (img_width, img_height), "white")
-    draw = ImageDraw.Draw(img)
-
-    y = padding
-    for i, line in enumerate(lines):
-        draw.text((padding, y), line, fill="black", font=font)
-        y += line_heights[i] + line_gap
-
-    bio = BytesIO()
-    bio.name = "report.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
-
-
-def send_photo_from_text(text, caption=""):
-    print(text, flush=True)
-
+def send_dashboard_image(items, title="15 MIN INSIDE CANDLE REPORT", caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
 
     try:
-        img_bytes = text_to_image_bytes(text)
-
-        files = {
-            "photo": ("report.png", img_bytes, "image/png")
-        }
+        img_bytes = make_dashboard_image(items, title=title)
+        files = {"photo": ("dashboard.png", img_bytes, "image/png")}
         data = {
             "chat_id": CHAT_ID,
             "caption": caption[:1024] if caption else ""
         }
-
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
             data=data,
@@ -175,7 +331,12 @@ def send_photo_from_text(text, caption=""):
             timeout=60
         )
     except Exception as e:
-        log(f"Telegram photo error: {e}")
+        log(f"Dashboard image error: {e}")
+
+
+
+def send_photo_from_text(text, caption=""):
+
 
 def send_long_message(text: str, chunk_size: int = 3500):
     if not text:
@@ -1459,7 +1620,7 @@ def run_after_market_once():
     send_long_message(format_pivot_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "pivot_name": x["pivot_name"], "pivot_value": x["pivot_value"]} for x in pivot_items]))
 
     send_photo_from_text(format_gapup_results(gap_items), "Gap Up Result")
-    send_photo_from_text(format_inside_results(inside_items), "15 Min Inside Result")
+    send_dashboard_image(inside_items, title="15 MIN INSIDE CANDLE REPORT", caption="15 Min Inside Result")
     send_photo_from_text(format_pivot_results(pivot_items), "Pivot Result")
 
     nxt = next_market_open_datetime()
