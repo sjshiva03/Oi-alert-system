@@ -291,7 +291,7 @@ def analysis_date_str():
     if now.time() < dtime(9, 15):
         d = now - timedelta(days=1)
         while not is_market_day(d):
-            d = d - timedelta(days=1)
+            d = d - timedelta(days=2)
         return d.strftime("%Y-%m-%d")
     return now.strftime("%Y-%m-%d")
 
