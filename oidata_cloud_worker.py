@@ -458,10 +458,10 @@ def human_format(n):
 def arrow(v):
     v = safe_float(v, 0.0)
     if v > 0:
-        return "â†‘"
+        return "↑"
     if v < 0:
-        return "â†“"
-    return "â†’"
+        return "↓"
+    return "→"
 
 def dedupe_candles_by_ts(candles):
     seen = {}
@@ -795,6 +795,43 @@ def normalize_chain_fast(options_list):
         })
     return rows
 
+
+
+def convert_gapup_summary_for_dashboard(items):
+    cards = []
+    for x in items:
+        cards.append({
+            "symbol": short_name(x.get("symbol", "")),
+            "range_pct": x.get("gap_pct", ""),
+            "buy": {},
+            "sell": {}
+        })
+    return cards
+
+
+def convert_inside_summary_for_dashboard(items):
+    cards = []
+    for x in items:
+        cards.append({
+            "symbol": short_name(x.get("symbol", "")),
+            "range_pct": x.get("range_pct", ""),
+            "buy": {},
+            "sell": {}
+        })
+    return cards
+
+
+def convert_pivot_summary_for_dashboard(items):
+    cards = []
+    for x in items:
+        level_text = f"{x.get('pivot_name', '')}={x.get('pivot_value', '')}"
+        cards.append({
+            "symbol": f"{short_name(x.get('symbol', ''))} [{level_text}]",
+            "range_pct": "",
+            "buy": {},
+            "sell": {}
+        })
+    return cards
 # ================= OI =================
 def get_oi_snapshot(symbol, ltp):
     resp = fetch_option_chain(symbol, strikecount=10, timestamp="")
@@ -836,10 +873,10 @@ def format_oi_snapshot(rows):
 
 def hold_status(side, bias):
     if side == "BUY":
-        return "Buy Hold ðŸŸ¢" if bias == "BULLISH" else "Exit âšª"
+        return "Buy Hold 🟢" if bias == "BULLISH" else "Exit ⚪"
     if side == "SELL":
-        return "Sell Hold ðŸ”´" if bias == "BEARISH" else "Exit âšª"
-    return "Exit âšª"
+        return "Sell Hold 🔴" if bias == "BEARISH" else "Exit ⚪"
+    return "Exit ⚪"
 
 # ================= POSITION SIZE =================
 def calc_position(entry, stoploss):
@@ -861,14 +898,14 @@ def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if high >= stoploss and low <= target:
-            return "Stoploss ðŸ›‘", stoploss
+            return "Stoploss 🛑", stoploss
         if high >= stoploss:
-            return "Stoploss ðŸ›‘", stoploss
+            return "Stoploss 🛑", stoploss
         if low <= target:
-            return "Target ðŸŽ¯", target
+            return "Target 🎯", target
 
     if candles_after_entry:
-        return "Day End âšª", float(candles_after_entry[-1][4])
+        return "Day End ⚪", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -877,14 +914,14 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if low <= stoploss and high >= target:
-            return "Stoploss ðŸ›‘", stoploss
+            return "Stoploss 🛑", stoploss
         if low <= stoploss:
-            return "Stoploss ðŸ›‘", stoploss
+            return "Stoploss 🛑", stoploss
         if high >= target:
-            return "Target ðŸŽ¯", target
+            return "Target 🎯", target
 
     if candles_after_entry:
-        return "Day End âšª", float(candles_after_entry[-1][4])
+        return "Day End ⚪", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -1050,24 +1087,24 @@ def scan_30m_pivot_sell(symbol):
 # ================= SUMMARY FORMATTERS =================
 def format_gapup_summary(items):
     if not items:
-        return "âš¡ GAP UP PLUS STOCKS (%) âš¡\n\nNone"
-    lines = ["âš¡ GAP UP PLUS STOCKS (%) âš¡", ""]
+        return "⚡ GAP UP PLUS STOCKS (%) ⚡\n\nNone"
+    lines = ["⚡ GAP UP PLUS STOCKS (%) ⚡", ""]
     for i, x in enumerate(sorted(items, key=lambda z: z["gap_pct"], reverse=True), 1):
         lines.append(f"{i}. {short_name(x['symbol'])} ({x['gap_pct']}%)")
     return "\n".join(lines)
 
 def format_inside_summary(items):
     if not items:
-        return "ðŸ•¯ï¸ 15 MIN INSIDE CANDLE STOCKS (%) ðŸ•¯ï¸\n\nNone"
-    lines = ["ðŸ•¯ï¸ 15 MIN INSIDE CANDLE STOCKS (%) ðŸ•¯ï¸", ""]
+        return "🕯️ 15 MIN INSIDE CANDLE STOCKS (%) 🕯️\n\nNone"
+    lines = ["🕯️ 15 MIN INSIDE CANDLE STOCKS (%) 🕯️", ""]
     for i, x in enumerate(sorted(items, key=lambda z: z["range_pct"]), 1):
         lines.append(f"{i}. {short_name(x['symbol'])} ({x['range_pct']}%)")
     return "\n".join(lines)
 
 def format_pivot_summary(items):
     if not items:
-        return "ðŸ“ 30 MIN WEEKLY PIVOT SELL STOCKS\n\nNone"
-    lines = ["ðŸ“ 30 MIN WEEKLY PIVOT SELL STOCKS", ""]
+        return "📍 30 MIN WEEKLY PIVOT SELL STOCKS\n\nNone"
+    lines = ["📍 30 MIN WEEKLY PIVOT SELL STOCKS", ""]
     for i, x in enumerate(items, 1):
         lines.append(f"{i}. {short_name(x['symbol'])} ({x['pivot_name']}={x['pivot_value']})")
     return "\n".join(lines)
@@ -1107,7 +1144,7 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
     trade["margin"] = round(margin, 2)
     trade["risk_per_share"] = round(risk_per_share, 2)
 
-    side_icon = "ðŸŸ¢" if trade["side"] == "BUY" else "ðŸ”´"
+    side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
     strategy_name = trade["strategy"]
 
     msg = (
@@ -1118,12 +1155,12 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
         f"Entry: {trade['entry']}\n"
         f"Target: {trade['target']}\n"
         f"Stoploss: {trade['stoploss']}\n\n"
-        f"Risk: â‚¹{int(RISK_AMOUNT)}\n"
+        f"Risk: ₹{int(RISK_AMOUNT)}\n"
         f"Risk/Share: {trade['risk_per_share']}\n"
         f"Qty: {qty}\n"
         f"Exposure: {round(exposure)}\n"
         f"Margin(~{int(LEVERAGE)}X): {round(margin)}\n\n"
-        f"OI: {oi_bias} âœ…\n"
+        f"OI: {oi_bias} ✅\n"
         f"{format_oi_snapshot(oi_rows)}"
     )
     send_long_message(msg)
@@ -1149,7 +1186,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
-                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
+                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
                 block_trade(symbol, strategy, "SELL", "OI against SELL")
                 del watch_candidates[symbol]
                 return
@@ -1176,7 +1213,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BULLISH":
                 if throttle_ok(f"{symbol}|blocked|BUY"):
-                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nBUY trigger hit, but OI is against BUY")
+                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nBUY trigger hit, but OI is against BUY")
                 block_trade(symbol, strategy, "BUY", "OI against BUY")
                 return
 
@@ -1201,7 +1238,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
-                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
+                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
                 block_trade(symbol, strategy, "SELL", "OI against SELL")
                 return
 
@@ -1227,7 +1264,7 @@ def try_entry_for_candidate(symbol):
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|PIVOTSELL"):
-                    send(f"âš ï¸ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
+                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
                 block_trade(symbol, strategy, "SELL", "OI against SELL")
                 del watch_candidates[symbol]
                 return
@@ -1269,13 +1306,13 @@ def close_trade(symbol, reason, exit_price):
 
     if reason.startswith("Target"):
         eod_stats["targets"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "ðŸŽ¯"
+        icon = "🎯"
     elif reason.startswith("Stoploss"):
         eod_stats["stoplosses"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "ðŸ›‘"
+        icon = "🛑"
     else:
         eod_stats["dayend"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-        icon = "âšª"
+        icon = "⚪"
 
     eod_stats["closed"].append({
         "symbol": short_name(symbol),
@@ -1287,7 +1324,7 @@ def close_trade(symbol, reason, exit_price):
         "reason": reason
     })
 
-    side_icon = "ðŸŸ¢" if trade["side"] == "BUY" else "ðŸ”´"
+    side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
     send(
         f"{icon} TRADE CLOSED\n\n"
         f"Stock: {short_name(symbol)}\n"
@@ -1312,17 +1349,17 @@ def track_active_trade(symbol):
 
     if trade["side"] == "BUY":
         if ltp <= trade["stoploss"]:
-            close_trade(symbol, "Stoploss ðŸ›‘", trade["stoploss"])
+            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
             return
         if ltp >= trade["target"]:
-            close_trade(symbol, "Target ðŸŽ¯", trade["target"])
+            close_trade(symbol, "Target 🎯", trade["target"])
             return
     else:
         if ltp >= trade["stoploss"]:
-            close_trade(symbol, "Stoploss ðŸ›‘", trade["stoploss"])
+            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
             return
         if ltp <= trade["target"]:
-            close_trade(symbol, "Target ðŸŽ¯", trade["target"])
+            close_trade(symbol, "Target 🎯", trade["target"])
             return
 
     if now_epoch() - trade.get("last_oi_check", 0) >= OI_INTERVAL_SECONDS:
@@ -1331,7 +1368,7 @@ def track_active_trade(symbol):
         trade["last_oi_check"] = now_epoch()
 
         if throttle_ok(f"{symbol}|live_oi"):
-            side_icon = "ðŸŸ¢" if trade["side"] == "BUY" else "ðŸ”´"
+            side_icon = "🟢" if trade["side"] == "BUY" else "🔴"
             send_long_message(
                 f"{side_icon} LIVE TRADE TRACKING\n\n"
                 f"Stock: {short_name(symbol)}\n"
@@ -1345,9 +1382,9 @@ def track_active_trade(symbol):
                 f"{format_oi_snapshot(oi_rows)}"
             )
 
-        if status == "Exit âšª" and throttle_ok(f"{symbol}|oi_exit"):
+        if status == "Exit ⚪" and throttle_ok(f"{symbol}|oi_exit"):
             send(
-                f"âšª OI EXIT SIGNAL\n\n"
+                f"⚪ OI EXIT SIGNAL\n\n"
                 f"Stock: {short_name(symbol)}\n"
                 f"Side: {trade['side']}\n"
                 f"Strategy: {trade['strategy']}\n"
@@ -1367,7 +1404,7 @@ def scan_gapup_once():
         except Exception as e:
             log(f"GAP SCAN ERROR {sym}: {e}")
     pattern_summary["gapup"] = items
-    send_photo_from_text(format_gapup_summary(items), "Gap Up Plus")
+    send_dashboard_image(convert_gapup_summary_for_dashboard(items), title="GAP UP PLUS STOCKS", caption="Gap Up Plus")
 
 def scan_inside15_once():
     items = []
@@ -1380,7 +1417,7 @@ def scan_inside15_once():
         except Exception as e:
             log(f"15M SCAN ERROR {sym}: {e}")
     pattern_summary["inside15"] = items
-    send_photo_from_text(format_inside_summary(items), "15 Min Inside")
+    send_dashboard_image(convert_inside_summary_for_dashboard(items), title="15 MIN INSIDE CANDLE STOCKS", caption="15 Min Inside")
 
 def pivot_scan_key():
     now = now_ist()
@@ -1412,7 +1449,7 @@ def scan_pivot_30m_once():
         except Exception as e:
             log(f"PIVOT SCAN ERROR {sym}: {e}")
     pattern_summary["pivot30"] = items
-    send_photo_from_text(format_pivot_summary(items), "30 Min Weekly Pivot Sell")
+    send_dashboard_image(convert_pivot_summary_for_dashboard(items), title="30 MIN WEEKLY PIVOT SELL STOCKS", caption="30 Min Weekly Pivot Sell")
 
 # ================= LIVE LOOP =================
 def run_live_day():
@@ -1456,7 +1493,7 @@ def run_live_day():
         if not eod_sent and nowt >= dtime(15, 28):
             send_photo_from_text(build_eod_report(), "End of Day Report")
             nxt = next_market_open_datetime()
-            send(f"ðŸŒ™ Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+            send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
 
         time.sleep(POLL_SECONDS)
@@ -1569,19 +1606,19 @@ def evaluate_pivot_after_market(symbol):
         exit_price = entry
         pl = 0.0
     elif c3_high >= stoploss and c3_low <= target:
-        result = "Stoploss ðŸ›‘"
+        result = "Stoploss 🛑"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_high >= stoploss:
-        result = "Stoploss ðŸ›‘"
+        result = "Stoploss 🛑"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_low <= target:
-        result = "Target ðŸŽ¯"
+        result = "Target 🎯"
         exit_price = target
         pl = round(entry - exit_price, 2)
     else:
-        result = "Day End âšª"
+        result = "Day End ⚪"
         exit_price = float(c3[4])
         pl = round(entry - exit_price, 2)
 
@@ -1599,8 +1636,8 @@ def evaluate_pivot_after_market(symbol):
 
 def format_gapup_results(items):
     if not items:
-        return "ðŸ“˜ GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
-    lines = ["ðŸ“˜ GAP UP PLUS - IF ENTRY TAKEN", ""]
+        return "📘 GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
+    lines = ["📘 GAP UP PLUS - IF ENTRY TAKEN", ""]
     for x in items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
@@ -1613,17 +1650,17 @@ def format_gapup_results(items):
 
 def format_inside_results(items):
     if not items:
-        return "ðŸ“˜ 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
-    lines = ["ðŸ“˜ 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
+        return "📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
+    lines = ["📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
     for x in items:
         b = x["buy"]; s = x["sell"]
         bsign = "+" if b["pl"] > 0 else ""
         ssign = "+" if s["pl"] > 0 else ""
         lines += [
             f"{x['symbol']} ({x['range_pct']}%)",
-            f"ðŸŸ¢ BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
+            f"🟢 BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
             f"      {b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
-            f"ðŸ”´ SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
+            f"🔴 SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
             f"      {s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
             ""
         ]
@@ -1631,21 +1668,21 @@ def format_inside_results(items):
 
 def format_pivot_results(items):
     if not items:
-        return "ðŸ“˜ 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
-    lines = ["ðŸ“˜ 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
+        return "📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
+    lines = ["📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
     for x in items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
             x["symbol"],
             f"Level:{x['pivot_name']} ({x['pivot_value']})",
-            f"ðŸ”´ SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"🔴 SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
             f"      {x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
             ""
         ]
     return "\n".join(lines).strip()
 
 def run_after_market_once():
-    send("ðŸ“¡ Running after-market scan...")
+    send("📡 Running after-market scan...")
 
     gap_items = []
     inside_items = []
@@ -1673,22 +1710,22 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    send_long_message(format_gapup_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "gap_pct": x["gap_pct"]} for x in gap_items]))
-    send_long_message(format_inside_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "range_pct": x["range_pct"]} for x in inside_items]))
-    send_long_message(format_pivot_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "pivot_name": x["pivot_name"], "pivot_value": x["pivot_value"]} for x in pivot_items]))
+    send_dashboard_image(convert_gapup_summary_for_dashboard([{"symbol": f"NSE:{x['symbol']}-EQ", "gap_pct": x["gap_pct"]} for x in gap_items]), title="GAP UP PLUS STOCKS", caption="Gap Up Plus Summary")
+    send_dashboard_image(convert_inside_summary_for_dashboard([{"symbol": f"NSE:{x['symbol']}-EQ", "range_pct": x["range_pct"]} for x in inside_items]), title="15 MIN INSIDE CANDLE STOCKS", caption="15 Min Inside Summary")
+    send_dashboard_image(convert_pivot_summary_for_dashboard([{"symbol": f"NSE:{x['symbol']}-EQ", "pivot_name": x["pivot_name"], "pivot_value": x["pivot_value"]} for x in pivot_items]), title="30 MIN WEEKLY PIVOT SELL STOCKS", caption="Pivot Summary")
 
     send_dashboard_image(convert_gapup_items_for_dashboard(gap_items), title="GAP UP PLUS REPORT", caption="Gap Up Result")
     send_dashboard_image(convert_inside_items_for_dashboard(inside_items), title="15 MIN INSIDE CANDLE REPORT", caption="15 Min Inside Result")
     send_dashboard_image(convert_pivot_items_for_dashboard(pivot_items), title="30 MIN WEEKLY PIVOT REPORT", caption="Pivot Result")
 
     nxt = next_market_open_datetime()
-    send(f"ðŸŒ™ Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
 
 # ================= EOD REPORT =================
 def build_eod_report():
     total_pnl = round(sum(x.get("pnl", 0.0) for x in eod_stats["closed"]), 2)
 
-    lines = ["ðŸ“Š END OF DAY REPORT", ""]
+    lines = ["📊 END OF DAY REPORT", ""]
 
     lines += [
         f"Patterns Found:",
@@ -1729,7 +1766,7 @@ def main():
     profile = check_auth()
     log_analysis_date_debug()
     send(
-        f"ðŸš€ BOT STARTED\n"
+        f"🚀 BOT STARTED\n"
         f"Profile status: {profile.get('s')}\n"
         f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
         f"Analysis day={analysis_date_str()}\n"
