@@ -4,6 +4,7 @@ import math
 import requests
 from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
+from bs4 import BeautifulSoup
 
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -181,14 +182,65 @@ def dedupe_candles_by_ts(candles):
     out.sort(key=lambda x: x[0])
     return out
 
+def fetch_nse_holidays_from_web(year=None):
+    if year is None:
+        year = now_ist().year
+
+    url = "https://www.nseindia.com/resources/exchange-communication-holidays"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/"
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        # warm up session
+        session.get("https://www.nseindia.com", timeout=20)
+        r = session.get(url, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        log(f"Holiday fetch failed: {e}")
+        return set()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    holidays = set()
+
+    # scan all visible text for date patterns like 26-Jan-2026
+    text = soup.get_text("\n", strip=True)
+    for token in text.replace(",", " ").split():
+        token = token.strip()
+        try:
+            dt = datetime.strptime(token, "%d-%b-%Y")
+            if dt.year == year:
+                holidays.add(dt.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+
+    # fallback: if page structure changes and text parse misses,
+    # keep returning empty set instead of crashing
+    return holidays
+
 # ================= MARKET TIME =================
 def get_holiday_set():
-    out = set()
+    env_holidays = set()
+
     for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
         p = part.strip()
         if p:
-            out.add(p)
-    return out
+            env_holidays.add(p)
+
+    web_holidays = fetch_nse_holidays_from_web(now_ist().year)
+
+    merged = env_holidays | web_holidays
+
+    log(f"NSE holidays loaded: {sorted(list(merged))}")
+    return merged
 
 HOLIDAYS = get_holiday_set()
 
