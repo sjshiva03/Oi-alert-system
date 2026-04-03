@@ -344,21 +344,27 @@ def get_reference_symbol():
             return sym
     return SYMBOLS[0]
 
+def get_reference_symbol():
+    for sym in SYMBOLS:
+        if sym.endswith("-INDEX"):
+            return sym
+    return SYMBOLS[0]
+
 
 def get_last_available_session_date():
     ref_symbol = get_reference_symbol()
-
-    # use intraday data itself to decide latest valid session date
     candles = get_history(ref_symbol, 5, 10)
 
     if not candles:
-        # fallback only if fyers returned nothing
-        now = now_ist()
-        return now.strftime("%Y-%m-%d")
+        return now_ist().strftime("%Y-%m-%d")
 
-    # latest candle date present in fyers
-    last_dt = candle_dt(candles[-1])
-    return last_dt.strftime("%Y-%m-%d")
+    try:
+        ts = int(candles[-1][0])
+        last_dt = candle_dt(ts)
+        return last_dt.strftime("%Y-%m-%d")
+    except Exception as e:
+        log(f"Session date parse error: {e}")
+        return now_ist().strftime("%Y-%m-%d")
 
 
 def analysis_date_str():
@@ -381,6 +387,7 @@ def log_analysis_date_debug():
         except Exception as e:
             log(f"Debug parse error: {e}")
     else:
+        log(f"Reference symbol: {ref_symbol}")
         log("No valid candles returned from FYERS")
 
 # ================= FYERS =================
