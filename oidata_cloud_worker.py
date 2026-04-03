@@ -4,6 +4,8 @@ import math
 import requests
 from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
 
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -107,6 +109,72 @@ def send(msg: str):
         )
     except Exception as e:
         log(f"Telegram error: {e}")
+
+
+def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=26):
+    lines = text.split("\n")
+
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
+
+    dummy = Image.new("RGB", (width, 100), "white")
+    draw = ImageDraw.Draw(dummy)
+
+    line_heights = []
+    max_width = 0
+
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        line_heights.append(h)
+        max_width = max(max_width, w)
+
+    img_width = max(width, max_width + padding * 2)
+    img_height = padding * 2 + sum(line_heights) + line_gap * max(0, len(lines) - 1)
+
+    img = Image.new("RGB", (img_width, img_height), "white")
+    draw = ImageDraw.Draw(img)
+
+    y = padding
+    for i, line in enumerate(lines):
+        draw.text((padding, y), line, fill="black", font=font)
+        y += line_heights[i] + line_gap
+
+    bio = BytesIO()
+    bio.name = "report.png"
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
+
+def send_photo_from_text(text, caption=""):
+    print(text, flush=True)
+
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+
+    try:
+        img_bytes = text_to_image_bytes(text)
+
+        files = {
+            "photo": ("report.png", img_bytes, "image/png")
+        }
+        data = {
+            "chat_id": CHAT_ID,
+            "caption": caption[:1024] if caption else ""
+        }
+
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data=data,
+            files=files,
+            timeout=60
+        )
+    except Exception as e:
+        log(f"Telegram photo error: {e}")
 
 def send_long_message(text: str, chunk_size: int = 3500):
     if not text:
@@ -977,7 +1045,7 @@ def scan_gapup_once():
         except Exception as e:
             log(f"GAP SCAN ERROR {sym}: {e}")
     pattern_summary["gapup"] = items
-    send_long_message(format_gapup_summary(items))
+    send_photo_from_text(format_gapup_summary(items), "Gap Up Plus")
 
 def scan_inside15_once():
     items = []
@@ -990,7 +1058,7 @@ def scan_inside15_once():
         except Exception as e:
             log(f"15M SCAN ERROR {sym}: {e}")
     pattern_summary["inside15"] = items
-    send_long_message(format_inside_summary(items))
+    send_photo_from_text(format_inside_summary(items), "15 Min Inside")
 
 def pivot_scan_key():
     now = now_ist()
@@ -1022,7 +1090,7 @@ def scan_pivot_30m_once():
         except Exception as e:
             log(f"PIVOT SCAN ERROR {sym}: {e}")
     pattern_summary["pivot30"] = items
-    send_long_message(format_pivot_summary(items))
+    send_photo_from_text(format_pivot_summary(items), "30 Min Weekly Pivot Sell")
 
 # ================= LIVE LOOP =================
 def run_live_day():
@@ -1064,7 +1132,7 @@ def run_live_day():
             time.sleep(LTP_INTERVAL_PER_STOCK)
 
         if not eod_sent and nowt >= dtime(15, 28):
-            send_long_message(build_eod_report())
+            send_photo_from_text(build_eod_report(), "End of Day Report")
             nxt = next_market_open_datetime()
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
@@ -1287,9 +1355,9 @@ def run_after_market_once():
     send_long_message(format_inside_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "range_pct": x["range_pct"]} for x in inside_items]))
     send_long_message(format_pivot_summary([{"symbol": f"NSE:{x['symbol']}-EQ", "pivot_name": x["pivot_name"], "pivot_value": x["pivot_value"]} for x in pivot_items]))
 
-    send_long_message(format_gapup_results(gap_items))
-    send_long_message(format_inside_results(inside_items))
-    send_long_message(format_pivot_results(pivot_items))
+    send_photo_from_text(format_gapup_results(gap_items), "Gap Up Result")
+    send_photo_from_text(format_inside_results(inside_items), "15 Min Inside Result")
+    send_photo_from_text(format_pivot_results(pivot_items), "Pivot Result")
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
