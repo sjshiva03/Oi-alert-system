@@ -336,16 +336,47 @@ def sleep_until_next_market_open():
             return
         time.sleep(min(60, max(1, int(rem))))
 
-def analysis_date_str():
-    now = now_ist()
+def get_reference_symbol():
+    # prefer index if present, else first stock in watchlist
+    for sym in SYMBOLS:
+        if sym.endswith("-INDEX"):
+            return sym
+    return SYMBOLS[0]
 
-    if is_market_day(now) and now.time() >= dtime(9, 15):
+
+def get_last_available_session_date():
+    ref_symbol = get_reference_symbol()
+
+    # use intraday data itself to decide latest valid session date
+    candles = get_history(ref_symbol, 5, 10)
+
+    if not candles:
+        # fallback only if fyers returned nothing
+        now = now_ist()
         return now.strftime("%Y-%m-%d")
 
-    d = now - timedelta(days=1)
-    while not is_market_day(d):
-        d = d - timedelta(days=1)
-    return d.strftime("%Y-%m-%d")
+    # latest candle date present in fyers
+    last_dt = candle_dt(candles[-1])
+    return last_dt.strftime("%Y-%m-%d")
+
+
+def analysis_date_str():
+    return get_last_available_session_date()
+
+
+def log_analysis_date_debug():
+    ref_symbol = get_reference_symbol()
+    candles = get_history(ref_symbol, 5, 10)
+
+    if candles:
+        last_dt = candle_dt(candles[-1]).strftime("%Y-%m-%d %H:%M")
+        log(f"Reference symbol: {ref_symbol}")
+        log(f"Latest available 5m candle from FYERS: {last_dt}")
+        log(f"Analysis date selected: {analysis_date_str()}")
+    else:
+        log(f"Reference symbol: {ref_symbol}")
+        log("No 5m candles returned from FYERS")
+        log(f"Analysis date fallback: {analysis_date_str()}")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -1465,6 +1496,7 @@ def build_eod_report():
 # ================= MAIN =================
 def main():
     profile = check_auth()
+    log_analysis_date_debug()
     send(
         f"🚀 BOT STARTED\n"
         f"Profile status: {profile.get('s')}\n"
@@ -1481,6 +1513,7 @@ def main():
             if AFTER_MARKET_RUN:
                 run_after_market_once()
             sleep_until_next_market_open()
+            
 
 if __name__ == "__main__":
     main()
