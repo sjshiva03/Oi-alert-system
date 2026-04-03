@@ -410,6 +410,22 @@ def get_previous_daily(symbol):
     return prev[-1] if prev else None
 
 
+def get_previous_weekly(symbol):
+    weekly = get_history(symbol, "W", 80)
+    today_str = now_ist().strftime("%Y-%m-%d")
+
+    prev = []
+    for c in weekly:
+        try:
+            c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
+            if c_day < today_str:
+                prev.append(c)
+        except Exception:
+            pass
+
+    prev.sort(key=lambda x: x[0])
+    return prev[-1] if prev else None
+
 
 def fetch_quotes(symbol):
     payload = {"symbols": symbol}
@@ -428,26 +444,12 @@ def fetch_quotes(symbol):
     item = items[0] if isinstance(items[0], dict) else {}
     vals = item.get("v") or {}
 
-    return {
-        "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_pdef get_previous_weekly(symbol):
-    weekly = get_history(symbol, "W", 80)
-    today_str = now_ist().strftime("%Y-%m-%d")
-
-    prev = []
-    for c in weekly:
-        try:
-            c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
-            if c_day < today_str:
-                prev.append(c)
-        except Exception:
-            pass
-
-    prev.sort(key=lambda x: x[0])
-    return prev[-1] if prev else Nonerice"), 0.0),
-        "open": safe_float(vals.get("open_price") or vals.get("open") or vals.get("openPrice"), 0.0),
-        "high": safe_float(vals.get("high_price") or vals.get("high") or vals.get("highPrice"), 0.0),
-        "low": safe_float(vals.get("low_price") or vals.get("low") or vals.get("lowPrice"), 0.0),
-        "prev_close": safe_float(vals.get("prev_close_price") or vals.get("prev_close") or vals.get("prevClose"), 0.0),
+    return {  
+    "ltp": safe_float(vals.get("lp") or vals.get("ltp") or vals.get("last_price"), 0.0),  
+    "open": safe_float(vals.get("open_price") or vals.get("open") or vals.get("openPrice"), 0.0),  
+    "high": safe_float(vals.get("high_price") or vals.get("high") or vals.get("highPrice"), 0.0),  
+    "low": safe_float(vals.get("low_price") or vals.get("low") or vals.get("lowPrice"), 0.0),  
+    "prev_close": safe_float(vals.get("prev_close_price") or vals.get("prev_close") or vals.get("prevClose"), 0.0),  
     }
 
 def fetch_option_chain(symbol, strikecount=10, timestamp=""):
