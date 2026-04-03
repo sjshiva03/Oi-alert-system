@@ -133,6 +133,20 @@ def _wrap_text(draw, value, font, max_width):
     lines.append(current)
     return lines
 
+# ================= TELEGRAM SEND =================
+def send(msg: str):
+    print(msg, flush=True)
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=30
+        )
+    except Exception as e:
+        print(f"Telegram error: {e}")
+
 
 def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
     fonts = _load_fonts()
