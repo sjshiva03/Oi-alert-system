@@ -550,130 +550,77 @@ def send_after_market_summary_image(caption="After Market Summary"):
     except Exception as e:
         log(f"After market summary image error: {e}")
 
-
-def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_title="LIVE TRADE UPDATE", reason_text=""):
+def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None):
     fonts = _load_fonts()
-    W, H = 1080, 980
-    img = Image.new("RGB", (W, H), (244, 247, 252))
+    W, H = 1080, 800
+    img = Image.new("RGB", (W, H), (245, 247, 252))
     draw = ImageDraw.Draw(img)
 
-    header_bg = (229, 57, 53)
-    panel_bg = (255, 255, 255)
-    buy_bar = (32, 201, 151)
-    sell_bar = (239, 83, 80)
-    buy_box = (232, 250, 242)
-    sell_box = (253, 236, 234)
-    text_dark = (28, 33, 40)
-    muted = (96, 108, 122)
-    border = (222, 228, 235)
-    profit = (18, 140, 85)
-    loss = (211, 47, 47)
-    neutral = (120, 130, 140)
-    dark_panel = (33, 43, 54)
-    accent = (255, 193, 7)
+    side = trade["side"]
+    is_buy = side == "BUY"
 
-    side = str(trade.get("side", "")).upper()
-    side_is_buy = side == "BUY"
-    side_color = buy_bar if side_is_buy else sell_bar
-    soft_box = buy_box if side_is_buy else sell_box
-    header_fill = text_dark if side_is_buy else (255, 255, 255)
+    main_color = (20, 160, 80) if is_buy else (220, 40, 40)
+    soft_color = (230, 255, 240) if is_buy else (255, 235, 235)
 
-    draw.rounded_rectangle((24, 24, W - 24, 170), radius=28, fill=header_bg)
-    draw.text((55, 42), "STOCKS TO WATCH", font=fonts["title"], fill="white")
-    draw.text((58, 112), header_title, font=fonts["sub"], fill="white")
-    draw.text((W - 240, 112), now_ist().strftime("%a, %b %d").upper(), font=fonts["sub"], fill=(255, 235, 235))
+    # Header
+    draw.rounded_rectangle((20, 20, W-20, 120), 25, fill=(230,50,50))
+    draw.text((40, 45), "STOCKS TO WATCH", fill="white", font=fonts["title"])
 
-    draw.rounded_rectangle((24, 190, W - 24, 290), radius=22, fill=dark_panel)
-    metric_items = [
-        ("Stock", short_name(trade.get("symbol", ""))),
-        ("Strategy", trade.get("strategy", "")),
-        ("Side", side),
-        ("LTP", "-" if ltp is None else str(round(float(ltp), 2))),
-        ("Status", status or trade.get("close_reason", "ACTIVE")),
-    ]
-    mx = 42
-    for label, value in metric_items:
-        draw.text((mx, 210), label, font=fonts["small"], fill=(190, 205, 220))
-        val_fill = "white"
-        val_text = str(value)
-        if label == "Status":
-            low = val_text.lower()
-            if "target" in low or "hold" in low or "entry" in low:
-                val_fill = (124, 255, 183)
-            elif "stoploss" in low:
-                val_fill = (255, 138, 128)
-            elif "exit" in low or "day end" in low:
-                val_fill = (240, 240, 240)
-        draw.text((mx, 242), val_text, font=fonts["card"], fill=val_fill)
-        mx += 200
+    # Card
+    draw.rounded_rectangle((40,150,1040,760), 25, fill="white", outline=(200,200,200), width=2)
 
-    draw.rounded_rectangle((24, 312, W - 24, H - 24), radius=24, fill=panel_bg, outline=border, width=2)
-    draw.rounded_rectangle((48, 336, W - 48, 396), radius=18, fill=side_color)
-    draw.text((66, 349), short_name(trade.get("symbol", "")), font=fonts["card"], fill=header_fill)
-    draw.text((W - 220, 349), str(trade.get("confidence", "LIVE")), font=fonts["card"], fill=header_fill)
+    # Top bar
+    draw.rounded_rectangle((60,170,1020,230), 20, fill=main_color)
+    draw.text((80,185), f"{short_name(trade['symbol'])}-{round(ltp,2)}", fill="white", font=fonts["card"])
+    draw.text((900,185), "LIVE", fill="white", font=fonts["card"])
 
-    draw.rounded_rectangle((48, 420, W - 48, 478), radius=16, fill=soft_box)
-    status_fill = neutral
-    low = str(status or "").lower()
-    if "hold" in low or "target" in low or "entry" in low:
-        status_fill = profit
-    elif "stoploss" in low:
-        status_fill = loss
-    elif "exit" in low:
-        status_fill = neutral
-    draw.text((64, 437), f"{side}  •  {(status or 'ACTIVE')}", font=fonts["text"], fill=status_fill)
+    # Strategy + Status
+    strategy_line = f"{trade['strategy']} • {side} • {status}"
+    draw.rounded_rectangle((60,250,1020,300), 15, fill=soft_color)
+    draw.text((80,260), strategy_line, fill=main_color, font=fonts["text"])
 
-    draw.text((64, 515), f"Entry: {trade.get('entry', '')}", font=fonts["text"], fill=text_dark)
-    draw.text((300, 515), f"SL: {trade.get('stoploss', '')}", font=fonts["text"], fill=text_dark)
-    draw.text((520, 515), f"Target: {trade.get('target', '')}", font=fonts["text"], fill=text_dark)
+    # Trade info
+    draw.text((80,320), f"Entry: {trade['entry']}", font=fonts["text"])
+    draw.text((350,320), f"SL: {trade['stoploss']}", font=fonts["text"])
+    draw.text((600,320), f"Target: {trade['target']}", font=fonts["text"])
 
-    pnl = trade.get("pnl", "")
-    pnl_fill = neutral
-    try:
-        pnl_fill = profit if float(pnl) >= 0 else loss
-    except Exception:
-        pass
-    draw.text((64, 560), f"Qty: {trade.get('qty', '')}", font=fonts["text"], fill=text_dark)
-    draw.text((250, 560), f"P/L: {pnl}", font=fonts["text"], fill=pnl_fill)
-    draw.text((470, 560), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
+    pnl = trade.get("pnl", 0)
+    pnl_color = (0,150,0) if pnl >= 0 else (200,0,0)
 
-    draw.text((64, 618), "Signal reason", font=fonts["small"], fill=muted)
-    reason = reason_text or trade.get("close_reason", "OI-confirmed trade update")
-    if len(reason) > 90:
-        reason = reason[:87] + '...'
-    draw.text((64, 648), reason, font=fonts["tiny"], fill=text_dark)
+    draw.text((80,360), f"Qty: {trade.get('qty',0)}", font=fonts["text"])
+    draw.text((350,360), f"P/L: ₹{pnl}", fill=pnl_color, font=fonts["text"])
+    draw.text((600,360), "5X", fill=(255,170,0), font=fonts["text"])
 
-    draw.rounded_rectangle((48, 748, W - 48, 920), radius=16, fill=(248, 250, 252))
-    draw.text((64, 766), "Strike      PE OICh         | CE OICh", font=fonts["tiny"], fill=muted)
-    oy = 804
-    if oi_rows:
-        for row in oi_rows[:4]:
-            if isinstance(row, dict):
-                row_txt = f"{row.get('strike','')}      {human_format(row.get('put_oich',0))}{arrow(row.get('put_oich',0))}         | {human_format(row.get('call_oich',0))}{arrow(row.get('call_oich',0))}"
-            else:
-                row_txt = str(row)
-            draw.text((64, oy), row_txt, font=fonts["tiny"], fill=text_dark)
-            oy += 28
-    else:
-        draw.text((64, 804), "No OI rows", font=fonts["tiny"], fill=muted)
+    # OI TABLE (NO OVERLAP FIXED)
+    y = 420
+    draw.text((80,y),"Strike   PE OI   ΔPE   |   CE OI   ΔCE", font=fonts["small"])
+    y += 35
+
+    for r in (oi_rows or [])[:5]:
+        txt = f"{r['strike']}   {human_format(r['put_oi'])}   {human_format(r['put_oich'])}{arrow(r['put_oich'])} | {human_format(r['call_oi'])}   {human_format(r['call_oich'])}{arrow(r['call_oich'])}"
+        draw.text((80,y), txt, font=fonts["small"])
+        y += 28
 
     bio = BytesIO()
-    bio.name = "live_trade_dashboard.png"
     img.save(bio, format="PNG")
     bio.seek(0)
     return bio
 
-
-def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_title="LIVE TRADE UPDATE", reason_text="", caption=""):
+    
+def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
+
     try:
-        img_bytes = build_live_trade_image(trade, ltp=ltp, status=status, oi_rows=oi_rows, header_title=header_title, reason_text=reason_text)
-        files = {"photo": ("live_trade_dashboard.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+        img = build_live_trade_image(trade, ltp, status, oi_rows)
+
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data={"chat_id": CHAT_ID},
+            files={"photo": ("dashboard.png", img, "image/png")}
+        )
     except Exception as e:
-        log(f"Live trade dashboard image error: {e}")
+        log(f"Image send error: {e}")
 
 
 def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
