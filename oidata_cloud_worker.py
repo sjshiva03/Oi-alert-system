@@ -390,65 +390,72 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
             return "SELL", sell, item.get("sell_oi_rows", []) or []
         return "WATCH", {"entry": "", "target": "", "stoploss": "", "result": "", "exit_price": "", "pl": "", "qty": ""}, []
 
-    def draw_card(x, y, item):
-        side, data, rows = primary_block(item)
-        score = next((s for n, s in ranked if n == item.get("symbol", "")), 90)
-        box_h = 390
-        draw.rounded_rectangle((x, y, x + 500, y + box_h), radius=24, fill=panel_bg, outline=border, width=2)
+def draw_card(x, y, item):
+    buy, sell = normalize_side_data(item)
 
-        header_fill = buy_bar if side == "BUY" else sell_bar if side == "SELL" else accent
-        title_fill = text_dark if side in ("BUY", "WATCH") else "white"
-        draw.rounded_rectangle((x + 16, y + 16, x + 484, y + 66), radius=16, fill=header_fill)
-        draw.text((x + 28, y + 28), str(item.get("symbol", "")), font=fonts["card"], fill=title_fill)
-        draw.text((x + 390, y + 28), f"{score}%", font=fonts["card"], fill=title_fill)
+    if buy and buy.get("entry"):
+        side = "BUY"
+        data = buy
+        rows = item.get("buy_oi_rows", [])
+    elif sell and sell.get("entry"):
+        side = "SELL"
+        data = sell
+        rows = item.get("sell_oi_rows", [])
+    else:
+        side = "WATCH"
+        data = {}
+        rows = []
 
-        status = infer_status(data, side)
-        soft_box = buy_box if side == "BUY" else sell_box if side == "SELL" else (255, 245, 230)
-        draw.rounded_rectangle((x + 16, y + 82, x + 484, y + 128), radius=14, fill=soft_box)
-        draw.text((x + 28, y + 94), status, font=fonts["text"], fill=result_color(data.get("result", "") or status))
+    score = 90
+    box_h = 420  # increased height
 
-        draw.text((x + 28, y + 148), f"Entry: {data.get('entry', '')}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 180, y + 148), f"SL: {data.get('stoploss', '')}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 300, y + 148), f"Target: {data.get('target', '')}", font=fonts["text"], fill=text_dark)
+    draw.rounded_rectangle((x, y, x + 500, y + box_h), radius=24, fill=panel_bg, outline=border, width=2)
 
-        qty_text = data.get("qty", "") if data.get("qty", "") != "" else "-"
-        draw.text((x + 28, y + 182), f"Qty: {qty_text}", font=fonts["text"], fill=text_dark)
-        pl_value = data.get("pl", "") if data.get("pl", "") != "" else "-"
-        pl_fill = profit if str(pl_value).startswith("+") or (isinstance(pl_value, (int, float)) and pl_value >= 0) else loss if pl_value != "-" else neutral
-        draw.text((x + 180, y + 182), f"P/L: {pl_value}", font=fonts["text"], fill=pl_fill)
-        draw.text((x + 330, y + 182), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
+    # Header
+    header_fill = buy_bar if side == "BUY" else sell_bar
+    title_fill = text_dark if side == "BUY" else "white"
 
-        draw.text((x + 28, y + 220), "Signal reason", font=fonts["small"], fill=muted)
-        reason = item.get("reason") or item.get("strategy") or "Pattern + OI confirmation"
-        for idx, line in enumerate(_wrap_text(draw, reason, fonts["tiny"], 430)[:2]):
-            draw.text((x + 28, y + 246 + idx * 20), line, font=fonts["tiny"], fill=text_dark)
+    draw.rounded_rectangle((x + 16, y + 16, x + 484, y + 66), radius=16, fill=header_fill)
+    draw.text((x + 28, y + 28), str(item.get("symbol", "")), font=fonts["card"], fill=title_fill)
+    draw.text((x + 390, y + 28), f"{score}%", font=fonts["card"], fill=title_fill)
 
-        draw.rounded_rectangle((x + 16, y + 282, x + 484, y + 366), radius=14, fill=(248, 250, 252))
-        draw.text((x + 28, y + 294), "Strike      PE OICh         | CE OICh", font=fonts["tiny"], fill=muted)
-        if not rows:
-            rows = ["ATM rows not stored", "Will show in live tracking", ""]
-        oy = y + 320
-        for row in rows[:3]:
-            draw.text((x + 28, oy), row, font=fonts["tiny"], fill=text_dark)
-            oy += 20
+    # ✅ STRATEGY + STATUS
+    strategy = item.get("strategy", "")
+    status = infer_status(data, side)
+    label_text = f"{strategy} • {status}"
 
-    positions = [(40, 450), (540, 450), (40, 870), (540, 870)]
-    display_items = list(items[:4])
-    while len(display_items) < 4:
-        display_items.append({"symbol": "", "buy": {"entry": ""}, "sell": {"entry": ""}, "strategy": ""})
-    for pos, item in zip(positions, display_items):
-        if item.get("symbol"):
-            draw_card(pos[0], pos[1], item)
+    soft_box = buy_box if side == "BUY" else sell_box
+    draw.rounded_rectangle((x + 16, y + 82, x + 484, y + 128), radius=14, fill=soft_box)
 
-    draw.rounded_rectangle((24, 1540, W - 24, 1660), radius=20, fill=dark_panel)
-    draw.text((42, 1565), "ULTIMATE FEATURES", font=fonts["card"], fill="white")
-    draw.text((42, 1602), "• Ranked by confidence  • OI mini table  • Risk/Qty  • Live hold/exit state  • Mobile-ready layout", font=fonts["small"], fill=(220, 225, 235))
+    draw.text(
+        (x + 28, y + 94),
+        label_text,
+        font=fonts["text"],
+        fill=result_color(data.get("result", "") or status)
+    )
 
-    bio = BytesIO()
-    bio.name = f"ultimate_dashboard_p{page_no}.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    # Compact spacing
+    draw.text((x + 28, y + 140), f"Entry: {data.get('entry', '')}", font=fonts["text"], fill=text_dark)
+    draw.text((x + 180, y + 140), f"SL: {data.get('stoploss', '')}", font=fonts["text"], fill=text_dark)
+    draw.text((x + 300, y + 140), f"Target: {data.get('target', '')}", font=fonts["text"], fill=text_dark)
+
+    draw.text((x + 28, y + 170), f"Qty: {data.get('qty', '-')}", font=fonts["text"], fill=text_dark)
+
+    pl_value = data.get("pl", "-")
+    pl_color = profit if str(pl_value).startswith("+") else loss if str(pl_value).startswith("-") else neutral
+
+    draw.text((x + 180, y + 170), f"P/L: {pl_value}", font=fonts["text"], fill=pl_color)
+    draw.text((x + 330, y + 170), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
+
+    # OI TABLE FIXED
+    draw.rounded_rectangle((x + 16, y + 260, x + 484, y + 380), radius=14, fill=(248, 250, 252))
+    draw.text((x + 28, y + 270), "Strike    PE OICh   | CE OICh", font=fonts["tiny"], fill=muted)
+
+    oy = y + 295
+    for r in rows[:4]:
+        row_txt = f"{r['strike']}   {human_format(r['put_oich'])}{arrow(r['put_oich'])} | {human_format(r['call_oich'])}{arrow(r['call_oich'])}"
+        draw.text((x + 28, oy), row_txt, font=fonts["tiny"], fill=text_dark)
+        oy += 22
 
 
 def build_after_market_summary_image():
@@ -681,6 +688,7 @@ def convert_inside_items_for_dashboard(inside_items):
     for x in inside_items:
         cards.append({
             "symbol": x.get("symbol", ""),
+            "strategy": x.get("strategy", ""),
             "range_pct": x.get("range_pct", ""),
             "buy": {
                 "entry": x.get("buy", {}).get("entry", ""),
@@ -707,6 +715,7 @@ def convert_gapup_items_for_dashboard(gap_items):
     for x in gap_items:
         cards.append({
             "symbol": x.get("symbol", ""),
+            "strategy": x.get("strategy", ""),
             "range_pct": x.get("gap_pct", ""),
             "buy": {},
             "sell": {
@@ -727,6 +736,7 @@ def convert_pivot_items_for_dashboard(pivot_items):
         level_txt = f"{x.get('pivot_name', '')}={x.get('pivot_value', '')}"
         cards.append({
             "symbol": f"{x.get('symbol', '')} [{level_txt}]",
+            "strategy": x.get("strategy", ""),
             "range_pct": "",
             "buy": {},
             "sell": {
@@ -1140,6 +1150,7 @@ def convert_gapup_summary_for_dashboard(items):
     for x in items:
         cards.append({
             "symbol": short_name(x.get("symbol", "")),
+            "strategy": x.get("strategy", ""),
             "range_pct": x.get("gap_pct", ""),
             "buy": {},
             "sell": {}
@@ -1152,6 +1163,7 @@ def convert_inside_summary_for_dashboard(items):
     for x in items:
         cards.append({
             "symbol": short_name(x.get("symbol", "")),
+            "strategy": x.get("strategy", ""),
             "range_pct": x.get("range_pct", ""),
             "buy": {},
             "sell": {}
