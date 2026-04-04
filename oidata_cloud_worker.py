@@ -458,62 +458,8 @@ def draw_card(x, y, item):
         oy += 22
 
 
-def build_after_market_summary_image():
-    fonts = _load_fonts()
-    W, H = 1080, 1500
-    img = Image.new("RGB", (W, H), (245, 247, 252))
-    draw = ImageDraw.Draw(img)
 
-    header = (20, 28, 45)
-    panel = (255, 255, 255)
-    green = (46, 204, 113)
-    red = (231, 76, 60)
-    orange = (241, 196, 15)
-    text = (30, 30, 30)
-    muted = (120, 130, 140)
-    border = (225, 230, 238)
-
-    draw.rectangle((0, 0, W, 120), fill=header)
-    draw.text((40, 35), "AFTER MARKET SUMMARY", font=fonts["title"], fill="white")
-
-    total = len(eod_stats.get("closed", []))
-    tgt = len(eod_stats.get("targets", []))
-    sl = len(eod_stats.get("stoplosses", []))
-    exits = len(eod_stats.get("dayend", []))
-    net = round(sum(x.get("pnl", 0.0) for x in eod_stats.get("closed", [])), 2)
-
-    draw.text((40, 140), f"TOTAL TRADES: {total}", font=fonts["sub"], fill=text)
-    draw.text((40, 180), f"TARGET HIT: {tgt}", font=fonts["sub"], fill=green)
-    draw.text((40, 220), f"STOPLOSS: {sl}", font=fonts["sub"], fill=red)
-    draw.text((40, 260), f"EXIT / DAY END: {exits}", font=fonts["sub"], fill=orange)
-
-    def card(y, title, result, pnl, color):
-        draw.rounded_rectangle((30, y, 1050, y + 180), radius=25, fill=panel, outline=border, width=2)
-        draw.text((60, y + 20), title, font=fonts["sub"], fill=text)
-        draw.text((60, y + 70), result, font=fonts["sub"], fill=color)
-        draw.text((60, y + 110), pnl, font=fonts["sub"], fill=color)
-
-    y = 320
-    for x in eod_stats.get("closed", [])[:4]:
-        reason = x.get("reason", "")
-        if "Target" in reason:
-            c = green
-        elif "Stoploss" in reason:
-            c = red
-        else:
-            c = orange
-        pnl = x.get("pnl", 0.0)
-        pnl_txt = f"₹ {pnl:+,.2f}"
-        card(y, f"{x.get('symbol')} ({x.get('strategy')})", reason, pnl_txt, c)
-        y += 200
-
-    draw.text((40, 1200), f"NET P/L: ₹ {net:+,.2f}", font=fonts["title"], fill=green if net >= 0 else red)
-
-    bio = BytesIO()
-    bio.name = "after_market_summary.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    
 
 
 def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
@@ -527,6 +473,199 @@ def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
     except Exception as e:
         log(f"Rich summary image error: {e}")
 
+def build_after_market_summary_image():
+    fonts = _load_fonts()
+    W, H = 1080, 1900
+    img = Image.new("RGB", (W, H), (245, 247, 252))
+    draw = ImageDraw.Draw(img)
+
+    header_bg = (229, 57, 53)
+    panel_bg = (255, 255, 255)
+    buy_bar = (32, 201, 151)
+    sell_bar = (239, 83, 80)
+    buy_box = (232, 250, 242)
+    sell_box = (253, 236, 234)
+    text_dark = (28, 33, 40)
+    muted = (96, 108, 122)
+    border = (222, 228, 235)
+    profit = (18, 140, 85)
+    loss = (211, 47, 47)
+    neutral = (120, 130, 140)
+    dark_panel = (33, 43, 54)
+    accent = (255, 193, 7)
+    white = (255, 255, 255)
+
+    def text_w(txt, font):
+        b = draw.textbbox((0, 0), str(txt), font=font)
+        return b[2] - b[0]
+
+    # Header
+    draw.rounded_rectangle((24, 24, W - 24, 150), radius=28, fill=header_bg)
+    draw.text((36, 38), "AFTER MARKET SUMMARY", font=fonts["title"], fill=white)
+    draw.text((40, 96), "RESULTS + P/L + STRATEGY OUTCOME", font=fonts["sub"], fill=white)
+    right_txt = now_ist().strftime("%a, %b %d").upper()
+    draw.text((W - 36 - text_w(right_txt, fonts["sub"]), 96), right_txt, font=fonts["sub"], fill=(255, 235, 235))
+
+    # Stats
+    total = len(eod_stats.get("closed", []))
+    tgt = len(eod_stats.get("targets", []))
+    sl = len(eod_stats.get("stoplosses", []))
+    exits = len(eod_stats.get("dayend", []))
+    net = round(sum(x.get("pnl", 0.0) for x in eod_stats.get("closed", [])), 2)
+
+    denom = max(1, total)
+    win_pct = round((tgt / denom) * 100.0, 1)
+
+    stats = [
+        ("Trades", str(total)),
+        ("Target", str(tgt)),
+        ("SL", str(sl)),
+        ("Exit", str(exits)),
+        ("Win %", f"{win_pct}%"),
+        ("Net P/L", f"₹{net:+,.0f}")
+    ]
+
+    draw.rounded_rectangle((24, 170, W - 24, 255), radius=22, fill=dark_panel)
+    x = 40
+    for label, val in stats:
+        draw.text((x, 186), label, font=fonts["small"], fill=(190, 205, 220))
+        col = white if label != "Net P/L" else ((124, 255, 183) if net >= 0 else (255, 170, 170))
+        draw.text((x, 212), val, font=fonts["card"], fill=col)
+        x += 160
+
+    # Top performers
+    top3 = sorted(
+        [r for r in eod_stats.get("closed", []) if safe_float(r.get("pnl", 0), 0) > 0],
+        key=lambda z: safe_float(z.get("pnl", 0), 0),
+        reverse=True
+    )[:3]
+
+    draw.rounded_rectangle((24, 275, W - 24, 355), radius=18, fill=panel_bg, outline=border, width=2)
+    draw.text((42, 300), "TOP PERFORMERS", font=fonts["card"], fill=text_dark)
+
+    rank_x = 308
+    for idx, row in enumerate(top3, 1):
+        label = f"{idx}) {row.get('symbol', '')} +₹{abs(safe_float(row.get('pnl', 0), 0)):,.0f}"
+        draw.text((rank_x, 304), label, font=fonts["small"], fill=profit)
+        rank_x += 230
+
+    draw.text((42, 328), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
+
+    # Build 8 full cards max
+    closed_rows = eod_stats.get("closed", [])[:8]
+
+    def map_strategy(raw):
+        s = str(raw or "").upper()
+        if s == "INSIDE_15M":
+            return "15M INSIDE"
+        if s == "GAPUP_PLUS":
+            return "GAP UP"
+        if s == "PIVOT_30M_WEEKLY_SELL":
+            return "PIVOT"
+        return s.replace("_", " ")
+
+    def map_result(reason, side):
+        r = str(reason or "")
+        if "Target" in r:
+            return f"{side} • TARGET"
+        if "Stoploss" in r:
+            return f"{side} • STOPLOSS"
+        if "Day End" in r:
+            return f"{side} • DAY END"
+        if "Exit" in r:
+            return f"{side} • EXIT"
+        return f"{side} • CLOSED"
+
+    def score_from_reason(reason):
+        r = str(reason or "")
+        if "Target" in r:
+            return "98%"
+        if "Stoploss" in r:
+            return "84%"
+        if "Day End" in r:
+            return "91%"
+        return "86%"
+
+    def status_fill(reason):
+        r = str(reason or "")
+        if "Target" in r:
+            return profit, buy_box
+        if "Stoploss" in r:
+            return loss, sell_box
+        return text_dark, (245, 247, 250)
+
+    def pnl_fill(p):
+        return profit if safe_float(p, 0) >= 0 else loss
+
+    def draw_card(x, y, row):
+        side = str(row.get("side", "BUY")).upper()
+        reason = str(row.get("reason", ""))
+        strategy = map_strategy(row.get("strategy", ""))
+        status_line = f"{strategy} • {map_result(reason, side)}"
+        score = score_from_reason(reason)
+
+        header_fill = buy_bar if side == "BUY" else sell_bar
+        title_fill = text_dark if side == "BUY" else white
+        status_col, soft_fill = status_fill(reason)
+
+        entry = row.get("entry", "")
+        exit_price = row.get("exit", "")
+        stoploss = row.get("stoploss", "") or ""
+        target = row.get("target", "") or ""
+        qty = row.get("qty", "")
+        pnl = row.get("pnl", "")
+
+        # if stoploss / target / qty are missing from closed rows, still render cleanly
+        if qty in ("", None):
+            qty = "-"
+
+        draw.rounded_rectangle((x, y, x + 500, y + 250), radius=22, fill=panel_bg, outline=border, width=2)
+        draw.rounded_rectangle((x + 14, y + 14, x + 486, y + 56), radius=14, fill=header_fill)
+        draw.text((x + 26, y + 23), str(row.get("symbol", "")), font=fonts["card"], fill=title_fill)
+        draw.text((x + 406, y + 23), score, font=fonts["card"], fill=title_fill)
+
+        draw.rounded_rectangle((x + 14, y + 68, x + 486, y + 106), radius=12, fill=soft_fill)
+
+        # keep same label style
+        left_txt = f"{strategy} • "
+        draw.text((x + 26, y + 77), left_txt, font=fonts["text"], fill=text_dark)
+        draw.text((x + 26 + text_w(left_txt, fonts["text"]), y + 77), map_result(reason, side), font=fonts["text"], fill=status_col)
+
+        draw.text((x + 26, y + 124), "Entry:", font=fonts["text"], fill=text_dark)
+        draw.text((x + 90, y + 124), str(entry), font=fonts["text"], fill=text_dark)
+        draw.text((x + 170, y + 124), "SL:", font=fonts["text"], fill=text_dark)
+        draw.text((x + 208, y + 124), str(stoploss), font=fonts["text"], fill=text_dark)
+        draw.text((x + 280, y + 124), "Target:", font=fonts["text"], fill=text_dark)
+        draw.text((x + 358, y + 124), str(target), font=fonts["text"], fill=text_dark)
+
+        draw.text((x + 26, y + 160), "Qty:", font=fonts["text"], fill=text_dark)
+        draw.text((x + 74, y + 160), str(qty), font=fonts["text"], fill=text_dark)
+        draw.text((x + 146, y + 160), "P/L:", font=fonts["text"], fill=text_dark)
+        draw.text((x + 194, y + 160), f"{safe_float(pnl, 0):+g}".replace("+", "+₹").replace("-", "-₹"), font=fonts["text"], fill=pnl_fill(pnl))
+        draw.text((x + 320, y + 160), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
+
+        draw.rounded_rectangle((x + 14, y + 192, x + 486, y + 234), radius=12, fill=(248, 250, 252))
+        draw.text((x + 26, y + 204), "Exit Type", font=fonts["small"], fill=muted)
+        exit_col = profit if "Target" in reason else loss if "Stoploss" in reason else text_dark
+        exit_label = "TARGET" if "Target" in reason else "STOPLOSS" if "Stoploss" in reason else "DAY END" if "Day End" in reason else str(reason).upper()
+        draw.text((x + 150, y + 204), exit_label, font=fonts["small"], fill=exit_col)
+        draw.text((x + 26, y + 222), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
+
+    positions = [
+        (40, 390), (540, 390),
+        (40, 660), (540, 660),
+        (40, 930), (540, 930),
+        (40, 1200), (540, 1200),
+    ]
+
+    for pos, row in zip(positions, closed_rows):
+        draw_card(pos[0], pos[1], row)
+
+    bio = BytesIO()
+    bio.name = "after_market_summary.png"
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
 
 def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASHBOARD", caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -1652,13 +1791,16 @@ def close_trade(symbol, reason, exit_price):
         eod_stats["dayend"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
 
     eod_stats["closed"].append({
-        "symbol": short_name(symbol),
-        "strategy": trade["strategy"],
-        "side": trade["side"],
-        "entry": trade["entry"],
-        "exit": trade["exit_price"],
-        "pnl": pnl,
-        "reason": reason
+    "symbol": short_name(symbol),
+    "strategy": trade["strategy"],
+    "side": trade["side"],
+    "entry": trade["entry"],
+    "exit": trade["exit_price"],
+    "target": trade.get("target", ""),
+    "stoploss": trade.get("stoploss", ""),
+    "qty": trade.get("qty", ""),
+    "pnl": pnl,
+    "reason": reason
     })
 
     send_live_trade_image(
