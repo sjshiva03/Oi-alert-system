@@ -129,24 +129,24 @@ def _load_fonts():
 
     return {
         # Header / top summary
-        "title": load_font(72, True),
-        "sub": load_font(34, True),
+        "title": load_font(96, True),
+        "sub": load_font(42, True),
 
         # Stats strip
-        "label": load_font(19, True),
-        "value": load_font(28, True),
+        "label": load_font(24, True),
+        "value": load_font(36, True),
 
         # Card header / body
-        "card_title": load_font(28, True),
-        "card_pct": load_font(24, True),
-        "strategy": load_font(20, True),
-        "value_bold": load_font(18, True),
-        "small": load_font(15, True),
-        "tiny": load_font(12, False),
+        "card_title": load_font(36, True),
+        "card_pct": load_font(32, True),
+        "strategy": load_font(28, True),
+        "value_bold": load_font(26, True),
+        "small": load_font(22, True),
+        "tiny": load_font(18, False),
 
         # Backward-compatible keys used elsewhere in file
-        "card": load_font(24, True),
-        "text": load_font(18, True),
+        "card": load_font(34, True),
+        "text": load_font(26, True),
     }
 
 
@@ -173,7 +173,7 @@ def _wrap_text(draw, value, font, max_width):
 
 def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
     fonts = _load_fonts()
-    W, H = 1080, 1500
+    W, H = 1400, 1900
     img = Image.new("RGB", (W, H), (245, 247, 252))
     draw = ImageDraw.Draw(img)
 
@@ -413,7 +413,7 @@ def _draw_dashboard_card(draw, x, y, item, fonts):
 
 def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASHBOARD", page_no=1, total_pages=1):
     fonts = _load_fonts()
-    W, H = 1080, 1250
+    W, H = 1400, 1600
     img = Image.new("RGB", (W, H), (244, 247, 252))
     draw = ImageDraw.Draw(img)
 
@@ -837,7 +837,7 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
 
 def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_title="STOCKS TO WATCH", reason_text=""):
     fonts = _load_fonts()
-    W, H = 1080, 820
+    W, H = 1400, 1050
     img = Image.new("RGB", (W, H), (245, 247, 252))
     draw = ImageDraw.Draw(img)
 
@@ -913,7 +913,7 @@ def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
         send_telegram_image(img, caption=caption, base_name="live_trade")
     except Exception as e:
         log(f"Image send error: {e}")
-def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
+def text_to_image_bytes(text, width=1600, padding=40, line_gap=16, font_size=34):
     lines = str(text).split("\n")
     try:
         font = ImageFont.truetype("DejaVuSans.ttf", font_size)
