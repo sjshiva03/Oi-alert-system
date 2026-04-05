@@ -390,71 +390,58 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
             return "SELL", sell, item.get("sell_oi_rows", []) or []
         return "WATCH", {"entry": "", "target": "", "stoploss": "", "result": "", "exit_price": "", "pl": "", "qty": ""}, []
 
-def draw_card(x, y, item):
-    buy, sell = normalize_side_data(item)
+def draw_card(draw, x, y, item):
+    buy = item.get("buy", {}) or {}
+    sell = item.get("sell", {}) or {}
 
     if buy and buy.get("entry"):
         side = "BUY"
         data = buy
         rows = item.get("buy_oi_rows", [])
-    elif sell and sell.get("entry"):
+        header_color = (32, 201, 151)
+        box_color = (232, 250, 242)
+    else:
         side = "SELL"
         data = sell
         rows = item.get("sell_oi_rows", [])
-    else:
-        side = "WATCH"
-        data = {}
-        rows = []
+        header_color = (239, 83, 80)
+        box_color = (253, 236, 234)
 
-    score = 90
-    box_h = 420  # increased height
+    # CARD
+    draw.rounded_rectangle((x, y, x+500, y+360), 25, fill=(255,255,255), outline=(220,220,220), width=2)
 
-    draw.rounded_rectangle((x, y, x + 500, y + box_h), radius=24, fill=panel_bg, outline=border, width=2)
+    # HEADER BAR
+    draw.rounded_rectangle((x+15, y+15, x+485, y+65), 18, fill=header_color)
 
-    # Header
-    header_fill = buy_bar if side == "BUY" else sell_bar
-    title_fill = text_dark if side == "BUY" else "white"
+    draw.text((x+30, y+25), item.get("symbol",""), fill="white", font=fonts["card"])
+    draw.text((x+400, y+25), "90%", fill="white", font=fonts["card"])
 
-    draw.rounded_rectangle((x + 16, y + 16, x + 484, y + 66), radius=16, fill=header_fill)
-    draw.text((x + 28, y + 28), str(item.get("symbol", "")), font=fonts["card"], fill=title_fill)
-    draw.text((x + 390, y + 28), f"{score}%", font=fonts["card"], fill=title_fill)
+    # STRATEGY BAR
+    draw.rounded_rectangle((x+15, y+80, x+485, y+120), 14, fill=box_color)
 
-    # ✅ STRATEGY + STATUS
-    strategy = item.get("strategy", "")
-    status = infer_status(data, side)
-    label_text = f"{strategy} • {status}"
+    strategy = item.get("strategy","")
+    draw.text((x+30, y+90), f"{strategy} • {side}", font=fonts["text"], fill=(40,40,40))
 
-    soft_box = buy_box if side == "BUY" else sell_box
-    draw.rounded_rectangle((x + 16, y + 82, x + 484, y + 128), radius=14, fill=soft_box)
+    # TRADE DATA
+    draw.text((x+30, y+130), f"Entry: {data.get('entry','')}", font=fonts["text"], fill=(30,30,30))
+    draw.text((x+180, y+130), f"SL: {data.get('stoploss','')}", font=fonts["text"], fill=(30,30,30))
+    draw.text((x+300, y+130), f"Target: {data.get('target','')}", font=fonts["text"], fill=(30,30,30))
 
-    draw.text(
-        (x + 28, y + 94),
-        label_text,
-        font=fonts["text"],
-        fill=result_color(data.get("result", "") or status)
-    )
+    draw.text((x+30, y+165), f"Qty: {data.get('qty','-')}", font=fonts["text"], fill=(30,30,30))
 
-    # Compact spacing
-    draw.text((x + 28, y + 140), f"Entry: {data.get('entry', '')}", font=fonts["text"], fill=text_dark)
-    draw.text((x + 180, y + 140), f"SL: {data.get('stoploss', '')}", font=fonts["text"], fill=text_dark)
-    draw.text((x + 300, y + 140), f"Target: {data.get('target', '')}", font=fonts["text"], fill=text_dark)
+    pl = data.get("pl","-")
+    color = (0,150,0) if str(pl).startswith("+") else (200,0,0)
 
-    draw.text((x + 28, y + 170), f"Qty: {data.get('qty', '-')}", font=fonts["text"], fill=text_dark)
+    draw.text((x+180, y+165), f"P/L: {pl}", font=fonts["text"], fill=color)
+    draw.text((x+330, y+165), "5X", font=fonts["text"], fill=(255,170,0))
 
-    pl_value = data.get("pl", "-")
-    pl_color = profit if str(pl_value).startswith("+") else loss if str(pl_value).startswith("-") else neutral
+    # OI TABLE
+    draw.text((x+30, y+210), "Strike   PE Δ | CE Δ", font=fonts["small"], fill=(100,100,100))
 
-    draw.text((x + 180, y + 170), f"P/L: {pl_value}", font=fonts["text"], fill=pl_color)
-    draw.text((x + 330, y + 170), f"{int(LEVERAGE)}X", font=fonts["text"], fill=accent)
-
-    # OI TABLE FIXED
-    draw.rounded_rectangle((x + 16, y + 260, x + 484, y + 380), radius=14, fill=(248, 250, 252))
-    draw.text((x + 28, y + 270), "Strike    PE OICh   | CE OICh", font=fonts["tiny"], fill=muted)
-
-    oy = y + 295
+    oy = y+235
     for r in rows[:4]:
-        row_txt = f"{r['strike']}   {human_format(r['put_oich'])}{arrow(r['put_oich'])} | {human_format(r['call_oich'])}{arrow(r['call_oich'])}"
-        draw.text((x + 28, oy), row_txt, font=fonts["tiny"], fill=text_dark)
+        txt = f"{r['strike']}   {human_format(r['put_oich'])}{arrow(r['put_oich'])} | {human_format(r['call_oich'])}{arrow(r['call_oich'])}"
+        draw.text((x+30, oy), txt, font=fonts["small"], fill=(30,30,30))
         oy += 22
 
 
@@ -614,7 +601,10 @@ def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None):
     return bio
 
     
-def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None):
+def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
+                         header_title="STOCKS TO WATCH",
+                         reason_text="",
+                         caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
 
@@ -623,7 +613,10 @@ def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None):
 
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-            data={"chat_id": CHAT_ID},
+            data={
+                "chat_id": CHAT_ID,
+                "caption": caption[:1024]
+            },
             files={"photo": ("dashboard.png", img, "image/png")}
         )
     except Exception as e:
