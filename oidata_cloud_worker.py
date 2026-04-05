@@ -746,26 +746,26 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
     cards.sort(key=lambda z: safe_float(z.get("score", 0), 0), reverse=True)
     return cards
 
-def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15 MIN INSIDE", analysis_dt=""):
+def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + STRATEGY OUTCOME", analysis_dt=""):
     fonts = _load_fonts()
 
-    # FINAL CORRECT CONFIG
+    # FINAL LOCKED SIZE
     W = 1080
     PAD = 20
-    HEADER_H = 118
-    STATS_H = 78
-    RANK_H = 58
-    CARD_H = 170
-    ROW_GAP = 14
+    HEADER_H = 120
+    STATS_H = 82
+    RANK_H = 60
+    CARD_H = 220
+    ROW_GAP = 18
     COL_GAP = 16
-    TOP_MARGIN = PAD + HEADER_H + 18 + STATS_H + 18 + RANK_H + 18
+    TOP_MARGIN = 340
 
     cards = list(cards or [])
-    cards = cards[:8]   # 8 stocks per page
-    cols = 2
+    cards = cards[:8]   # 8 cards per page
     rows = 4
+    cols = 2
 
-    H = TOP_MARGIN + (rows * (CARD_H + ROW_GAP)) + 24
+    H = TOP_MARGIN + (rows * (CARD_H + ROW_GAP)) + 40
 
     img = Image.new("RGB", (W, H), (242, 244, 247))
     draw = ImageDraw.Draw(img)
@@ -776,39 +776,57 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15
     border = (216, 221, 228)
     text_dark = (40, 46, 55)
     muted = (122, 130, 141)
+
     buy_green = (46, 191, 135)
     sell_red = (240, 92, 87)
     soft_green = (232, 246, 239)
     soft_red = (250, 236, 236)
+
     pnl_green = (21, 150, 92)
     pnl_red = (210, 60, 60)
     amber = (231, 181, 20)
     black = (25, 25, 25)
 
-    # smaller header fonts to avoid overlap
-    font_title = _load_single_font(34, True)
-    font_sub = _load_single_font(16, True)
+    # FINAL FONT SIZES
+    font_title = _load_single_font(38, True)
+    font_sub = _load_single_font(18, True)
+
     font_stat_label = _load_single_font(12, True)
     font_stat_value = _load_single_font(18, True)
+
     font_rank_title = _load_single_font(15, True)
     font_rank_sub = _load_single_font(11, False)
     font_rank_item = _load_single_font(11, True)
 
-    font_card_title = _load_single_font(17, True)
-    font_card_pct = _load_single_font(15, True)
-    font_strategy = _load_single_font(12, True)
-    font_body = _load_single_font(11, True)
+    font_card_title = _load_single_font(18, True)
+    font_card_pct = _load_single_font(16, True)
+    font_strategy = _load_single_font(13, True)
+    font_body = _load_single_font(12, True)
     font_small = _load_single_font(10, False)
     font_exit = _load_single_font(10, True)
 
-    # HEADER
-    draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=28, fill=red_header)
-    draw.text((PAD + 18, PAD + 14), title, font=font_title, fill=white)
-    draw.text((PAD + 18, PAD + 58), subtitle, font=font_sub, fill=white)
+    def txt_w(text, font):
+        return draw.textbbox((0, 0), str(text), font=font)[2]
 
-    right_txt = analysis_dt or now_ist().strftime("%Y-%m-%d")
-    rw, _ = _text_size(draw, right_txt, font_sub)
-    draw.text((W - PAD - rw - 18, PAD + 58), right_txt, font=font_sub, fill=white)
+    def fit_text(text, font, max_w):
+        text = str(text or "")
+        if txt_w(text, font) <= max_w:
+            return text
+        while len(text) > 1:
+            text = text[:-1]
+            cand = text.rstrip() + "..."
+            if txt_w(cand, font) <= max_w:
+                return cand
+        return "..."
+
+    # HEADER
+    draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
+    draw.text((PAD + 20, PAD + 16), title, font=font_title, fill=white)
+    draw.text((PAD + 20, PAD + 70), subtitle, font=font_sub, fill=white)
+
+    right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
+    rw = txt_w(right_txt, font_sub)
+    draw.text((W - PAD - rw - 20, PAD + 70), right_txt, font=font_sub, fill=white)
 
     # STATS
     y_stats = PAD + HEADER_H + 18
@@ -831,35 +849,38 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15
     ]
 
     sx = PAD + 16
-    stat_gap = 155
-    for idx, (label, value) in enumerate(stats):
+    stat_gap = 146
+    for i, (label, value) in enumerate(stats):
         draw.text((sx, y_stats + 12), label, font=font_stat_label, fill=(220, 230, 240))
-        val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 34), value, font=font_stat_value, fill=val_color)
+        val_fill = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
+        draw.text((sx, y_stats + 38), value, font=font_stat_value, fill=val_fill)
         sx += stat_gap
 
     # TOP PERFORMERS
     y_rank = y_stats + STATS_H + 18
     draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=16, fill=white, outline=border, width=2)
-    draw.text((PAD + 14, y_rank + 10), "TOP PERFORMERS", font=font_rank_title, fill=text_dark)
-    draw.text((PAD + 14, y_rank + 30), "Sorted by highest realized profit", font=font_rank_sub, fill=muted)
+    draw.text((PAD + 14, y_rank + 12), "TOP PERFORMERS", font=font_rank_title, fill=text_dark)
+    draw.text((PAD + 14, y_rank + 34), "Sorted by highest realized profit", font=font_rank_sub, fill=muted)
 
     ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
-    rx = PAD + 255
-    for i, c in enumerate(ranked, 1):
+    rx = PAD + 250
+    for idx, c in enumerate(ranked, 1):
         pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
-        txt = _fit_text(draw, f"{i}) {c.get('symbol', '')} {pnl_txt}", font_rank_item, 180)
+        txt = fit_text(f"{idx}) {c.get('symbol', '')} {pnl_txt}", font_rank_item, 170)
         fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
         draw.text((rx, y_rank + 12), txt, font=font_rank_item, fill=fill)
-        rx += 185
+        rx += 180
 
-    # CARD DRAWER
+    card_w = (W - (PAD * 2) - COL_GAP) // 2
+
     def draw_after_card(x, y, item):
         side = str(item.get("side", "SELL")).upper()
         result = _clean_status_text(item.get("result", ""))
         strategy = str(item.get("strategy", ""))
-        symbol = _fit_text(draw, _format_symbol_with_ltp(item.get("symbol", ""), item.get("ltp", "")), font_card_title, 260)
+
+        symbol = fit_text(_format_symbol_with_ltp(item.get("symbol", ""), item.get("ltp", "")), font_card_title, 300)
         score = int(safe_float(item.get("score", 0), 0))
+
         entry = item.get("entry", "")
         slv = item.get("stoploss", "")
         tgtv = item.get("target", "")
@@ -867,39 +888,42 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15
         pl_txt = item.get("pl", "")
         pnl_val = safe_float(item.get("pnl_value", 0.0), 0.0)
 
-        card_w = (W - (PAD * 2) - COL_GAP) // 2
         header_fill = buy_green if side == "BUY" else sell_red
         soft_fill = soft_green if side == "BUY" else soft_red
+        result_fill = buy_green if result == "TARGET" else sell_red if result == "STOPLOSS" else black
+        pnl_fill = pnl_green if pnl_val >= 0 else pnl_red
 
         draw.rounded_rectangle((x, y, x + card_w, y + CARD_H), radius=20, fill=white, outline=border, width=2)
-        draw.rounded_rectangle((x + 10, y + 10, x + card_w - 10, y + 42), radius=14, fill=header_fill)
+
+        # top strip
+        draw.rounded_rectangle((x + 10, y + 10, x + card_w - 10, y + 44), radius=14, fill=header_fill)
         draw.text((x + 18, y + 16), symbol, font=font_card_title, fill=white)
-        draw.text((x + card_w - 60, y + 16), f"{score}%", font=font_card_pct, fill=white)
+        draw.text((x + card_w - 62, y + 16), f"{score}%", font=font_card_pct, fill=white)
 
-        # strategy line
-        draw.rounded_rectangle((x + 10, y + 50, x + card_w - 10, y + 82), radius=10, fill=soft_fill)
-        draw.text((x + 18, y + 58), strategy, font=font_strategy, fill=text_dark)
-        draw.text((x + 116, y + 58), "•", font=font_strategy, fill=text_dark)
-        draw.text((x + 136, y + 58), side, font=font_strategy, fill=text_dark)
-        draw.text((x + 178, y + 58), "•", font=font_strategy, fill=text_dark)
+        # strategy strip
+        draw.rounded_rectangle((x + 10, y + 52, x + card_w - 10, y + 86), radius=10, fill=soft_fill)
+        draw.text((x + 18, y + 60), strategy, font=font_strategy, fill=text_dark)
+        draw.text((x + 118, y + 60), "•", font=font_strategy, fill=text_dark)
+        draw.text((x + 138, y + 60), side, font=font_strategy, fill=text_dark)
+        draw.text((x + 180, y + 60), "•", font=font_strategy, fill=text_dark)
+        draw.text((x + 200, y + 60), result, font=font_strategy, fill=result_fill)
 
-        result_fill = buy_green if result == "TARGET" else sell_red if result == "STOPLOSS" else black
-        draw.text((x + 198, y + 58), result, font=font_strategy, fill=result_fill)
+        # body row 1
+        draw.text((x + 18, y + 104), f"Entry: {entry}", font=font_body, fill=text_dark)
+        draw.text((x + 126, y + 104), f"SL: {slv}", font=font_body, fill=text_dark)
+        draw.text((x + 230, y + 104), f"Target: {tgtv}", font=font_body, fill=text_dark)
 
-        # body
-        draw.text((x + 18, y + 98), f"Entry: {entry}", font=font_body, fill=text_dark)
-        draw.text((x + 120, y + 98), f"SL: {slv}", font=font_body, fill=text_dark)
-        draw.text((x + 220, y + 98), f"Target: {tgtv}", font=font_body, fill=text_dark)
+        # body row 2
+        draw.text((x + 18, y + 136), f"Qty: {qty}", font=font_body, fill=text_dark)
+        draw.text((x + 110, y + 136), f"P/L: {pl_txt}", font=font_body, fill=pnl_fill)
+        lev_txt = f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X"
+        draw.text((x + 220, y + 136), lev_txt, font=font_body, fill=amber)
 
-        draw.text((x + 18, y + 126), f"Qty: {qty}", font=font_body, fill=text_dark)
-        draw.text((x + 96, y + 126), f"P/L: {pl_txt}", font=font_body, fill=pnl_green if pnl_val >= 0 else pnl_red)
-        draw.text((x + 210, y + 126), f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X", font=font_body, fill=amber)
+        # body row 3
+        draw.text((x + 18, y + 166), "Exit Type", font=font_small, fill=muted)
+        draw.text((x + 88, y + 166), result, font=font_exit, fill=result_fill)
 
-        draw.text((x + 18, y + 152), "Exit Type", font=font_small, fill=muted)
-        draw.text((x + 90, y + 152), result, font=font_exit, fill=result_fill)
-
-    # GRID: 4 rows × 2 cols
-    card_w = (W - (PAD * 2) - COL_GAP) // 2
+    # 4x2 grid
     for i, item in enumerate(cards):
         row = i // 2
         col = i % 2
@@ -907,7 +931,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15
         y = TOP_MARGIN + row * (CARD_H + ROW_GAP)
         draw_after_card(x, y, item)
 
-    return _save_image_to_bytes(img, "after_market_dashboard")   
+    return _save_image_to_bytes(img, "after_market_dashboard")
+
+
+    
+
+      
     
         
 
@@ -941,15 +970,19 @@ def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
 def send_after_market_summary_image(cards=None, caption="After Market Summary"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
+        
+def send_after_market_summary_image(cards=None, caption="After Market Summary"):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
     try:
         cards = list(cards or _after_market_cards_from_closed())
-        pages = list(chunk_list(cards, 8))   # force 8 per page
+        pages = list(chunk_list(cards, 8))
         total_pages = len(pages)
         for idx, page_cards in enumerate(pages, 1):
             img_bytes = _load_font(
                 cards=page_cards,
                 title="AFTER MARKET SUMMARY",
-                subtitle="RESULTS + P/L + 15 MIN INSIDE",
+                subtitle="RESULTS + P/L + STRATEGY OUTCOME",
                 analysis_dt=analysis_date_str().upper()
             )
             page_caption = caption
