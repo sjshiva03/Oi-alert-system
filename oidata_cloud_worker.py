@@ -203,18 +203,18 @@ def _load_single_font(size, bold=False):
 
 def _load_fonts():
     return {
-        "title": _load_single_font(96, True),
-        "sub": _load_single_font(42, True),
-        "label": _load_single_font(22, True),
-        "value": _load_single_font(32, True),
-        "card_title": _load_single_font(36, True),
-        "card_pct": _load_single_font(30, True),
-        "strategy": _load_single_font(28, True),
-        "value_bold": _load_single_font(26, True),
-        "small": _load_single_font(22, True),
-        "tiny": _load_single_font(18, False),
-        "card": _load_single_font(32, True),
-        "text": _load_single_font(26, True),
+        "title": _load_single_font(60, True),
+        "sub": _load_single_font(20, True),
+        "label": _load_single_font(18, True),
+        "value": _load_single_font(26, True),
+        "card_title": _load_single_font(28, True),
+        "card_pct": _load_single_font(22, True),
+        "strategy": _load_single_font(16, True),
+        "value_bold": _load_single_font(16, True),
+        "small": _load_single_font(14, True),
+        "tiny": _load_single_font(12, False),
+        "card": _load_single_font(24, True),
+        "text": _load_single_font(18, True),
     }
 
 
@@ -387,7 +387,7 @@ def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
     return _save_image_to_bytes(img, "rich_summary")
 
 
-def _dashboard_pages(items, page_size=6):
+def _dashboard_pages(items, page_size=2):
     items = list(items or [])
     if not items:
         return [[{
@@ -748,9 +748,6 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
 
 def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + STRATEGY OUTCOME", analysis_dt=""):
     fonts = _load_fonts()
-    am_title_font = _load_single_font(58, True)
-    am_sub_font = _load_single_font(24, True)
-    am_date_font = _load_single_font(24, True)
 
     W = 1800
     PAD = 28
@@ -782,12 +779,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     amber = (231, 181, 20)
 
     draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
-    draw.text((PAD + 28, PAD + 18), title, font=am_title_font, fill=white)
-    draw.text((PAD + 28, PAD + 88), subtitle, font=am_sub_font, fill=white)
+    draw.text((PAD + 28, PAD + 18), title, font=fonts["title"], fill=white)
+    draw.text((PAD + 28, PAD + 76), subtitle, font=fonts["sub"], fill=white)
 
     right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
-    rw, _ = _text_size(draw, right_txt, am_date_font)
-    draw.text((W - PAD - rw - 28, PAD + 84), right_txt, font=am_date_font, fill=white)
+    rw, _ = _text_size(draw, right_txt, fonts["sub"])
+    draw.text((W - PAD - rw - 28, PAD + 76), right_txt, font=fonts["sub"], fill=white)
 
     y_stats = PAD + HEADER_H + GAP
     draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
@@ -857,8 +854,8 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         draw.text((x + 180, y + 188), f"P/L: {pl_txt}", font=fonts["value_bold"], fill=pnl_green if pnl_val >= 0 else pnl_red)
         draw.text((x + 372, y + 188), f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X", font=fonts["value_bold"], fill=amber)
 
-        draw.text((x + 28, y + 228), "Exit Type", font=fonts["small"], fill=muted)
-        draw.text((x + 154, y + 228), result, font=fonts["small"], fill=header_fill if result in {"STOPLOSS", "TARGET"} else text_dark)
+        draw.text((x + 28, y + 224), "Exit Type", font=fonts["small"], fill=muted)
+        draw.text((x + 154, y + 224), result, font=fonts["small"], fill=header_fill if result in {"STOPLOSS", "TARGET"} else text_dark)
 
     start_y = y_rank + RANK_H + GAP
     positions = []
