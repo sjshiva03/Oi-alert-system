@@ -5,26 +5,41 @@ from io import BytesIO
 TELEGRAM_TOKEN = "8619123498:AAGmqno7hYGsDcTjMPpFHKQ-Ps7rvtrHyx0"
 CHAT_ID = 7641895913
 
-def load_fonts():
-    try:
-        return {
-            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 44),
-            "sub": ImageFont.truetype("DejaVuSans-Bold.ttf", 20),
-            "card": ImageFont.truetype("DejaVuSans-Bold.ttf", 20),
-            "text": ImageFont.truetype("DejaVuSans.ttf", 17),
-            "text_bold": ImageFont.truetype("DejaVuSans-Bold.ttf", 17),
-            "small": ImageFont.truetype("DejaVuSans.ttf", 15),
-        }
-    except Exception:
-        f = ImageFont.load_default()
-        return {
-            "title": f,
-            "sub": f,
-            "card": f,
-            "text": f,
-            "text_bold": f,
-            "small": f,
-        }
+def _load_fonts():
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ]
+
+    def pick_font(size, bold=False):
+        wanted = "Bold" if bold else "Sans.ttf"
+        for path in font_candidates:
+            if bold and "Bold" not in path:
+                continue
+            if (not bold) and "Bold" in path:
+                continue
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+
+        # last fallback
+        try:
+            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
+        except Exception:
+            return ImageFont.load_default()
+
+    return {
+        "title": pick_font(44, bold=True),
+        "sub": pick_font(20, bold=True),
+        "card": pick_font(20, bold=True),
+        "text": pick_font(17, bold=False),
+        "text_bold": pick_font(17, bold=True),
+        "small": pick_font(15, bold=False),
+        "tiny": pick_font(14, bold=False),
+    }
 
 def build_live_dashboard_image():
     fonts = load_fonts()
