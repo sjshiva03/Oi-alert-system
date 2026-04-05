@@ -84,7 +84,6 @@ def load_fonts():
 
 def build_live_dashboard_image():
     fonts = load_fonts()
-    log(f"Font objects loaded: {fonts}")
 
     W, H = 1080, 1700
     img = Image.new("RGB", (W, H), (245, 247, 252))
