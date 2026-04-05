@@ -834,22 +834,18 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     black = (25, 25, 25)
 
     # FINAL FONT SIZES
-    font_title = _load_single_font(38, True)
-    font_sub = _load_single_font(18, True)
+    font_title = _load_single_font(46, True)
+    font_sub = _load_single_font(22, True)
 
-    font_stat_label = _load_single_font(12, True)
-    font_stat_value = _load_single_font(18, True)
+    font_stat_label = _load_single_font(16, True)
+    font_stat_value = _load_single_font(22, True)
 
-    font_rank_title = _load_single_font(15, True)
-    font_rank_sub = _load_single_font(11, False)
-    font_rank_item = _load_single_font(11, True)
-
-    font_card_title = _load_single_font(18, True)
-    font_card_pct = _load_single_font(16, True)
-    font_strategy = _load_single_font(13, True)
-    font_body = _load_single_font(12, True)
-    font_small = _load_single_font(10, False)
-    font_exit = _load_single_font(10, True)
+    font_card_title = _load_single_font(22, True)
+    font_card_pct = _load_single_font(20, True)
+    font_strategy = _load_single_font(18, True)
+    font_body = _load_single_font(16, True)
+    font_small = _load_single_font(14, False)
+    font_exit = _load_single_font(16, True)
 
     def txt_w(text, font):
         return draw.textbbox((0, 0), str(text), font=font)[2]
