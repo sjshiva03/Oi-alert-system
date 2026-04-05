@@ -2272,9 +2272,10 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    after_cards = build_after_market_cards(gap_items, inside_items, pivot_items)
-
-    send_after_market_summary_image(after_cards, caption="After Market Summary")
+    # ONLY separate images
+    send_after_market_category_images(gap_items, "GAPUP PLUS")
+    send_after_market_category_images(inside_items, "15 MIN INSIDE")
+    send_after_market_category_images(pivot_items, "PIVOT")
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
