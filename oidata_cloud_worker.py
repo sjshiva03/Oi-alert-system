@@ -304,14 +304,59 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="LIVE + OI + R
     bio.seek(0)
     return bio
 
-
 def test_dashboard_send():
-    gap_items = convert_gapup_items_for_dashboard(pattern_summary.get("gapup", []))
-    inside_items = convert_inside_items_for_dashboard(pattern_summary.get("inside15", []))
-    pivot_items = convert_pivot_items_for_dashboard(pattern_summary.get("pivot30", []))
+    items = []
 
-    items = gap_items + inside_items + pivot_items
-    send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="LIVE + OI + RISK", caption="Live Dashboard")
+    # GAPUP
+    for x in pattern_summary.get("gapup", []):
+        items.append({
+            "symbol": x.get("symbol"),
+            "strategy": "GAP UP",
+            "side": x.get("signal", ""),
+            "entry": x.get("entry", ""),
+            "target": x.get("target", ""),
+            "stoploss": x.get("stoploss", ""),
+            "pl": x.get("pl", ""),
+            "qty": x.get("qty", ""),
+        })
+
+    # INSIDE 15
+    for x in pattern_summary.get("inside15", []):
+        items.append({
+            "symbol": x.get("symbol"),
+            "strategy": "15M INSIDE",
+            "side": x.get("signal", ""),
+            "entry": x.get("entry", ""),
+            "target": x.get("target", ""),
+            "stoploss": x.get("stoploss", ""),
+            "pl": x.get("pl", ""),
+            "qty": x.get("qty", ""),
+        })
+
+    # PIVOT
+    for x in pattern_summary.get("pivot30", []):
+        items.append({
+            "symbol": x.get("symbol"),
+            "strategy": "PIVOT",
+            "side": x.get("signal", ""),
+            "entry": x.get("entry", ""),
+            "target": x.get("target", ""),
+            "stoploss": x.get("stoploss", ""),
+            "pl": x.get("pl", ""),
+            "qty": x.get("qty", ""),
+        })
+
+    if not items:
+        print("No items to send", flush=True)
+        return
+
+    send_dashboard_image(
+        items,
+        title="STOCKS TO WATCH",
+        subtitle="LIVE + OI + RISK",
+        caption="Live Dashboard"
+    )
+
 # ================= TELEGRAM SEND =================
 def send_to_telegram(image_path):
     BOT_TOKEN = "8619123498:AAGmqno7hYGsDcTjMPpFHKQ-Ps7rvtrHyx0"
