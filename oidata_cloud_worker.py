@@ -1506,14 +1506,14 @@ def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if high >= stoploss and low <= target:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss", stoploss
         if high >= stoploss:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss", stoploss
         if low <= target:
-            return "Target 🎯", target
+            return "Target", target
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        return "Day End", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
@@ -1522,14 +1522,14 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if low <= stoploss and high >= target:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss", stoploss
         if low <= stoploss:
-            return "Stoploss 🛑", stoploss
+            return "Stoploss", stoploss
         if high >= target:
-            return "Target 🎯", target
+            return "Target", target
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        return "Day End", float(candles_after_entry[-1][4])
 
     return "No Data", entry
 
