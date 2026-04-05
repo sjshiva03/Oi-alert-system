@@ -298,5 +298,5 @@ def send_to_telegram(image_path):
         requests.post(url, data={"chat_id": CHAT_ID}, files={"photo": img})
 
 # ================= RUN =================
-file = make_dashboard_image()
+file = make_dashboard_image(items)
 send_to_telegram(file)
