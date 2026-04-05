@@ -152,6 +152,13 @@ def _fmt_pct(val):
     except:
         return str(val)
 
+def _fmt_day_pct(val):
+    try:
+        v = float(val)
+        return f"{v:.2f}%"
+    except:
+        return str(val)
+
 
 def _save_image_to_bytes(img, base_name):
     ext = TELEGRAM_IMAGE_FORMAT.lower().strip()
