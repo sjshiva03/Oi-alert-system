@@ -8,6 +8,8 @@ from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from bs4 import BeautifulSoup
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -118,33 +120,31 @@ def _load_fonts():
     from PIL import ImageFont
 
     def load_font(size, bold=False):
-        try:
-            return ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
-        except Exception:
-            return ImageFont.load_default()
+        font_file = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+        for candidate in [
+            os.path.join(BASE_DIR, "fonts", font_file),
+            font_file,
+        ]:
+            try:
+                return ImageFont.truetype(candidate, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
 
     return {
-        # Header / top summary
-        "title": load_font(72, True),
-        "sub": load_font(34, True),
-
-        # Stats strip
-        "label": load_font(19, True),
-        "value": load_font(28, True),
-
-        # Card header / body
-        "card_title": load_font(28, True),
-        "card_pct": load_font(24, True),
-        "strategy": load_font(20, True),
-        "value_bold": load_font(18, True),
-        "small": load_font(15, True),
-        "tiny": load_font(12, False),
-
-        # Backward-compatible keys used elsewhere in file
-        "card": load_font(24, True),
-        "text": load_font(18, True),
+        "title": load_font(96, True),
+        "sub": load_font(38, True),
+        "label": load_font(24, True),
+        "value": load_font(34, True),
+        "card_title": load_font(34, True),
+        "card_pct": load_font(28, True),
+        "strategy": load_font(26, True),
+        "value_bold": load_font(24, True),
+        "small": load_font(20, False),
+        "tiny": load_font(18, False),
+        "card": load_font(30, True),
+        "text": load_font(24, True),
     }
-
 
 def _text_size(draw, value, font):
     bbox = draw.textbbox((0, 0), str(value), font=font)
@@ -585,16 +585,17 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
 def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + STRATEGY OUTCOME", analysis_dt=""):
     fonts = _load_fonts()
 
-    W = 1080
-    HEADER_H = 126
-    STATS_H = 88
-    RANK_H = 68
-    CARD_H = 254
-    GAP = 14
-    PAD = 20
+    W = 1800
+    HEADER_H = 160
+    STATS_H = 120
+    RANK_H = 90
+    CARD_H = 320
+    GAP = 20
+    PAD = 24
+    CARD_W = (W - PAD * 2 - GAP) // 2
 
     total_rows = max(1, math.ceil(len(cards) / 2))
-    H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + (total_rows * (CARD_H + GAP)) + 30
+    H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + (total_rows * (CARD_H + GAP)) + 40
 
     img = Image.new("RGB", (W, H), (243, 246, 250))
     draw = ImageDraw.Draw(img)
@@ -614,16 +615,24 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     amber = (231, 181, 20)
     light_strip = (243, 245, 248)
 
-    draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
-    draw.text((PAD + 16, PAD + 6), title, font=fonts["title"], fill=white)
-    draw.text((PAD + 18, PAD + 72), subtitle, font=fonts["sub"], fill=white)
+    def fit_text(text, font, max_width):
+        text = str(text)
+        if _text_size(draw, text, font)[0] <= max_width:
+            return text
+        while len(text) > 3 and _text_size(draw, text + "...", font)[0] > max_width:
+            text = text[:-1]
+        return text + "..."
+
+    draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=34, fill=red_header)
+    draw.text((PAD + 24, PAD + 16), fit_text(title, fonts["title"], W - 520), font=fonts["title"], fill=white)
+    draw.text((PAD + 24, PAD + 94), fit_text(subtitle, fonts["sub"], W - 520), font=fonts["sub"], fill=white)
 
     right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
     rw, _ = _text_size(draw, right_txt, fonts["sub"])
-    draw.text((W - PAD - rw - 18, PAD + 70), right_txt, font=fonts["sub"], fill=white)
+    draw.text((W - PAD - rw - 24, PAD + 90), right_txt, font=fonts["sub"], fill=white)
 
     y_stats = PAD + HEADER_H + GAP
-    draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
+    draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=28, fill=dark_panel)
 
     total_watch = len(cards)
     tgt = sum(1 for c in cards if "TARGET" in str(c.get("result", "")).upper())
@@ -641,26 +650,26 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         ("Net P/L", f"₹{net_pnl:+,.0f}")
     ]
 
-    sx = PAD + 18
+    box_w = (W - PAD * 2) / 6.0
     for idx, (label, value) in enumerate(stats):
-        draw.text((sx, y_stats + 10), label, font=fonts["label"], fill=(198, 208, 223))
+        sx = int(PAD + idx * box_w + 22)
+        draw.text((sx, y_stats + 16), label, font=fonts["label"], fill=(198, 208, 223))
         val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 40), value, font=fonts["value"], fill=val_color)
-        sx += 145 if idx < 5 else 170
+        draw.text((sx, y_stats + 54), value, font=fonts["value"], fill=val_color)
 
     y_rank = y_stats + STATS_H + GAP
-    draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=18, fill=white, outline=border, width=2)
-    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["value_bold"], fill=text_dark)
-    draw.text((PAD + 16, y_rank + 37), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
+    draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=20, fill=white, outline=border, width=2)
+    draw.text((PAD + 18, y_rank + 12), "TOP PERFORMERS", font=fonts["value_bold"], fill=text_dark)
+    draw.text((PAD + 18, y_rank + 48), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
 
     ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
-    rx = PAD + 290
+    rank_x = PAD + 360
     for i, c in enumerate(ranked, 1):
         pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
-        txt = f"{i}) {c.get('symbol', '')} {pnl_txt}"
+        txt = fit_text(f"{i}) {c.get('symbol', '')} {pnl_txt}", fonts["value_bold"], 380)
         fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
-        draw.text((rx, y_rank + 10), txt, font=fonts["value_bold"], fill=fill)
-        rx += 240
+        draw.text((rank_x, y_rank + 18), txt, font=fonts["value_bold"], fill=fill)
+        rank_x += 400
 
     def result_color(result_text):
         rt = str(result_text).upper()
@@ -690,42 +699,46 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         pl_txt = item.get("pl", "")
         pnl_val = safe_float(item.get("pnl_value", 0.0), 0.0)
 
-        draw.rounded_rectangle((x, y, x + 500, y + CARD_H), radius=22, fill=white, outline=border, width=2)
-        draw.rounded_rectangle((x + 12, y + 12, x + 488, y + 48), radius=14, fill=header_color(side))
-        title_txt = f"{symbol}-{ltp}" if ltp not in ("", None) else symbol
-        draw.text((x + 20, y + 12), title_txt, font=fonts["card_title"], fill=white)
-        draw.text((x + 388, y + 12), f"{score}%", font=fonts["card_pct"], fill=white)
+        draw.rounded_rectangle((x, y, x + CARD_W, y + CARD_H), radius=24, fill=white, outline=border, width=2)
+        draw.rounded_rectangle((x + 16, y + 16, x + CARD_W - 16, y + 62), radius=16, fill=header_color(side))
+        title_txt = f"{symbol}-{ltp}" if ltp not in ("", None, "") else symbol
+        title_txt = fit_text(title_txt, fonts["card_title"], CARD_W - 170)
+        draw.text((x + 26, y + 22), title_txt, font=fonts["card_title"], fill=white)
+        score_txt = f"{score}%"
+        sw, _ = _text_size(draw, score_txt, fonts["card_pct"])
+        draw.text((x + CARD_W - sw - 28, y + 24), score_txt, font=fonts["card_pct"], fill=white)
 
-        draw.rounded_rectangle((x + 12, y + 58, x + 488, y + 94), radius=10, fill=soft_color(side))
-        line2 = f"{strategy} • {side} • {result}"
-        draw.text((x + 20, y + 66), line2, font=fonts["strategy"], fill=result_color(result))
+        draw.rounded_rectangle((x + 16, y + 76, x + CARD_W - 16, y + 122), radius=12, fill=soft_color(side))
+        line2 = fit_text(f"{strategy} • {side} • {result}", fonts["strategy"], CARD_W - 52)
+        draw.text((x + 24, y + 88), line2, font=fonts["strategy"], fill=result_color(result))
 
-        draw.text((x + 20, y + 110), f"Entry:{entry}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 150, y + 110), f"SL:{slv}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 272, y + 110), f"Target:{tgtv}", font=fonts["value_bold"], fill=text_dark)
+        col1 = x + 26
+        col2 = x + CARD_W * 0.34
+        col3 = x + CARD_W * 0.63
+        draw.text((col1, y + 148), f"Entry: {entry}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((col2, y + 148), f"SL: {slv}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((col3, y + 148), f"Target: {tgtv}", font=fonts["value_bold"], fill=text_dark)
 
-        draw.text((x + 20, y + 143), f"Qty:{qty}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 140, y + 143), f"P/L:{pl_txt}", font=fonts["value_bold"], fill=(pnl_green if pnl_val >= 0 else pnl_red))
-        draw.text((x + 305, y + 143), f"{int(LEVERAGE)}X", font=fonts["strategy"], fill=amber)
+        draw.text((col1, y + 192), f"Qty: {qty}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((col2, y + 192), f"P/L: {pl_txt}", font=fonts["value_bold"], fill=(pnl_green if pnl_val >= 0 else pnl_red))
+        draw.text((col3, y + 192), f"{int(LEVERAGE)}X", font=fonts["value_bold"], fill=amber)
 
-        draw.rounded_rectangle((x + 12, y + 184, x + 488, y + 222), radius=10, fill=light_strip)
-        draw.text((x + 20, y + 191), "Exit Type", font=fonts["label"], fill=muted)
-        draw.text((x + 132, y + 191), result.upper(), font=fonts["label"], fill=result_color(result))
-        draw.text((x + 20, y + 208), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
+        draw.rounded_rectangle((x + 16, y + CARD_H - 80, x + CARD_W - 16, y + CARD_H - 20), radius=12, fill=light_strip)
+        draw.text((x + 22, y + CARD_H - 72), "Exit Type", font=fonts["small"], fill=muted)
+        draw.text((x + 145, y + CARD_H - 72), fit_text(result.upper(), fonts["small"], CARD_W - 180), font=fonts["small"], fill=result_color(result))
+        draw.text((x + 22, y + CARD_H - 42), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
 
     start_y = y_rank + RANK_H + GAP
     current_y = start_y
-    col = 0
-    positions = [(PAD, current_y), (556, current_y)]
+    positions = [(PAD, current_y), (PAD + CARD_W + GAP, current_y)]
 
     for idx, item in enumerate(cards):
         if idx > 0 and idx % 2 == 0:
             current_y += CARD_H + GAP
-            positions = [(PAD, current_y), (556, current_y)]
-            col = 0
+            positions = [(PAD, current_y), (PAD + CARD_W + GAP, current_y)]
 
+        col = idx % 2
         draw_after_card(positions[col][0], positions[col][1], item)
-        col += 1
 
     bio = BytesIO()
     bio.name = "after_market_dashboard.png"
@@ -872,12 +885,15 @@ def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
         )
     except Exception as e:
         log(f"Image send error: {e}")
-def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
+def text_to_image_bytes(text, width=1800, padding=40, line_gap=16, font_size=34):
     lines = str(text).split("\n")
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        font = ImageFont.truetype(os.path.join(BASE_DIR, "fonts", "DejaVuSans.ttf"), font_size)
     except Exception:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
 
     dummy = Image.new("RGB", (width, 100), "white")
     draw = ImageDraw.Draw(dummy)
