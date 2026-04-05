@@ -746,7 +746,7 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
     cards.sort(key=lambda z: safe_float(z.get("score", 0), 0), reverse=True)
     return cards
 
-   def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15 MIN INSIDE", analysis_dt=""):
+def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + 15 MIN INSIDE", analysis_dt=""):
     fonts = _load_fonts()
 
     # FINAL CORRECT CONFIG
@@ -907,8 +907,9 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
         y = TOP_MARGIN + row * (CARD_H + ROW_GAP)
         draw_after_card(x, y, item)
 
-    return _save_image_to_bytes(img, "after_market_dashboard")
-
+    return _save_image_to_bytes(img, "after_market_dashboard")   
+    
+        
 
     
 
