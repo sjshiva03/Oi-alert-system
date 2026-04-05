@@ -122,25 +122,25 @@ def _load_fonts():
             return ImageFont.load_default()
 
     return {
-        # Header / top summary - bigger for Telegram mobile preview
-        "title": load_font(84, True),
-        "sub": load_font(40, True),
+        # Header / top summary
+        "title": load_font(72, True),
+        "sub": load_font(34, True),
 
         # Stats strip
-        "label": load_font(22, True),
-        "value": load_font(32, True),
+        "label": load_font(19, True),
+        "value": load_font(28, True),
 
         # Card header / body
-        "card_title": load_font(34, True),
-        "card_pct": load_font(28, True),
-        "strategy": load_font(23, True),
-        "value_bold": load_font(20, True),
-        "small": load_font(17, True),
-        "tiny": load_font(15, False),
+        "card_title": load_font(28, True),
+        "card_pct": load_font(24, True),
+        "strategy": load_font(20, True),
+        "value_bold": load_font(18, True),
+        "small": load_font(15, True),
+        "tiny": load_font(12, False),
 
         # Backward-compatible keys used elsewhere in file
-        "card": load_font(28, True),
-        "text": load_font(20, True),
+        "card": load_font(24, True),
+        "text": load_font(18, True),
     }
 
 
@@ -584,10 +584,10 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     fonts = _load_fonts()
 
     W = 1080
-    HEADER_H = 132
-    STATS_H = 94
-    RANK_H = 70
-    CARD_H = 266
+    HEADER_H = 126
+    STATS_H = 88
+    RANK_H = 68
+    CARD_H = 254
     GAP = 14
     PAD = 20
 
@@ -613,12 +613,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     light_strip = (243, 245, 248)
 
     draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
-    draw.text((PAD + 16, PAD + 2), title, font=fonts["title"], fill=white)
-    draw.text((PAD + 18, PAD + 76), subtitle, font=fonts["sub"], fill=white)
+    draw.text((PAD + 16, PAD + 6), title, font=fonts["title"], fill=white)
+    draw.text((PAD + 18, PAD + 72), subtitle, font=fonts["sub"], fill=white)
 
     right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
     rw, _ = _text_size(draw, right_txt, fonts["sub"])
-    draw.text((W - PAD - rw - 18, PAD + 74), right_txt, font=fonts["sub"], fill=white)
+    draw.text((W - PAD - rw - 18, PAD + 70), right_txt, font=fonts["sub"], fill=white)
 
     y_stats = PAD + HEADER_H + GAP
     draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
@@ -643,22 +643,22 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     for idx, (label, value) in enumerate(stats):
         draw.text((sx, y_stats + 10), label, font=fonts["label"], fill=(198, 208, 223))
         val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 42), value, font=fonts["value"], fill=val_color)
+        draw.text((sx, y_stats + 40), value, font=fonts["value"], fill=val_color)
         sx += 145 if idx < 5 else 170
 
     y_rank = y_stats + STATS_H + GAP
     draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=18, fill=white, outline=border, width=2)
-    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["strategy"], fill=text_dark)
-    draw.text((PAD + 16, y_rank + 40), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
+    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["value_bold"], fill=text_dark)
+    draw.text((PAD + 16, y_rank + 37), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
 
     ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
-    rx = PAD + 280
+    rx = PAD + 290
     for i, c in enumerate(ranked, 1):
         pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
         txt = f"{i}) {c.get('symbol', '')} {pnl_txt}"
         fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
-        draw.text((rx, y_rank + 10), txt, font=fonts["small"], fill=fill)
-        rx += 245
+        draw.text((rx, y_rank + 10), txt, font=fonts["value_bold"], fill=fill)
+        rx += 240
 
     def result_color(result_text):
         rt = str(result_text).upper()
@@ -689,27 +689,27 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         pnl_val = safe_float(item.get("pnl_value", 0.0), 0.0)
 
         draw.rounded_rectangle((x, y, x + 500, y + CARD_H), radius=22, fill=white, outline=border, width=2)
-        draw.rounded_rectangle((x + 12, y + 12, x + 488, y + 50), radius=14, fill=header_color(side))
+        draw.rounded_rectangle((x + 12, y + 12, x + 488, y + 48), radius=14, fill=header_color(side))
         title_txt = f"{symbol}-{ltp}" if ltp not in ("", None) else symbol
-        draw.text((x + 18, y + 13), title_txt, font=fonts["card_title"], fill=white)
-        draw.text((x + 392, y + 13), f"{score}%", font=fonts["card_pct"], fill=white)
+        draw.text((x + 20, y + 12), title_txt, font=fonts["card_title"], fill=white)
+        draw.text((x + 388, y + 12), f"{score}%", font=fonts["card_pct"], fill=white)
 
-        draw.rounded_rectangle((x + 12, y + 60, x + 488, y + 100), radius=10, fill=soft_color(side))
+        draw.rounded_rectangle((x + 12, y + 58, x + 488, y + 94), radius=10, fill=soft_color(side))
         line2 = f"{strategy} • {side} • {result}"
-        draw.text((x + 18, y + 69), line2, font=fonts["strategy"], fill=result_color(result))
+        draw.text((x + 20, y + 66), line2, font=fonts["strategy"], fill=result_color(result))
 
-        draw.text((x + 18, y + 116), f"Entry:{entry}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 154, y + 116), f"SL:{slv}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 284, y + 116), f"Target:{tgtv}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 20, y + 110), f"Entry:{entry}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 150, y + 110), f"SL:{slv}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 272, y + 110), f"Target:{tgtv}", font=fonts["value_bold"], fill=text_dark)
 
-        draw.text((x + 18, y + 154), f"Qty:{qty}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 145, y + 154), f"P/L:{pl_txt}", font=fonts["value_bold"], fill=(pnl_green if pnl_val >= 0 else pnl_red))
-        draw.text((x + 320, y + 154), f"{int(LEVERAGE)}X", font=fonts["strategy"], fill=amber)
+        draw.text((x + 20, y + 143), f"Qty:{qty}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 140, y + 143), f"P/L:{pl_txt}", font=fonts["value_bold"], fill=(pnl_green if pnl_val >= 0 else pnl_red))
+        draw.text((x + 305, y + 143), f"{int(LEVERAGE)}X", font=fonts["strategy"], fill=amber)
 
-        draw.rounded_rectangle((x + 12, y + 198, x + 488, y + 238), radius=10, fill=light_strip)
-        draw.text((x + 18, y + 206), "Exit Type", font=fonts["label"], fill=muted)
-        draw.text((x + 128, y + 206), result.upper(), font=fonts["label"], fill=result_color(result))
-        draw.text((x + 18, y + 224), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
+        draw.rounded_rectangle((x + 12, y + 184, x + 488, y + 222), radius=10, fill=light_strip)
+        draw.text((x + 20, y + 191), "Exit Type", font=fonts["label"], fill=muted)
+        draw.text((x + 132, y + 191), result.upper(), font=fonts["label"], fill=result_color(result))
+        draw.text((x + 20, y + 208), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
 
     start_y = y_rank + RANK_H + GAP
     current_y = start_y
@@ -774,9 +774,9 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
         files = {"photo": ("after_market_dashboard.png", img_bytes, "image/png")}
         data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
         requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
             data=data,
-            files=files,
+            files={"document": files["photo"]},
             timeout=60
         )
     except Exception as e:
@@ -914,9 +914,9 @@ def send_photo_from_text(text, caption=""):
         files = {"photo": ("report.png", img_bytes, "image/png")}
         data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
         requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
             data=data,
-            files=files,
+            files={"document": files["photo"]},
             timeout=60
         )
     except Exception as e:
@@ -2354,7 +2354,7 @@ def build_after_market_cards_for_category(items, category_name):
     return cards
 
 
-def send_after_market_category_images(items, category_name, per_image=8):
+def send_after_market_category_images(items, category_name, per_image=6):
     if not items:
         log(f"No after-market items for {category_name}")
         return
@@ -2374,10 +2374,10 @@ def send_after_market_category_images(items, category_name, per_image=8):
                 subtitle=f"RESULTS + P/L + {category_name}",
                 analysis_dt=analysis_date_str().upper()
             )
-            files = {"photo": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
+            files = {"document": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
             data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
             requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
                 data=data,
                 files=files,
                 timeout=60
@@ -2416,9 +2416,9 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    send_after_market_category_images(gap_items, "GAPUP PLUS")
-    send_after_market_category_images(inside_items, "15 MIN INSIDE")
-    send_after_market_category_images(pivot_items, "PIVOT")
+    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=6)
+    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=6)
+    send_after_market_category_images(pivot_items, "PIVOT", per_image=6)
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
