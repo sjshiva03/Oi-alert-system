@@ -2,8 +2,8 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+TELEGRAM_TOKEN = 8619123498:AAGmqno7hYGsDcTjMPpFHKQ-Ps7rvtrHyx0
+CHAT_ID = 7641895913
 
 def load_fonts():
     try:
