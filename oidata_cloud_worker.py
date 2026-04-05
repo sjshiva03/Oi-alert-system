@@ -444,6 +444,11 @@ def draw_card(draw, x, y, item):
         draw.text((x+30, oy), txt, font=fonts["small"], fill=(30,30,30))
         oy += 22
 
+positions = [(24, 450), (556, 450), (24, 830), (556, 830)]
+
+for item, (x,y) in zip(items[:4], positions):
+    draw_card(draw, x, y, item)
+
 
 def build_after_market_summary_image():
     fonts = _load_fonts()
