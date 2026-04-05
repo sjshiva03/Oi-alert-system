@@ -6,43 +6,85 @@ TELEGRAM_TOKEN = "8619123498:AAGmqno7hYGsDcTjMPpFHKQ-Ps7rvtrHyx0"
 CHAT_ID = 7641895913
 
 def load_fonts():
-    font_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    ]
+    import os
+    import PIL
+    from PIL import ImageFont
 
-    def pick_font(size, bold=False):
-        wanted = "Bold" if bold else "Sans.ttf"
-        for path in font_candidates:
-            if bold and "Bold" not in path:
-                continue
-            if (not bold) and "Bold" in path:
-                continue
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                pass
+    pil_dir = os.path.dirname(PIL.__file__)
+    pil_fonts_dir = os.path.join(pil_dir, "fonts")
 
-        # last fallback
-        try:
-            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-        except Exception:
-            return ImageFont.load_default()
-
-    return {
-        "title": pick_font(44, bold=True),
-        "sub": pick_font(20, bold=True),
-        "card": pick_font(20, bold=True),
-        "text": pick_font(17, bold=False),
-        "text_bold": pick_font(17, bold=True),
-        "small": pick_font(15, bold=False),
-        "tiny": pick_font(14, bold=False),
+    candidates = {
+        "title": [
+            os.path.join(pil_fonts_dir, "DejaVuSans-Bold.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        ],
+        "sub": [
+            os.path.join(pil_fonts_dir, "DejaVuSans-Bold.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        ],
+        "card": [
+            os.path.join(pil_fonts_dir, "DejaVuSans-Bold.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        ],
+        "text": [
+            os.path.join(pil_fonts_dir, "DejaVuSans.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ],
+        "text_bold": [
+            os.path.join(pil_fonts_dir, "DejaVuSans-Bold.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        ],
+        "small": [
+            os.path.join(pil_fonts_dir, "DejaVuSans.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ],
+        "tiny": [
+            os.path.join(pil_fonts_dir, "DejaVuSans.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ],
     }
+
+    sizes = {
+        "title": 44,
+        "sub": 20,
+        "card": 20,
+        "text": 17,
+        "text_bold": 17,
+        "small": 15,
+        "tiny": 14,
+    }
+
+    out = {}
+    for key, paths in candidates.items():
+        loaded = None
+        for path in paths:
+            try:
+                if os.path.exists(path):
+                    loaded = ImageFont.truetype(path, sizes[key])
+                    print(f"[FONT] loaded {key}: {path}", flush=True)
+                    break
+            except Exception as e:
+                print(f"[FONT] failed {key}: {path} -> {e}", flush=True)
+
+        if loaded is None:
+            print(f"[FONT] fallback default for {key}", flush=True)
+            loaded = ImageFont.load_default()
+
+        out[key] = loaded
+
+    return out
+
 
 def build_live_dashboard_image():
     fonts = load_fonts()
+    log(f"Font objects loaded: {fonts}")
 
     W, H = 1080, 1700
     img = Image.new("RGB", (W, H), (245, 247, 252))
