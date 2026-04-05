@@ -170,28 +170,19 @@ def _load_one_font(size, bold=False):
     return ImageFont.load_default()
 
 
-def _load_fonts():
-    return {
-        # Header / top summary
-        "title": _load_one_font(72, True),
-        "sub": _load_one_font(34, True),
+def load_font(size, bold=False):
+    base_path = os.path.dirname(__file__)
+    font_path = os.path.join(
+        base_path,
+        "fonts",
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    )
 
-        # Stats strip
-        "label": _load_one_font(19, True),
-        "value": _load_one_font(28, True),
-
-        # Card header / body
-        "card_title": _load_one_font(28, True),
-        "card_pct": _load_one_font(24, True),
-        "strategy": _load_one_font(20, True),
-        "value_bold": _load_one_font(18, True),
-        "small": _load_one_font(15, True),
-        "tiny": _load_one_font(12, False),
-
-        # Backward-compatible keys used elsewhere in file
-        "card": _load_one_font(24, True),
-        "text": _load_one_font(18, True),
-    }
+    try:
+        return ImageFont.truetype(font_path, size)
+    except Exception as e:
+        print(f"[FONT ERROR] {e}")
+        return ImageFont.load_default()
 
 def _text_size(draw, value, font):
     bbox = draw.textbbox((0, 0), str(value), font=font)
