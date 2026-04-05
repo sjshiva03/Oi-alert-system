@@ -304,50 +304,27 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="LIVE + OI + R
     bio.seek(0)
     return bio
 
-def test_dashboard_send():
+ def test_dashboard_send():
+
     items = []
 
-    # GAPUP
-    for x in pattern_summary.get("gapup", []):
-        items.append({
-            "symbol": x.get("symbol"),
-            "strategy": "GAP UP",
-            "side": x.get("signal", ""),
-            "entry": x.get("entry", ""),
-            "target": x.get("target", ""),
-            "stoploss": x.get("stoploss", ""),
-            "pl": x.get("pl", ""),
-            "qty": x.get("qty", ""),
-        })
+    for sym, trade in active_trades.items():
 
-    # INSIDE 15
-    for x in pattern_summary.get("inside15", []):
         items.append({
-            "symbol": x.get("symbol"),
-            "strategy": "15M INSIDE",
-            "side": x.get("signal", ""),
-            "entry": x.get("entry", ""),
-            "target": x.get("target", ""),
-            "stoploss": x.get("stoploss", ""),
-            "pl": x.get("pl", ""),
-            "qty": x.get("qty", ""),
-        })
-
-    # PIVOT
-    for x in pattern_summary.get("pivot30", []):
-        items.append({
-            "symbol": x.get("symbol"),
-            "strategy": "PIVOT",
-            "side": x.get("signal", ""),
-            "entry": x.get("entry", ""),
-            "target": x.get("target", ""),
-            "stoploss": x.get("stoploss", ""),
-            "pl": x.get("pl", ""),
-            "qty": x.get("qty", ""),
+            "symbol": sym,
+            "strategy": trade.get("strategy", ""),
+            "side": trade.get("side", ""),
+            "entry": trade.get("entry", ""),
+            "target": trade.get("target", ""),
+            "stoploss": trade.get("stoploss", ""),
+            "pl": trade.get("pnl", ""),
+            "qty": trade.get("qty", ""),
+            "buy_oi_rows": trade.get("oi_rows", []),
+            "sell_oi_rows": trade.get("oi_rows", []),
         })
 
     if not items:
-        print("No items to send", flush=True)
+        print("No active trades for dashboard", flush=True)
         return
 
     send_dashboard_image(
