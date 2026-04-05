@@ -15,11 +15,6 @@ CLIENT_ID = (os.getenv("CLIENT_ID") or "").strip()
 ACCESS_TOKEN = (os.getenv("ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_DEBUG = (os.getenv("FONT_DEBUG", "true").strip().lower() == "true")
-TELEGRAM_IMAGE_MODE = (os.getenv("TELEGRAM_IMAGE_MODE", "photo").strip().lower())
-AFTER_MARKET_PAGE_SIZE = int(os.getenv("AFTER_MARKET_PAGE_SIZE", "4"))
-DASHBOARD_PAGE_SIZE = int(os.getenv("DASHBOARD_PAGE_SIZE", "4"))
 
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
@@ -48,6 +43,8 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
 PIVOT_MIN_YDAY_TURNOVER = float(os.getenv("PIVOT_MIN_YDAY_TURNOVER", "0"))
+
+AFTER_MARKET_PAGE_SIZE = int(os.getenv("AFTER_MARKET_PAGE_SIZE", "8"))
 
 NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
 
@@ -107,30 +104,6 @@ def send(msg: str):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-
-
-def send_telegram_image(image_bytes, filename="image.png", caption=""):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
-    try:
-        image_bytes.seek(0)
-        if TELEGRAM_IMAGE_MODE == "document":
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-                data={"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""},
-                files={"document": (filename, image_bytes, "image/png")},
-                timeout=60
-            )
-        else:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                data={"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""},
-                files={"photo": (filename, image_bytes, "image/png")},
-                timeout=60
-            )
-    except Exception as e:
-        log(f"Telegram image send error: {e}")
-
 # ================= HELPERS =================
 def now_ist():
     return datetime.now(IST)
@@ -141,82 +114,37 @@ def now_epoch():
 def log(msg: str):
     print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-
-def _font_candidates(bold=False):
-    fname = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    return [
-        os.path.join(BASE_DIR, "fonts", fname),
-        os.path.join("/mnt/data", "fonts", fname),
-        fname,
-        "/usr/share/fonts/truetype/dejavu/" + fname,
-        "/usr/share/fonts/dejavu/" + fname,
-    ]
-
-def _load_local_font(size, bold=False):
-    last_error = None
-    for path in _font_candidates(bold=bold):
-        try:
-            font = ImageFont.truetype(path, size)
-            if FONT_DEBUG:
-                log(f"[FONT] loaded {'bold' if bold else 'regular'} size={size} path={path}")
-            return font
-        except Exception as e:
-            last_error = e
-    if FONT_DEBUG:
-        log(f"[FONT] fallback default for {'bold' if bold else 'regular'} size={size} last_error={last_error}")
-    return ImageFont.load_default()
-
 def _load_fonts():
+    from PIL import ImageFont
+
+    def load_font(size, bold=False):
+        try:
+            return ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
+        except Exception:
+            return ImageFont.load_default()
+
     return {
-        "title": _load_local_font(56, True),
-        "sub": _load_local_font(24, True),
-        "label": _load_local_font(14, True),
-        "value": _load_local_font(24, True),
-        "card_title": _load_local_font(18, True),
-        "card_pct": _load_local_font(18, True),
-        "strategy": _load_local_font(12, True),
-        "value_bold": _load_local_font(11, True),
-        "small": _load_local_font(9, True),
-        "tiny": _load_local_font(8, False),
-        "card": _load_local_font(18, True),
-        "text": _load_local_font(11, True),
+        # Header / top summary
+        "title": load_font(72, True),
+        "sub": load_font(34, True),
+
+        # Stats strip
+        "label": load_font(19, True),
+        "value": load_font(28, True),
+
+        # Card header / body
+        "card_title": load_font(28, True),
+        "card_pct": load_font(24, True),
+        "strategy": load_font(20, True),
+        "value_bold": load_font(18, True),
+        "small": load_font(15, True),
+        "tiny": load_font(12, False),
+
+        # Backward-compatible keys used elsewhere in file
+        "card": load_font(24, True),
+        "text": load_font(18, True),
     }
 
-
-def _fit_font(draw, text, max_width, start_size=30, min_size=8, bold=True):
-    text = str(text or "")
-    for size in range(start_size, min_size - 1, -1):
-        font = _load_local_font(size, bold=bold)
-        if _text_size(draw, text, font)[0] <= max_width:
-            return font
-    return _load_local_font(min_size, bold=bold)
-
-
-def _ellipsize(draw, text, font, max_width):
-    text = str(text or "")
-    if _text_size(draw, text, font)[0] <= max_width:
-        return text
-    suffix = "..."
-    while text:
-        text = text[:-1]
-        candidate = text.rstrip() + suffix
-        if _text_size(draw, candidate, font)[0] <= max_width:
-            return candidate
-    return suffix
-
-
-def _draw_wrapped_text(draw, xy, text, font, fill, max_width, line_gap=4, max_lines=2):
-    x, y = xy
-    lines = _wrap_text(draw, text, font, max_width)
-    if max_lines and len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = _ellipsize(draw, lines[-1], font, max_width)
-    h = 0
-    for idx, line in enumerate(lines):
-        draw.text((x, y + h), line, font=font, fill=fill)
-        _, th = _text_size(draw, line, font)
-        h += th + line_gap
-    return h
 
 def _text_size(draw, value, font):
     bbox = draw.textbbox((0, 0), str(value), font=font)
@@ -342,8 +270,7 @@ def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
     return bio
 
 
-def _dashboard_pages(items, page_size=None):
-    page_size = int(page_size or DASHBOARD_PAGE_SIZE or 4)
+def _dashboard_pages(items, page_size=4):
     items = list(items or [])
     if not items:
         return [[{
@@ -655,28 +582,19 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
     cards.sort(key=lambda z: safe_float(z.get("score", 0), 0), reverse=True)
     return cards
 
-
-def _after_market_pages(cards, page_size=None):
-    page_size = int(page_size or AFTER_MARKET_PAGE_SIZE or 4)
-    cards = list(cards or [])
-    if not cards:
-        cards = _after_market_cards_from_closed()
-    return [cards[i:i + page_size] for i in range(0, len(cards), page_size)] or [[]]
-
-
 def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + STRATEGY OUTCOME", analysis_dt=""):
     fonts = _load_fonts()
 
-    W = 1600
-    HEADER_H = 170
-    STATS_H = 110
-    RANK_H = 118
-    CARD_H = 330
-    GAP = 18
-    PAD = 24
+    W = 1080
+    HEADER_H = 126
+    STATS_H = 88
+    RANK_H = 68
+    CARD_H = 254
+    GAP = 14
+    PAD = 20
 
     total_rows = max(1, math.ceil(len(cards) / 2))
-    H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + (total_rows * (CARD_H + GAP)) + 36
+    H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + (total_rows * (CARD_H + GAP)) + 30
 
     img = Image.new("RGB", (W, H), (243, 246, 250))
     draw = ImageDraw.Draw(img)
@@ -697,19 +615,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     light_strip = (243, 245, 248)
 
     draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
+    draw.text((PAD + 16, PAD + 6), title, font=fonts["title"], fill=white)
+    draw.text((PAD + 18, PAD + 72), subtitle, font=fonts["sub"], fill=white)
 
-    title_font = _fit_font(draw, title, W - 2 * PAD - 40, start_size=60, min_size=30, bold=True)
-    draw.text((PAD + 22, PAD + 12), title, font=title_font, fill=white)
-
-    date_font = _fit_font(draw, analysis_dt or now_ist().strftime("%Y-%m-%d"), 220, start_size=28, min_size=18, bold=True)
-    right_txt = analysis_dt or now_ist().strftime("%Y-%m-%d")
-    rw, _ = _text_size(draw, right_txt, date_font)
-    date_x = W - PAD - rw - 22
-    date_y = PAD + 66
-    draw.text((date_x, date_y), right_txt, font=date_font, fill=white)
-
-    subtitle_font = _fit_font(draw, subtitle, date_x - (PAD + 22) - 20, start_size=24, min_size=14, bold=True)
-    _draw_wrapped_text(draw, (PAD + 22, PAD + 78), subtitle, subtitle_font, white, date_x - (PAD + 22) - 20, line_gap=2, max_lines=2)
+    right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
+    rw, _ = _text_size(draw, right_txt, fonts["sub"])
+    draw.text((W - PAD - rw - 18, PAD + 70), right_txt, font=fonts["sub"], fill=white)
 
     y_stats = PAD + HEADER_H + GAP
     draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
@@ -730,27 +641,26 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         ("Net P/L", f"₹{net_pnl:+,.0f}")
     ]
 
-    stat_w = (W - PAD * 2 - 20) / 6.0
+    sx = PAD + 18
     for idx, (label, value) in enumerate(stats):
-        sx = PAD + 20 + idx * stat_w
-        draw.text((sx, y_stats + 12), label, font=fonts["label"], fill=(198, 208, 223))
+        draw.text((sx, y_stats + 10), label, font=fonts["label"], fill=(198, 208, 223))
         val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 48), value, font=fonts["value"], fill=val_color)
+        draw.text((sx, y_stats + 40), value, font=fonts["value"], fill=val_color)
+        sx += 145 if idx < 5 else 170
 
     y_rank = y_stats + STATS_H + GAP
     draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=18, fill=white, outline=border, width=2)
-    draw.text((PAD + 18, y_rank + 10), "TOP PERFORMERS", font=fonts["card"], fill=text_dark)
-    draw.text((PAD + 18, y_rank + 42), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
+    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["value_bold"], fill=text_dark)
+    draw.text((PAD + 16, y_rank + 37), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
 
     ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
-    rank_y = y_rank + 68
-    rank_x = PAD + 18
+    rx = PAD + 290
     for i, c in enumerate(ranked, 1):
         pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
         txt = f"{i}) {c.get('symbol', '')} {pnl_txt}"
         fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
-        cell_w = (W - 2 * PAD - 36) / 3.0
-        draw.text((rank_x + (i - 1) * cell_w, rank_y), _ellipsize(draw, txt, fonts["value_bold"], int(cell_w - 10)), font=fonts["value_bold"], fill=fill)
+        draw.text((rx, y_rank + 10), txt, font=fonts["value_bold"], fill=fill)
+        rx += 240
 
     def result_color(result_text):
         rt = str(result_text).upper()
@@ -766,13 +676,6 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     def soft_color(side):
         return soft_green if str(side).upper() == "BUY" else soft_red
 
-    def draw_metric_line(base_x, base_y, label, value, color=text_dark):
-        label_font = fonts["value_bold"]
-        value_font = fonts["value_bold"]
-        draw.text((base_x, base_y), label, font=label_font, fill=text_dark)
-        lw, _ = _text_size(draw, label, label_font)
-        draw.text((base_x + lw + 4, base_y), str(value), font=value_font, fill=color)
-
     def draw_after_card(x, y, item):
         side = str(item.get("side", "SELL")).upper()
         result = str(item.get("result", ""))
@@ -787,53 +690,42 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         pl_txt = item.get("pl", "")
         pnl_val = safe_float(item.get("pnl_value", 0.0), 0.0)
 
-        card_w = 760
-        draw.rounded_rectangle((x, y, x + card_w, y + CARD_H), radius=22, fill=white, outline=border, width=2)
-        draw.rounded_rectangle((x + 12, y + 12, x + card_w - 12, y + 52), radius=14, fill=header_color(side))
-        score_text = f"{score}%"
-        score_w, _ = _text_size(draw, score_text, fonts["card_pct"])
+        draw.rounded_rectangle((x, y, x + 500, y + CARD_H), radius=22, fill=white, outline=border, width=2)
+        draw.rounded_rectangle((x + 12, y + 12, x + 488, y + 48), radius=14, fill=header_color(side))
         title_txt = f"{symbol}-{ltp}" if ltp not in ("", None) else symbol
-        title_font = _fit_font(draw, title_txt, card_w - 70 - score_w, start_size=24, min_size=14, bold=True)
-        draw.text((x + 20, y + 16), _ellipsize(draw, title_txt, title_font, card_w - 70 - score_w), font=title_font, fill=white)
-        draw.text((x + card_w - score_w - 20, y + 16), score_text, font=fonts["card_pct"], fill=white)
+        draw.text((x + 20, y + 12), title_txt, font=fonts["card_title"], fill=white)
+        draw.text((x + 388, y + 12), f"{score}%", font=fonts["card_pct"], fill=white)
 
-        draw.rounded_rectangle((x + 12, y + 64, x + card_w - 12, y + 102), radius=10, fill=soft_color(side))
+        draw.rounded_rectangle((x + 12, y + 58, x + 488, y + 94), radius=10, fill=soft_color(side))
         line2 = f"{strategy} • {side} • {result}"
-        line_font = _fit_font(draw, line2, card_w - 40, start_size=16, min_size=10, bold=True)
-        draw.text((x + 20, y + 74), _ellipsize(draw, line2, line_font, card_w - 40), font=line_font, fill=result_color(result))
+        draw.text((x + 20, y + 66), line2, font=fonts["strategy"], fill=result_color(result))
 
-        col1 = x + 20
-        col2 = x + 245
-        col3 = x + 470
-        row1_y = y + 118
-        row2_y = y + 152
+        draw.text((x + 20, y + 110), f"Entry:{entry}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 150, y + 110), f"SL:{slv}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 272, y + 110), f"Target:{tgtv}", font=fonts["value_bold"], fill=text_dark)
 
-        draw_metric_line(col1, row1_y, "Entry:", entry)
-        draw_metric_line(col2, row1_y, "SL:", slv)
-        draw_metric_line(col3, row1_y, "Target:", tgtv)
+        draw.text((x + 20, y + 143), f"Qty:{qty}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 140, y + 143), f"P/L:{pl_txt}", font=fonts["value_bold"], fill=(pnl_green if pnl_val >= 0 else pnl_red))
+        draw.text((x + 305, y + 143), f"{int(LEVERAGE)}X", font=fonts["strategy"], fill=amber)
 
-        draw_metric_line(col1, row2_y, "Qty:", qty if qty != "" else "-")
-        draw_metric_line(col2, row2_y, "P/L:", pl_txt, pnl_green if pnl_val >= 0 else pnl_red)
-        draw_metric_line(col3, row2_y, "Lev:", f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X", amber)
-
-        draw.rounded_rectangle((x + 12, y + 205, x + card_w - 12, y + 247), radius=10, fill=light_strip)
-        draw.text((x + 20, y + 216), "Exit Type", font=fonts["label"], fill=muted)
-        exit_font = _fit_font(draw, result.upper(), 200, start_size=14, min_size=10, bold=True)
-        draw.text((x + 125, y + 216), _ellipsize(draw, result.upper(), exit_font, 200), font=exit_font, fill=result_color(result))
-
-        note_font = _fit_font(draw, "Realized result recorded in after-market book", card_w - 40, start_size=12, min_size=8, bold=True)
-        draw.text((x + 20, y + 255), "Realized result recorded in after-market book", font=note_font, fill=text_dark)
+        draw.rounded_rectangle((x + 12, y + 184, x + 488, y + 222), radius=10, fill=light_strip)
+        draw.text((x + 20, y + 191), "Exit Type", font=fonts["label"], fill=muted)
+        draw.text((x + 132, y + 191), result.upper(), font=fonts["label"], fill=result_color(result))
+        draw.text((x + 20, y + 208), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
 
     start_y = y_rank + RANK_H + GAP
     current_y = start_y
-    positions = [(PAD, current_y), (PAD + 778, current_y)]
+    col = 0
+    positions = [(PAD, current_y), (556, current_y)]
 
     for idx, item in enumerate(cards):
         if idx > 0 and idx % 2 == 0:
             current_y += CARD_H + GAP
-            positions = [(PAD, current_y), (PAD + 778, current_y)]
+            positions = [(PAD, current_y), (556, current_y)]
+            col = 0
 
-        draw_after_card(positions[idx % 2][0], positions[idx % 2][1], item)
+        draw_after_card(positions[col][0], positions[col][1], item)
+        col += 1
 
     bio = BytesIO()
     bio.name = "after_market_dashboard.png"
@@ -846,7 +738,9 @@ def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
         return
     try:
         img_bytes = build_rich_summary_image(items, title=title, subtitle=subtitle)
-        send_telegram_image(img_bytes, filename="rich_summary.png", caption=caption)
+        files = {"photo": ("rich_summary.png", img_bytes, "image/png")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
     except Exception as e:
         log(f"Rich summary image error: {e}")
 
@@ -855,14 +749,16 @@ def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        pages = _dashboard_pages(items, page_size=DASHBOARD_PAGE_SIZE)
+        pages = _dashboard_pages(items, page_size=4)
         total_pages = len(pages)
         for idx, page_items in enumerate(pages, 1):
             img_bytes = make_dashboard_image(page_items, title=title, subtitle=subtitle, page_no=idx, total_pages=total_pages)
+            files = {"photo": (f"ultimate_dashboard_p{idx}.png", img_bytes, "image/png")}
             page_caption = caption
             if total_pages > 1:
                 page_caption = f"{caption} ({idx}/{total_pages})" if caption else f"Page {idx}/{total_pages}"
-            send_telegram_image(img_bytes, filename=f"ultimate_dashboard_p{idx}.png", caption=page_caption)
+            data = {"chat_id": CHAT_ID, "caption": page_caption[:1024] if page_caption else ""}
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
     except Exception as e:
         log(f"Dashboard image error: {e}")
 
@@ -871,19 +767,20 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        pages = _after_market_pages(cards or [])
-        total_pages = len(pages)
-        for idx, page_cards in enumerate(pages, 1):
-            img_bytes = _load_font(
-                cards=page_cards,
-                title="AFTER MARKET SUMMARY",
-                subtitle="RESULTS + P/L + 15 MIN INSIDE",
-                analysis_dt=analysis_date_str().upper()
-            )
-            page_caption = caption
-            if total_pages > 1:
-                page_caption = f"{caption} ({idx}/{total_pages})" if caption else f"Page {idx}/{total_pages}"
-            send_telegram_image(img_bytes, filename=f"after_market_{idx}.png", caption=page_caption)
+        img_bytes = _load_font(
+            cards=cards,
+            title="AFTER MARKET SUMMARY",
+            subtitle="RESULTS + P/L + STRATEGY OUTCOME",
+            analysis_dt=analysis_date_str().upper()
+        )
+        files = {"photo": ("after_market_dashboard.png", img_bytes, "image/png")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data=data,
+            files=files,
+            timeout=60
+        )
     except Exception as e:
         log(f"After market summary image error: {e}")
 
@@ -963,12 +860,24 @@ def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
             header_title=header_title,
             reason_text=reason_text
         )
-        send_telegram_image(img, filename="live_trade.png", caption=caption)
+
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data={
+                "chat_id": CHAT_ID,
+                "caption": caption[:1024] if caption else ""
+            },
+            files={"photo": ("dashboard.png", img, "image/png")},
+            timeout=60
+        )
     except Exception as e:
         log(f"Image send error: {e}")
 def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
     lines = str(text).split("\n")
-    font = _load_local_font(font_size, bold=False)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
 
     dummy = Image.new("RGB", (width, 100), "white")
     draw = ImageDraw.Draw(dummy)
@@ -1004,7 +913,14 @@ def send_photo_from_text(text, caption=""):
         return
     try:
         img_bytes = text_to_image_bytes(text)
-        send_telegram_image(img_bytes, filename="report.png", caption=caption)
+        files = {"photo": ("report.png", img_bytes, "image/png")}
+        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+            data=data,
+            files={"document": files["photo"]},
+            timeout=60
+        )
     except Exception as e:
         log(f"Telegram photo error: {e}")
 
@@ -1246,24 +1162,19 @@ def get_reference_symbol():
 
 def get_last_available_session_date():
     ref_symbol = get_reference_symbol()
-    for days_back in [10, 20, 40]:
-        candles = get_history(ref_symbol, 5, days_back)
-        if candles:
-            try:
-                ts = int(candles[-1][0])
-                last_dt = candle_dt(ts)
-                return last_dt.strftime("%Y-%m-%d")
-            except Exception as e:
-                log(f"Session date parse error: {e}")
+    candles = get_history(ref_symbol, 5, 10)
 
-    d = now_ist().date()
-    for _ in range(10):
-        d = d - timedelta(days=1)
-        dt_obj = datetime(d.year, d.month, d.day, tzinfo=IST)
-        if is_market_day(dt_obj):
-            return d.strftime("%Y-%m-%d")
+    if not candles:
+        return now_ist().strftime("%Y-%m-%d")
 
-    return now_ist().strftime("%Y-%m-%d")
+    try:
+        ts = int(candles[-1][0])
+        last_dt = candle_dt(ts)
+        return last_dt.strftime("%Y-%m-%d")
+    except Exception as e:
+        log(f"Session date parse error: {e}")
+        return now_ist().strftime("%Y-%m-%d")
+
 
 def analysis_date_str():
     return get_last_available_session_date()
@@ -1273,19 +1184,20 @@ def log_analysis_date_debug():
     ref_symbol = get_reference_symbol()
     candles = get_history(ref_symbol, 5, 10)
 
-    log(f"Reference symbol: {ref_symbol}")
-
     if candles and isinstance(candles[-1], list) and len(candles[-1]) > 0:
         try:
             ts = int(candles[-1][0])
             last_dt = candle_dt(ts).strftime("%Y-%m-%d %H:%M")
+
+            log(f"Reference symbol: {ref_symbol}")
             log(f"Latest candle from FYERS: {last_dt}")
+            log(f"Analysis date selected: {analysis_date_str()}")
+
         except Exception as e:
             log(f"Debug parse error: {e}")
     else:
-        log("No valid candles returned from FYERS for reference symbol")
-
-    log(f"Analysis date selected: {analysis_date_str()}")
+        log(f"Reference symbol: {ref_symbol}")
+        log("No valid candles returned from FYERS")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -2444,7 +2356,7 @@ def build_after_market_cards_for_category(items, category_name):
     return cards
 
 
-def send_after_market_category_images(items, category_name, per_image=6):
+def send_after_market_category_images(items, category_name, per_image=AFTER_MARKET_PAGE_SIZE):
     if not items:
         log(f"No after-market items for {category_name}")
         return
@@ -2464,10 +2376,10 @@ def send_after_market_category_images(items, category_name, per_image=6):
                 subtitle=f"RESULTS + P/L + {category_name}",
                 analysis_dt=analysis_date_str().upper()
             )
-            files = {"document": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
+            files = {"photo": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
             data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
             requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                 data=data,
                 files=files,
                 timeout=60
@@ -2506,9 +2418,9 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=6)
-    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=6)
-    send_after_market_category_images(pivot_items, "PIVOT", per_image=6)
+    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=AFTER_MARKET_PAGE_SIZE)
+    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=AFTER_MARKET_PAGE_SIZE)
+    send_after_market_category_images(pivot_items, "PIVOT", per_image=AFTER_MARKET_PAGE_SIZE)
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
