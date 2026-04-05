@@ -567,7 +567,7 @@ def build_after_market_summary_image(cards=None, title="STOCKS TO WATCH", subtit
     cards = list(cards or _after_market_cards_from_closed())
     fonts = _load_fonts()
     W = 1080
-   HEADER_H = 105
+    HEADER_H = 105
     STATS_H = 78
     RANK_H = 60
     CARD_H = 235
