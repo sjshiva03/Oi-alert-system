@@ -16,6 +16,12 @@ ACCESS_TOKEN = (os.getenv("ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 
+# Telegram media quality control
+# Default sends images as DOCUMENT to avoid Telegram photo compression.
+TELEGRAM_SEND_MODE = (os.getenv("TELEGRAM_SEND_MODE", "document") or "document").strip().lower()
+TELEGRAM_IMAGE_FORMAT = (os.getenv("TELEGRAM_IMAGE_FORMAT", "png") or "png").strip().lower()
+TELEGRAM_JPEG_QUALITY = int(os.getenv("TELEGRAM_JPEG_QUALITY", "95"))
+
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
@@ -731,14 +737,69 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     bio.seek(0)
     return bio
 
+def _normalize_telegram_image_format(fmt=None):
+    fmt = str(fmt or TELEGRAM_IMAGE_FORMAT or "png").strip().lower()
+    return "jpeg" if fmt in {"jpg", "jpeg"} else "png"
+
+
+def _image_name(base_name="image", fmt=None):
+    ext = "jpg" if _normalize_telegram_image_format(fmt) == "jpeg" else "png"
+    return f"{base_name}.{ext}"
+
+
+def _buffer_to_telegram_upload(img_bytes, base_name="image", fmt=None):
+    fmt = _normalize_telegram_image_format(fmt)
+    payload = img_bytes.getvalue() if hasattr(img_bytes, "getvalue") else img_bytes.read()
+    mime = "image/jpeg" if fmt == "jpeg" else "image/png"
+    return (_image_name(base_name, fmt), payload, mime)
+
+
+def _render_buffer_for_telegram(img_bytes, base_name="image", fmt=None, jpeg_quality=None):
+    fmt = _normalize_telegram_image_format(fmt)
+    if fmt == "png":
+        if hasattr(img_bytes, "seek"):
+            img_bytes.seek(0)
+        return _buffer_to_telegram_upload(img_bytes, base_name=base_name, fmt=fmt)
+
+    if hasattr(img_bytes, "seek"):
+        img_bytes.seek(0)
+    img = Image.open(img_bytes).convert("RGB")
+    out = BytesIO()
+    out.name = _image_name(base_name, fmt)
+    img.save(out, format="JPEG", quality=max(1, min(100, int(jpeg_quality or TELEGRAM_JPEG_QUALITY))), optimize=True, subsampling=0)
+    out.seek(0)
+    return _buffer_to_telegram_upload(out, base_name=base_name, fmt=fmt)
+
+
+def send_telegram_image(img_bytes, caption="", base_name="image", fmt=None, as_document=None):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+
+    try:
+        filename, payload, mime = _render_buffer_for_telegram(img_bytes, base_name=base_name, fmt=fmt)
+        use_document = TELEGRAM_SEND_MODE != "photo" if as_document is None else bool(as_document)
+        endpoint = "sendDocument" if use_document else "sendPhoto"
+        field_name = "document" if use_document else "photo"
+        data = {"chat_id": CHAT_ID}
+        if caption:
+            data["caption"] = caption[:1024]
+
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{endpoint}",
+            data=data,
+            files={field_name: (filename, payload, mime)},
+            timeout=60
+        )
+    except Exception as e:
+        log(f"Telegram image send error: {e}")
+
+
 def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
         img_bytes = build_rich_summary_image(items, title=title, subtitle=subtitle)
-        files = {"photo": ("rich_summary.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+        send_telegram_image(img_bytes, caption=caption, base_name="rich_summary")
     except Exception as e:
         log(f"Rich summary image error: {e}")
 
@@ -751,12 +812,10 @@ def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
         total_pages = len(pages)
         for idx, page_items in enumerate(pages, 1):
             img_bytes = make_dashboard_image(page_items, title=title, subtitle=subtitle, page_no=idx, total_pages=total_pages)
-            files = {"photo": (f"ultimate_dashboard_p{idx}.png", img_bytes, "image/png")}
             page_caption = caption
             if total_pages > 1:
                 page_caption = f"{caption} ({idx}/{total_pages})" if caption else f"Page {idx}/{total_pages}"
-            data = {"chat_id": CHAT_ID, "caption": page_caption[:1024] if page_caption else ""}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+            send_telegram_image(img_bytes, caption=page_caption, base_name=f"ultimate_dashboard_p{idx}")
     except Exception as e:
         log(f"Dashboard image error: {e}")
 
@@ -771,14 +830,7 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
             subtitle="RESULTS + P/L + STRATEGY OUTCOME",
             analysis_dt=analysis_date_str().upper()
         )
-        files = {"photo": ("after_market_dashboard.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-            data=data,
-            files={"document": files["photo"]},
-            timeout=60
-        )
+        send_telegram_image(img_bytes, caption=caption, base_name="after_market_dashboard")
     except Exception as e:
         log(f"After market summary image error: {e}")
 
@@ -858,16 +910,7 @@ def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
             header_title=header_title,
             reason_text=reason_text
         )
-
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-            data={
-                "chat_id": CHAT_ID,
-                "caption": caption[:1024] if caption else ""
-            },
-            files={"photo": ("dashboard.png", img, "image/png")},
-            timeout=60
-        )
+        send_telegram_image(img, caption=caption, base_name="live_trade")
     except Exception as e:
         log(f"Image send error: {e}")
 def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
@@ -911,14 +954,7 @@ def send_photo_from_text(text, caption=""):
         return
     try:
         img_bytes = text_to_image_bytes(text)
-        files = {"photo": ("report.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-            data=data,
-            files={"document": files["photo"]},
-            timeout=60
-        )
+        send_telegram_image(img_bytes, caption=caption, base_name="report")
     except Exception as e:
         log(f"Telegram photo error: {e}")
 
@@ -2354,7 +2390,7 @@ def build_after_market_cards_for_category(items, category_name):
     return cards
 
 
-def send_after_market_category_images(items, category_name, per_image=6):
+def send_after_market_category_images(items, category_name, per_image=8):
     if not items:
         log(f"No after-market items for {category_name}")
         return
@@ -2374,13 +2410,10 @@ def send_after_market_category_images(items, category_name, per_image=6):
                 subtitle=f"RESULTS + P/L + {category_name}",
                 analysis_dt=analysis_date_str().upper()
             )
-            files = {"document": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
-            data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-                data=data,
-                files=files,
-                timeout=60
+            send_telegram_image(
+                img_bytes,
+                caption=caption,
+                base_name=f"after_market_{category_name}_{idx}"
             )
             log(f"Sent after-market {category_name} image {idx}/{len(pages)}")
         except Exception as e:
@@ -2416,9 +2449,9 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=6)
-    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=6)
-    send_after_market_category_images(pivot_items, "PIVOT", per_image=6)
+    send_after_market_category_images(gap_items, "GAPUP PLUS")
+    send_after_market_category_images(inside_items, "15 MIN INSIDE")
+    send_after_market_category_images(pivot_items, "PIVOT")
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
