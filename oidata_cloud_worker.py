@@ -264,82 +264,107 @@ def _dashboard_pages(items, page_size=4):
     return [items[i:i+page_size] for i in range(0, len(items), page_size)]
 
 
-def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASHBOARD", page_no=1, total_pages=1):
-    fonts = _load_fonts()
-    W, H = 1080, 1700
-    img = Image.new("RGB", (W, H), (244, 247, 252))
+def make_dashboard_image(items, stats, top_ranked):
+    from PIL import Image, ImageDraw
+    import io
+    from datetime import datetime
+
+    W = 1080
+    PADDING = 30
+    GAP = 20
+
+    # Layout
+    HEADER_H = 120
+    STATS_H = 90
+    TOP_H = 80
+    CARD_H = 300
+
+    rows = (len(items) + 1) // 2
+    H = HEADER_H + STATS_H + TOP_H + rows * (CARD_H + GAP) + 40
+
+    img = Image.new("RGB", (W, H), "#eef2f6")
     draw = ImageDraw.Draw(img)
 
-    header_bg = (229, 57, 53)
-    panel_bg = (255, 255, 255)
-    buy_bar = (32, 201, 151)
-    sell_bar = (239, 83, 80)
-    buy_box = (232, 250, 242)
-    sell_box = (253, 236, 234)
-    text_dark = (28, 33, 40)
-    muted = (96, 108, 122)
-    border = (222, 228, 235)
-    profit = (18, 140, 85)
-    loss = (211, 47, 47)
-    neutral = (120, 130, 140)
-    dark_panel = (33, 43, 54)
-    accent = (255, 193, 7)
+    fonts = _load_fonts()
 
-    # Header closer to the sample image
-    draw.rounded_rectangle((24, 24, W - 24, 190), radius=28, fill=header_bg)
-    draw.text((55, 40), title, font=fonts["title"], fill="white")
-    draw.text((55, 106), subtitle, font=fonts["sub"], fill="white")
-    right_txt = now_ist().strftime("%a, %b %d").upper()
-    if total_pages > 1:
-        right_txt += f"  P{page_no}/{total_pages}"
-    right_w = _text_size(draw, right_txt, fonts["sub"])[0]
-    draw.text((W - 55 - right_w, 106), right_txt, font=fonts["sub"], fill=(255, 235, 235))
+    # ---------------- HEADER ----------------
+    draw_rounded_rect(draw, (PADDING, PADDING, W-PADDING, PADDING+HEADER_H),
+                      radius=30, fill="#e53935")
 
-    watch = len(pattern_summary.get("gapup", [])) + len(pattern_summary.get("inside15", [])) + len(pattern_summary.get("pivot30", []))
-    active_n = len(active_trades)
-    target_n = len(eod_stats.get("targets", []))
-    sl_n = len(eod_stats.get("stoplosses", []))
-    blocked_n = len(eod_stats.get("blocked", []))
-    net_pnl = round(sum(x.get("pnl", 0.0) for x in eod_stats.get("closed", [])), 2)
-    stats = [("Watch", str(watch)), ("Active", str(active_n)), ("Target", str(target_n)), ("SL", str(sl_n)), ("Blocked", str(blocked_n)), ("Net P/L", f"₹{net_pnl:+,.0f}")]
+    draw.text((PADDING+20, PADDING+25),
+              "STOCKS TO WATCH",
+              font=fonts["title"], fill="white")
 
-    draw.rounded_rectangle((24, 210, W - 24, 308), radius=22, fill=dark_panel)
-    x = 44
-    for label, val in stats:
-        draw.text((x, 228), label, font=fonts["small"], fill=(190, 205, 220))
-        color = "white" if label != "Net P/L" else ((124, 255, 183) if net_pnl >= 0 else (255, 170, 170))
-        draw.text((x, 255), val, font=fonts["card"], fill=color)
-        x += 165
+    draw.text((PADDING+20, PADDING+65),
+              "LIVE + OI + RISK",
+              font=fonts["small"], fill="white")
 
-    # ranking from all items on this page only
-    ranked = []
-    for item in items:
-        score = 90
-        buy = item.get("buy", {}) or {}
-        sell = item.get("sell", {}) or {}
-        for side_data in (buy, sell):
-            if side_data:
-                result = str(side_data.get("result", ""))
-                if "Target" in result:
-                    score = max(score, 98)
-                elif "Stoploss" in result:
-                    score = max(score, 88)
-                elif "Day End" in result or "Exit" in result:
-                    score = max(score, 91)
-                elif side_data.get("entry", "") != "":
-                    score = max(score, 94)
-        ranked.append((item.get("symbol", ""), score))
-    ranked = sorted(ranked, key=lambda x: x[1], reverse=True)[:3]
+    now = datetime.now().strftime("%b %d %H:%M").upper()
+    draw.text((W-PADDING-220, PADDING+40),
+              now,
+              font=fonts["small"], fill="white")
 
-    draw.rounded_rectangle((24, 330, W - 24, 420), radius=20, fill=panel_bg, outline=border, width=2)
-    draw.text((48, 352), "TOP RANKED SETUPS", font=fonts["card"], fill=text_dark)
-    rank_x = 320
-    for idx, (name, score) in enumerate(ranked, 1):
-        fill = profit if idx != 2 else loss
-        label = f"{idx}) {name} {score}%"
-        draw.text((rank_x, 356), label, font=fonts["small"], fill=fill)
-        rank_x += 210
-    draw.text((48, 386), "Smart filter: only strongest OI-confirmed setups shown first", font=fonts["tiny"], fill=muted)
+    # ---------------- STATS ----------------
+    y_stats = PADDING + HEADER_H + GAP
+
+    draw_rounded_rect(draw,
+        (PADDING, y_stats, W-PADDING, y_stats+STATS_H),
+        radius=20, fill="#1f2a44"
+    )
+
+    stats_labels = [
+        ("Watch", stats.get("watch",0)),
+        ("Active", stats.get("active",0)),
+        ("Target", stats.get("target",0)),
+        ("Stoploss", stats.get("stoploss",0)),
+        ("Blocked", stats.get("blocked",0)),
+        ("P/L", stats.get("pl","+0"))
+    ]
+
+    x = PADDING + 40
+    for name, val in stats_labels:
+        draw.text((x, y_stats+18), name, font=fonts["small"], fill="#cfd8dc")
+        color = "#00e676" if name == "P/L" else "white"
+        draw.text((x, y_stats+45), str(val), font=fonts["card"], fill=color)
+        x += 160
+
+    # ---------------- TOP RANK ----------------
+    y_top = y_stats + STATS_H + GAP
+
+    draw_rounded_rect(draw,
+        (PADDING, y_top, W-PADDING, y_top+TOP_H),
+        radius=15, fill="#e0e0e0"
+    )
+
+    draw.text((PADDING+20, y_top+15),
+              "TOP RANKED SETUPS",
+              font=fonts["small"], fill="#424242")
+
+    rank_text = "   ".join([
+        f"{i+1}) {x['symbol']} {x['score']}%"
+        for i, x in enumerate(top_ranked[:3])
+    ])
+
+    draw.text((PADDING+20, y_top+45),
+              rank_text,
+              font=fonts["small"], fill="#2e7d32")
+
+    # ---------------- CARDS ----------------
+    y_cards = y_top + TOP_H + GAP
+
+    for i, item in enumerate(items):
+        col = i % 2
+        row = i // 2
+
+        x = PADDING + col * (W//2)
+        y = y_cards + row * (CARD_H + GAP)
+
+        draw_card(draw, x+10, y, W//2 - 20, CARD_H, item, fonts)
+
+    # ---------------- RETURN ----------------
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
     def result_color(txt):
         t = str(txt).lower()
@@ -390,64 +415,39 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
             return "SELL", sell, item.get("sell_oi_rows", []) or []
         return "WATCH", {"entry": "", "target": "", "stoploss": "", "result": "", "exit_price": "", "pl": "", "qty": ""}, []
 
-def draw_card(draw, x, y, item):
-    buy = item.get("buy", {}) or {}
-    sell = item.get("sell", {}) or {}
+def draw_card(draw, x, y, w, h, item, fonts):
 
-    if buy and buy.get("entry"):
-        side = "BUY"
-        data = buy
-        rows = item.get("buy_oi_rows", [])
-        header_color = (32, 201, 151)
-        box_color = (232, 250, 242)
-    else:
-        side = "SELL"
-        data = sell
-        rows = item.get("sell_oi_rows", [])
-        header_color = (239, 83, 80)
-        box_color = (253, 236, 234)
+    is_buy = item.get("side") == "BUY"
+    header_color = "#1faa59" if is_buy else "#e53935"
 
-    # CARD
-    draw.rounded_rectangle((x, y, x+500, y+360), 25, fill=(255,255,255), outline=(220,220,220), width=2)
+    # Card background
+    draw_rounded_rect(draw, (x, y, x+w, y+h), 20, "white")
 
-    # HEADER BAR
-    draw.rounded_rectangle((x+15, y+15, x+485, y+65), 18, fill=header_color)
+    # Header bar
+    draw_rounded_rect(draw, (x, y, x+w, y+55), 20, header_color)
 
-    draw.text((x+30, y+25), item.get("symbol",""), fill="white", font=fonts["card"])
-    draw.text((x+400, y+25), "90%", fill="white", font=fonts["card"])
+    draw.text((x+10, y+10),
+              f"{item['symbol']}-{item['ltp']}",
+              font=fonts["card"], fill="white")
 
-    # STRATEGY BAR
-    draw.rounded_rectangle((x+15, y+80, x+485, y+120), 14, fill=box_color)
+    draw.text((x+w-80, y+10),
+              f"{item['score']}%",
+              font=fonts["card"], fill="white")
 
-    strategy = item.get("strategy","")
-    draw.text((x+30, y+90), f"{strategy} • {side}", font=fonts["text"], fill=(40,40,40))
+    # Strategy line
+    draw.text((x+10, y+70),
+              item.get("strategy", ""),
+              font=fonts["small"], fill="#616161")
 
-    # TRADE DATA
-    draw.text((x+30, y+130), f"Entry: {data.get('entry','')}", font=fonts["text"], fill=(30,30,30))
-    draw.text((x+180, y+130), f"SL: {data.get('stoploss','')}", font=fonts["text"], fill=(30,30,30))
-    draw.text((x+300, y+130), f"Target: {data.get('target','')}", font=fonts["text"], fill=(30,30,30))
+    # Entry row
+    draw.text((x+10, y+100),
+              f"Entry: {item['entry']}   SL: {item['sl']}   Target: {item['target']}",
+              font=fonts["small"], fill="black")
 
-    draw.text((x+30, y+165), f"Qty: {data.get('qty','-')}", font=fonts["text"], fill=(30,30,30))
-
-    pl = data.get("pl","-")
-    color = (0,150,0) if str(pl).startswith("+") else (200,0,0)
-
-    draw.text((x+180, y+165), f"P/L: {pl}", font=fonts["text"], fill=color)
-    draw.text((x+330, y+165), "5X", font=fonts["text"], fill=(255,170,0))
-
-    # OI TABLE
-    draw.text((x+30, y+210), "Strike   PE Δ | CE Δ", font=fonts["small"], fill=(100,100,100))
-
-    oy = y+235
-    for r in rows[:4]:
-        txt = f"{r['strike']}   {human_format(r['put_oich'])}{arrow(r['put_oich'])} | {human_format(r['call_oich'])}{arrow(r['call_oich'])}"
-        draw.text((x+30, oy), txt, font=fonts["small"], fill=(30,30,30))
-        oy += 22
-
-positions = [(24, 450), (556, 450), (24, 830), (556, 830)]
-
-for item, (x,y) in zip(items[:4], positions):
-    draw_card(draw, x, y, item)
+    draw.text((x+10, y+130),
+              f"Qty: {item['qty']}   P/L: {item['pl']}",
+              font=fonts["small"],
+              fill="#2e7d32" if "+" in str(item["pl"]) else "#c62828")
 
 
 def build_after_market_summary_image():
