@@ -5,7 +5,7 @@ from io import BytesIO
 TELEGRAM_TOKEN = "8619123498:AAGmqno7hYGsDcTjMPpFHKQ-Ps7rvtrHyx0"
 CHAT_ID = 7641895913
 
-def _load_fonts():
+def load_fonts():
     font_candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
