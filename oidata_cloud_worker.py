@@ -250,17 +250,17 @@ def _load_single_font(size, bold=False):
 def _load_fonts():
     return {
         "title": _load_single_font(60, True),
-        "sub": _load_single_font(20, True),
-        "label": _load_single_font(18, True),
-        "value": _load_single_font(26, True),
-        "card_title": _load_single_font(28, True),
-        "card_pct": _load_single_font(22, True),
-        "strategy": _load_single_font(16, True),
-        "value_bold": _load_single_font(16, True),
-        "small": _load_single_font(14, True),
-        "tiny": _load_single_font(12, False),
-        "card": _load_single_font(24, True),
-        "text": _load_single_font(18, True),
+        "sub": _load_single_font(22, True),
+        "label": _load_single_font(20, True),
+        "value": _load_single_font(28, True),
+        "card_title": _load_single_font(30, True),
+        "card_pct": _load_single_font(24, True),
+        "strategy": _load_single_font(18, True),
+        "value_bold": _load_single_font(18, True),
+        "small": _load_single_font(16, True),
+        "tiny": _load_single_font(14, False),
+        "card": _load_single_font(26, True),
+        "text": _load_single_font(20, True),
     }
 
 
@@ -978,14 +978,8 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         draw_after_card(x, y, item)
 
     return _save_image_to_bytes(img, "after_market_dashboard")
-
-
-    
-
-      
     
         
-
     
 
 def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
