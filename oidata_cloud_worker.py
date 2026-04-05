@@ -16,6 +16,15 @@ ACCESS_TOKEN = (os.getenv("ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_DEBUG = (os.getenv("FONT_DEBUG", "true").strip().lower() == "true")
+TELEGRAM_SEND_MODE = (os.getenv("TELEGRAM_SEND_MODE", "document").strip().lower() or "document")
+TELEGRAM_IMAGE_FORMAT = (os.getenv("TELEGRAM_IMAGE_FORMAT", "png").strip().lower() or "png")
+TELEGRAM_JPEG_QUALITY = int(os.getenv("TELEGRAM_JPEG_QUALITY", "95"))
+DASHBOARD_PAGE_SIZE = int(os.getenv("DASHBOARD_PAGE_SIZE", "2"))
+TEXT_IMAGE_WIDTH = int(os.getenv("TEXT_IMAGE_WIDTH", "2000"))
+TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
+
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
@@ -103,6 +112,45 @@ def send(msg: str):
         print(f"Telegram error: {e}")
 
 # ================= HELPERS =================
+
+def _save_image_to_bytes(img, base_name):
+    ext = TELEGRAM_IMAGE_FORMAT.lower().strip()
+    bio = BytesIO()
+    if ext in {"jpeg", "jpg"}:
+        bio.name = f"{base_name}.jpg"
+        img = img.convert("RGB")
+        img.save(
+            bio,
+            format="JPEG",
+            quality=max(1, min(100, TELEGRAM_JPEG_QUALITY)),
+            subsampling=0,
+            optimize=True
+        )
+    else:
+        bio.name = f"{base_name}.png"
+        img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
+
+def send_telegram_image(file_name, img_bytes, caption=""):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+
+    if hasattr(img_bytes, "seek"):
+        img_bytes.seek(0)
+
+    mode = "document" if TELEGRAM_SEND_MODE == "document" else "photo"
+    files_key = "document" if mode == "document" else "photo"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{'sendDocument' if mode == 'document' else 'sendPhoto'}"
+    data = {"chat_id": CHAT_ID}
+    if caption:
+        data["caption"] = caption[:1024]
+
+    ext = TELEGRAM_IMAGE_FORMAT.lower().strip()
+    mime = "image/jpeg" if ext in {"jpeg", "jpg"} else "image/png"
+    requests.post(url, data=data, files={files_key: (file_name, img_bytes, mime)}, timeout=60)
+
 def now_ist():
     return datetime.now(IST)
 
@@ -112,35 +160,60 @@ def now_epoch():
 def log(msg: str):
     print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-def _load_fonts():
-    from PIL import ImageFont
 
-    def load_font(size, bold=False):
+def _font_candidates(bold=False):
+    env_path = os.getenv("FONT_PATH_BOLD" if bold else "FONT_PATH_REGULAR", "").strip()
+    names = ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"] if bold else ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf"]
+    candidates = []
+    if env_path:
+        candidates.append(env_path)
+    for name in names:
+        candidates.append(os.path.join(BASE_DIR, "fonts", name))
+    candidates.extend([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+    ])
+    seen = set()
+    out = []
+    for path in candidates:
+        if path and path not in seen:
+            out.append(path)
+            seen.add(path)
+    return out
+
+
+def _load_single_font(size, bold=False):
+    last_error = ""
+    for path in _font_candidates(bold=bold):
         try:
-            return ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
-        except Exception:
-            return ImageFont.load_default()
+            if os.path.exists(path):
+                font = ImageFont.truetype(path, size)
+                if FONT_DEBUG:
+                    print(f"[FONT] loaded {'bold' if bold else 'regular'} size={size} path={path}", flush=True)
+                return font
+        except Exception as e:
+            last_error = str(e)
+    if FONT_DEBUG:
+        print(f"[FONT] fallback default for {'bold' if bold else 'regular'} size={size} last_error={last_error or 'not found'}", flush=True)
+    return ImageFont.load_default()
 
+
+def _load_fonts():
     return {
-        # Header / top summary
-        "title": load_font(72, True),
-        "sub": load_font(34, True),
-
-        # Stats strip
-        "label": load_font(19, True),
-        "value": load_font(28, True),
-
-        # Card header / body
-        "card_title": load_font(28, True),
-        "card_pct": load_font(24, True),
-        "strategy": load_font(20, True),
-        "value_bold": load_font(18, True),
-        "small": load_font(15, True),
-        "tiny": load_font(12, False),
-
-        # Backward-compatible keys used elsewhere in file
-        "card": load_font(24, True),
-        "text": load_font(18, True),
+        "title": _load_single_font(96, True),
+        "sub": _load_single_font(42, True),
+        "label": _load_single_font(22, True),
+        "value": _load_single_font(32, True),
+        "card_title": _load_single_font(36, True),
+        "card_pct": _load_single_font(30, True),
+        "strategy": _load_single_font(28, True),
+        "value_bold": _load_single_font(26, True),
+        "small": _load_single_font(22, True),
+        "tiny": _load_single_font(18, False),
+        "card": _load_single_font(32, True),
+        "text": _load_single_font(26, True),
     }
 
 
@@ -261,14 +334,10 @@ def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
         draw.text((50, yy), f, font=fonts["text"], fill=dark)
         yy += 32
 
-    bio = BytesIO()
-    bio.name = "rich_summary.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    return _save_image_to_bytes(img, "rich_summary")
 
 
-def _dashboard_pages(items, page_size=4):
+def _dashboard_pages(items, page_size=2):
     items = list(items or [])
     if not items:
         return [[{
@@ -472,11 +541,7 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
     for item, (x, y) in zip(items[:4], positions):
         _draw_dashboard_card(draw, x, y, item, fonts)
 
-    bio = BytesIO()
-    bio.name = f"ultimate_dashboard_p{page_no}.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    return _save_image_to_bytes(img, f"ultimate_dashboard_p{page_no}")
 
 
 def _after_market_cards_from_closed():
@@ -725,20 +790,14 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         draw_after_card(positions[col][0], positions[col][1], item)
         col += 1
 
-    bio = BytesIO()
-    bio.name = "after_market_dashboard.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    return _save_image_to_bytes(img, "after_market_dashboard")
 
 def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
         img_bytes = build_rich_summary_image(items, title=title, subtitle=subtitle)
-        files = {"photo": ("rich_summary.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
     except Exception as e:
         log(f"Rich summary image error: {e}")
 
@@ -747,16 +806,14 @@ def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        pages = _dashboard_pages(items, page_size=4)
+        pages = _dashboard_pages(items, page_size=max(1, DASHBOARD_PAGE_SIZE))
         total_pages = len(pages)
         for idx, page_items in enumerate(pages, 1):
             img_bytes = make_dashboard_image(page_items, title=title, subtitle=subtitle, page_no=idx, total_pages=total_pages)
-            files = {"photo": (f"ultimate_dashboard_p{idx}.png", img_bytes, "image/png")}
             page_caption = caption
             if total_pages > 1:
                 page_caption = f"{caption} ({idx}/{total_pages})" if caption else f"Page {idx}/{total_pages}"
-            data = {"chat_id": CHAT_ID, "caption": page_caption[:1024] if page_caption else ""}
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", data=data, files=files, timeout=60)
+            send_telegram_image(img_bytes.name, img_bytes, caption=page_caption)
     except Exception as e:
         log(f"Dashboard image error: {e}")
 
@@ -771,14 +828,7 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
             subtitle="RESULTS + P/L + STRATEGY OUTCOME",
             analysis_dt=analysis_date_str().upper()
         )
-        files = {"photo": ("after_market_dashboard.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-            data=data,
-            files={"document": files["photo"]},
-            timeout=60
-        )
+        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
     except Exception as e:
         log(f"After market summary image error: {e}")
 
@@ -835,11 +885,7 @@ def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_ti
         draw.text((80, y), txt, font=fonts["small"], fill=text_dark)
         y += 28
 
-    bio = BytesIO()
-    bio.name = "live_trade.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    return _save_image_to_bytes(img, "live_trade")
 
 
 def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
@@ -858,24 +904,12 @@ def send_live_trade_image(trade, ltp=None, status=None, oi_rows=None,
             header_title=header_title,
             reason_text=reason_text
         )
-
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-            data={
-                "chat_id": CHAT_ID,
-                "caption": caption[:1024] if caption else ""
-            },
-            files={"photo": ("dashboard.png", img, "image/png")},
-            timeout=60
-        )
+        send_telegram_image(img.name, img, caption=caption)
     except Exception as e:
         log(f"Image send error: {e}")
-def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24):
+def text_to_image_bytes(text, width=TEXT_IMAGE_WIDTH, padding=40, line_gap=16, font_size=TEXT_IMAGE_FONT_SIZE):
     lines = str(text).split("\n")
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-    except Exception:
-        font = ImageFont.load_default()
+    font = _load_single_font(font_size, bold=False)
 
     dummy = Image.new("RGB", (width, 100), "white")
     draw = ImageDraw.Draw(dummy)
@@ -898,11 +932,7 @@ def text_to_image_bytes(text, width=1200, padding=30, line_gap=12, font_size=24)
         draw.text((padding, y), line, fill="black", font=font)
         y += line_heights[i] + line_gap
 
-    bio = BytesIO()
-    bio.name = "report.png"
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    return _save_image_to_bytes(img, "report")
 
 
 def send_photo_from_text(text, caption=""):
@@ -911,14 +941,7 @@ def send_photo_from_text(text, caption=""):
         return
     try:
         img_bytes = text_to_image_bytes(text)
-        files = {"photo": ("report.png", img_bytes, "image/png")}
-        data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
-            data=data,
-            files={"document": files["photo"]},
-            timeout=60
-        )
+        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
     except Exception as e:
         log(f"Telegram photo error: {e}")
 
@@ -1160,19 +1183,25 @@ def get_reference_symbol():
 
 def get_last_available_session_date():
     ref_symbol = get_reference_symbol()
-    candles = get_history(ref_symbol, 5, 10)
 
-    if not candles:
-        return now_ist().strftime("%Y-%m-%d")
+    for days_back in [10, 20, 40]:
+        candles = get_history(ref_symbol, 5, days_back)
+        if candles:
+            try:
+                ts = int(candles[-1][0])
+                last_dt = candle_dt(ts)
+                return last_dt.strftime("%Y-%m-%d")
+            except Exception as e:
+                log(f"Session date parse error: {e}")
 
-    try:
-        ts = int(candles[-1][0])
-        last_dt = candle_dt(ts)
-        return last_dt.strftime("%Y-%m-%d")
-    except Exception as e:
-        log(f"Session date parse error: {e}")
-        return now_ist().strftime("%Y-%m-%d")
+    d = now_ist().date()
+    for _ in range(10):
+        d = d - timedelta(days=1)
+        dt_obj = datetime(d.year, d.month, d.day, tzinfo=IST)
+        if is_market_day(dt_obj):
+            return d.strftime("%Y-%m-%d")
 
+    return now_ist().strftime("%Y-%m-%d")
 
 def analysis_date_str():
     return get_last_available_session_date()
@@ -1182,20 +1211,19 @@ def log_analysis_date_debug():
     ref_symbol = get_reference_symbol()
     candles = get_history(ref_symbol, 5, 10)
 
+    log(f"Reference symbol: {ref_symbol}")
+
     if candles and isinstance(candles[-1], list) and len(candles[-1]) > 0:
         try:
             ts = int(candles[-1][0])
             last_dt = candle_dt(ts).strftime("%Y-%m-%d %H:%M")
-
-            log(f"Reference symbol: {ref_symbol}")
             log(f"Latest candle from FYERS: {last_dt}")
-            log(f"Analysis date selected: {analysis_date_str()}")
-
         except Exception as e:
             log(f"Debug parse error: {e}")
     else:
-        log(f"Reference symbol: {ref_symbol}")
-        log("No valid candles returned from FYERS")
+        log("No valid candles returned from FYERS for reference symbol")
+
+    log(f"Analysis date selected: {analysis_date_str()}")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
