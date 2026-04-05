@@ -2243,6 +2243,114 @@ def format_pivot_results(items):
     return "\n".join(lines).strip()
 
 
+def chunk_list(items, size):
+    items = list(items or [])
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def build_after_market_cards_for_category(items, category_name):
+    cards = []
+
+    if category_name == "GAPUP PLUS":
+        for x in items:
+            result = str(x.get("result", ""))
+            score = 94 if "Target" in result else 84 if "Stoploss" in result else 88
+            cards.append({
+                "symbol": x.get("symbol", ""),
+                "ltp": x.get("exit_price", ""),
+                "score": score,
+                "strategy": "GAP UP",
+                "side": "SELL",
+                "result": result,
+                "entry": x.get("entry", ""),
+                "stoploss": x.get("stoploss", ""),
+                "target": x.get("target", ""),
+                "qty": "-",
+                "pl": f"{safe_float(x.get('pl', 0.0), 0.0):+}",
+                "pnl_value": safe_float(x.get("pl", 0.0), 0.0),
+                "oi_rows": []
+            })
+
+    elif category_name == "15 MIN INSIDE":
+        for x in items:
+            for side_key, side_name in [("buy", "BUY"), ("sell", "SELL")]:
+                side = x.get(side_key, {}) or {}
+                result = str(side.get("result", ""))
+                score = 96 if "Target" in result else 84 if "Stoploss" in result else 89
+                cards.append({
+                    "symbol": x.get("symbol", ""),
+                    "ltp": side.get("exit_price", ""),
+                    "score": score,
+                    "strategy": "15M INSIDE",
+                    "side": side_name,
+                    "result": result,
+                    "entry": side.get("entry", ""),
+                    "stoploss": side.get("stoploss", ""),
+                    "target": side.get("target", ""),
+                    "qty": "-",
+                    "pl": f"{safe_float(side.get('pl', 0.0), 0.0):+}",
+                    "pnl_value": safe_float(side.get("pl", 0.0), 0.0),
+                    "oi_rows": []
+                })
+
+    elif category_name == "PIVOT":
+        for x in items:
+            result = str(x.get("result", ""))
+            score = 92 if "Target" in result else 83 if "Stoploss" in result else 87
+            cards.append({
+                "symbol": x.get("symbol", ""),
+                "ltp": x.get("exit_price", ""),
+                "score": score,
+                "strategy": f"PIVOT {x.get('pivot_name', '')}",
+                "side": "SELL",
+                "result": result,
+                "entry": x.get("entry", ""),
+                "stoploss": x.get("stoploss", ""),
+                "target": x.get("target", ""),
+                "qty": "-",
+                "pl": f"{safe_float(x.get('pl', 0.0), 0.0):+}",
+                "pnl_value": safe_float(x.get("pl", 0.0), 0.0),
+                "oi_rows": []
+            })
+
+    cards.sort(key=lambda z: safe_float(z.get("score", 0), 0), reverse=True)
+    return cards
+
+
+def send_after_market_category_images(items, category_name, per_image=8):
+    if not items:
+        log(f"No after-market items for {category_name}")
+        return
+
+    cards = build_after_market_cards_for_category(items, category_name)
+    pages = list(chunk_list(cards, per_image))
+
+    for idx, page_cards in enumerate(pages, 1):
+        caption = f"After Market Summary • {category_name}"
+        if len(pages) > 1:
+            caption += f" ({idx}/{len(pages)})"
+
+        try:
+            img_bytes = build_after_market_summary_image(
+                page_cards,
+                title="STOCKS TO WATCH",
+                subtitle=f"AFTER MARKET SUMMARY • {category_name}",
+                analysis_dt=analysis_date_str().upper()
+            )
+            files = {"photo": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
+            data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                data=data,
+                files=files,
+                timeout=60
+            )
+            log(f"Sent after-market {category_name} image {idx}/{len(pages)}")
+        except Exception as e:
+            log(f"After-market {category_name} image send error: {e}")
+
+
 def run_after_market_once():
     send("📡 Running after-market scan...")
 
@@ -2272,7 +2380,6 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    # ONLY separate images
     send_after_market_category_images(gap_items, "GAPUP PLUS")
     send_after_market_category_images(inside_items, "15 MIN INSIDE")
     send_after_market_category_images(pivot_items, "PIVOT")
