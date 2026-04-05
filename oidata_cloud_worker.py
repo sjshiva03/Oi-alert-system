@@ -586,8 +586,8 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     fonts = _load_fonts()
 
     W = 1800
-    HEADER_H = 160
-    STATS_H = 120
+    HEADER_H = 120
+    STATS_H = 100
     RANK_H = 90
     CARD_H = 320
     GAP = 20
