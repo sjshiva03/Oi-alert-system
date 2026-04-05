@@ -142,7 +142,7 @@ def send_telegram_image(file_name, img_bytes, caption=""):
 
     mode = "document" if TELEGRAM_SEND_MODE == "document" else "photo"
     files_key = "document" if mode == "document" else "photo"
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{'sendDocument' if mode == 'document' else 'sendPhoto'}"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{'sendPhoto' if mode == 'document' else 'sendPhoto'}"
     data = {"chat_id": CHAT_ID}
     if caption:
         data["caption"] = caption[:1024]
