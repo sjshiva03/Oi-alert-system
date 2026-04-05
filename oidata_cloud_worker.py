@@ -136,6 +136,23 @@ def send(msg: str):
 
 # ================= HELPERS =================
 
+# =========================
+# FORMAT HELPERS (ADD HERE)
+# =========================
+
+def _fmt_ltp(val):
+    try:
+        return f"{float(val):.2f}"
+    except:
+        return str(val)
+
+def _fmt_pct(val):
+    try:
+        return f"{float(val):+.2f}%"
+    except:
+        return str(val)
+
+
 def _save_image_to_bytes(img, base_name):
     ext = TELEGRAM_IMAGE_FORMAT.lower().strip()
     bio = BytesIO()
