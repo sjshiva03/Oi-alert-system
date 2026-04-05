@@ -650,9 +650,9 @@ def build_after_market_summary_image(cards=None, title="STOCKS TO WATCH", subtit
     def soft_color(side):
         return soft_green if str(side).upper() == "BUY" else soft_red
 
-    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=8)
-    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=8)
-    send_after_market_category_images(pivot_items, "PIVOT", per_image=8)
+                send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=8)
+                send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=8)
+                send_after_market_category_images(pivot_items, "PIVOT", per_image=8)
             else:
             draw.text((x + 24, oy), "No OI rows", font=fonts["tiny"], fill=muted)
 
