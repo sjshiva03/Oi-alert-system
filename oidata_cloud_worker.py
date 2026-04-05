@@ -8,6 +8,26 @@ from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from bs4 import BeautifulSoup
 
+# =========================
+# COLORS (ADD THIS BLOCK)
+# =========================
+
+BG_COLOR     = (245, 245, 245)
+WHITE        = (255, 255, 255)
+BLACK        = (0, 0, 0)
+
+GREEN        = (46, 204, 113)
+DARK_GREEN   = (0, 150, 80)
+
+RED          = (231, 76, 60)
+DARK_RED     = (180, 40, 40)
+
+SOFT_GREEN   = (220, 245, 230)
+SOFT_RED     = (250, 220, 220)
+SOFT_GRAY    = (235, 235, 235)
+
+BORDER       = (200, 200, 200)
+
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
