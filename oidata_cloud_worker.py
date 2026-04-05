@@ -115,12 +115,12 @@ def log(msg: str):
 def _load_fonts():
     try:
         return {
-            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 54),
-            "sub": ImageFont.truetype("DejaVuSans-Bold.ttf", 30),
-            "card": ImageFont.truetype("DejaVuSans-Bold.ttf", 28),
-            "text": ImageFont.truetype("DejaVuSans.ttf", 23),
-            "small": ImageFont.truetype("DejaVuSans.ttf", 20),
-            "tiny": ImageFont.truetype("DejaVuSans.ttf", 18),
+            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 44),
+            "sub": ImageFont.truetype("DejaVuSans-Bold.ttf", 24),
+            "card": ImageFont.truetype("DejaVuSans-Bold.ttf", 22),
+            "text": ImageFont.truetype("DejaVuSans.ttf", 16),
+            "small": ImageFont.truetype("DejaVuSans.ttf", 14),
+            "tiny": ImageFont.truetype("DejaVuSans.ttf", 11),
         }
     except Exception:
         f = ImageFont.load_default()
@@ -567,12 +567,12 @@ def build_after_market_summary_image(cards=None, title="STOCKS TO WATCH", subtit
     cards = list(cards or _after_market_cards_from_closed())
     fonts = _load_fonts()
     W = 1080
-    HEADER_H = 120
-    STATS_H = 90
-    RANK_H = 70
-    CARD_H = 355
-    GAP = 20
-    PAD = 24
+   HEADER_H = 105
+    STATS_H = 78
+    RANK_H = 60
+    CARD_H = 235
+    GAP = 14
+    PAD = 20
 
     total_rows = max(1, math.ceil(len(cards) / 2))
     H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + (total_rows * (CARD_H + GAP)) + 40
@@ -650,53 +650,10 @@ def build_after_market_summary_image(cards=None, title="STOCKS TO WATCH", subtit
     def soft_color(side):
         return soft_green if str(side).upper() == "BUY" else soft_red
 
-    def draw_after_card(x, y, item):
-        side = str(item.get("side", "SELL")).upper()
-        result = str(item.get("result", ""))
-        strategy = str(item.get("strategy", ""))
-        symbol = str(item.get("symbol", ""))
-        ltp = item.get("ltp", "")
-        score = int(safe_float(item.get("score", 0), 0))
-        entry = item.get("entry", "")
-        slv = item.get("stoploss", "")
-        tgtv = item.get("target", "")
-        qty = item.get("qty", "")
-        pl_txt = item.get("pl", "")
-        oi_rows = item.get("oi_rows", []) or []
-
-        draw_rounded_rect(draw, (x, y, x + 500, y + CARD_H), 24, white, outline=border, width=2)
-        draw_rounded_rect(draw, (x + 14, y + 14, x + 486, y + 62), 16, header_color(side))
-
-        title_txt = f"{symbol}-{ltp}" if ltp not in ("", None) else symbol
-        draw.text((x + 28, y + 24), title_txt, font=fonts["card"], fill=white)
-        draw.text((x + 390, y + 24), f"{score}%", font=fonts["card"], fill=white)
-
-        draw_rounded_rect(draw, (x + 14, y + 78, x + 486, y + 120), 12, soft_color(side))
-        line2 = f"{strategy} • {side} • {result}" if strategy else f"{side} • {result}"
-        draw.text((x + 24, y + 88), line2, font=fonts["text"], fill=result_color(result))
-
-        draw.text((x + 24, y + 138), f"Entry: {entry}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 170, y + 138), f"SL: {slv}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 300, y + 138), f"Target: {tgtv}", font=fonts["text"], fill=text_dark)
-
-        draw.text((x + 24, y + 172), f"Qty: {qty if str(qty).strip() else '-'}", font=fonts["text"], fill=text_dark)
-        draw.text((x + 170, y + 172), f"P/L: {pl_txt}", font=fonts["text"],
-                  fill=(pnl_green if str(pl_txt).startswith("+") else pnl_red if str(pl_txt).startswith("-") else muted))
-        lev_txt = f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X"
-        draw.text((x + 330, y + 172), lev_txt, font=fonts["text"], fill=amber)
-
-        draw.text((x + 24, y + 225), "Strike    PE OI    PE Chg   |   CE OI    CE Chg", font=fonts["tiny"], fill=muted)
-        oy = y + 252
-        if oi_rows:
-            for r in oi_rows[:5]:
-                row = (
-                    f"{r.get('strike', ''):<7}  "
-                    f"{human_format(r.get('put_oi', 0)):<6}  {human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0)):<2}   |   "
-                    f"{human_format(r.get('call_oi', 0)):<6}  {human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}"
-                )
-                draw.text((x + 24, oy), row, font=fonts["tiny"], fill=text_dark)
-                oy += 22
-        else:
+    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=8)
+    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=8)
+    send_after_market_category_images(pivot_items, "PIVOT", per_image=8)
+            else:
             draw.text((x + 24, oy), "No OI rows", font=fonts["tiny"], fill=muted)
 
     start_y = y_rank + RANK_H + GAP
