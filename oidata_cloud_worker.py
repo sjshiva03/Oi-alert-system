@@ -122,23 +122,25 @@ def _load_fonts():
             return ImageFont.load_default()
 
     return {
-        "title": load_font(62, True),
-        "sub": load_font(30, True),
+        # Header / top summary
+        "title": load_font(72, True),
+        "sub": load_font(34, True),
 
-        "label": load_font(17, True),
-        "value": load_font(24, True),
+        # Stats strip
+        "label": load_font(19, True),
+        "value": load_font(28, True),
 
-        "card_title": load_font(26, True),
-        "card_pct": load_font(22, True),
-        "strategy": load_font(18, True),
-
-        "value_bold": load_font(16, True),
-        "small": load_font(13, False),
-        "tiny": load_font(11, False),
+        # Card header / body
+        "card_title": load_font(28, True),
+        "card_pct": load_font(24, True),
+        "strategy": load_font(20, True),
+        "value_bold": load_font(18, True),
+        "small": load_font(15, True),
+        "tiny": load_font(12, False),
 
         # Backward-compatible keys used elsewhere in file
-        "card": load_font(22, True),
-        "text": load_font(16, False),
+        "card": load_font(24, True),
+        "text": load_font(18, True),
     }
 
 
@@ -582,10 +584,10 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     fonts = _load_fonts()
 
     W = 1080
-    HEADER_H = 118
-    STATS_H = 84
-    RANK_H = 66
-    CARD_H = 246
+    HEADER_H = 126
+    STATS_H = 88
+    RANK_H = 68
+    CARD_H = 254
     GAP = 14
     PAD = 20
 
@@ -611,12 +613,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     light_strip = (243, 245, 248)
 
     draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
-    draw.text((PAD + 16, PAD + 8), title, font=fonts["title"], fill=white)
-    draw.text((PAD + 18, PAD + 66), subtitle, font=fonts["sub"], fill=white)
+    draw.text((PAD + 16, PAD + 6), title, font=fonts["title"], fill=white)
+    draw.text((PAD + 18, PAD + 72), subtitle, font=fonts["sub"], fill=white)
 
     right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
     rw, _ = _text_size(draw, right_txt, fonts["sub"])
-    draw.text((W - PAD - rw - 18, PAD + 64), right_txt, font=fonts["sub"], fill=white)
+    draw.text((W - PAD - rw - 18, PAD + 70), right_txt, font=fonts["sub"], fill=white)
 
     y_stats = PAD + HEADER_H + GAP
     draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
@@ -641,12 +643,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     for idx, (label, value) in enumerate(stats):
         draw.text((sx, y_stats + 10), label, font=fonts["label"], fill=(198, 208, 223))
         val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 38), value, font=fonts["value"], fill=val_color)
+        draw.text((sx, y_stats + 40), value, font=fonts["value"], fill=val_color)
         sx += 145 if idx < 5 else 170
 
     y_rank = y_stats + STATS_H + GAP
     draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=18, fill=white, outline=border, width=2)
-    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["strategy"], fill=text_dark)
+    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["value_bold"], fill=text_dark)
     draw.text((PAD + 16, y_rank + 37), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
 
     ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
@@ -655,7 +657,7 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
         txt = f"{i}) {c.get('symbol', '')} {pnl_txt}"
         fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
-        draw.text((rx, y_rank + 12), txt, font=fonts["strategy"], fill=fill)
+        draw.text((rx, y_rank + 10), txt, font=fonts["value_bold"], fill=fill)
         rx += 240
 
     def result_color(result_text):
@@ -689,12 +691,12 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         draw.rounded_rectangle((x, y, x + 500, y + CARD_H), radius=22, fill=white, outline=border, width=2)
         draw.rounded_rectangle((x + 12, y + 12, x + 488, y + 48), radius=14, fill=header_color(side))
         title_txt = f"{symbol}-{ltp}" if ltp not in ("", None) else symbol
-        draw.text((x + 20, y + 14), title_txt, font=fonts["card_title"], fill=white)
-        draw.text((x + 388, y + 14), f"{score}%", font=fonts["card_pct"], fill=white)
+        draw.text((x + 20, y + 12), title_txt, font=fonts["card_title"], fill=white)
+        draw.text((x + 388, y + 12), f"{score}%", font=fonts["card_pct"], fill=white)
 
         draw.rounded_rectangle((x + 12, y + 58, x + 488, y + 94), radius=10, fill=soft_color(side))
         line2 = f"{strategy} • {side} • {result}"
-        draw.text((x + 20, y + 67), line2, font=fonts["strategy"], fill=result_color(result))
+        draw.text((x + 20, y + 66), line2, font=fonts["strategy"], fill=result_color(result))
 
         draw.text((x + 20, y + 110), f"Entry:{entry}", font=fonts["value_bold"], fill=text_dark)
         draw.text((x + 150, y + 110), f"SL:{slv}", font=fonts["value_bold"], fill=text_dark)
@@ -2261,23 +2263,40 @@ def chunk_list(items, size):
 def build_after_market_cards_for_category(items, category_name):
     cards = []
 
+    def make_qty_and_pnl(entry, stoploss, exit_price, side):
+        entry_v = safe_float(entry, 0.0)
+        stop_v = safe_float(stoploss, 0.0)
+        exit_v = safe_float(exit_price, 0.0)
+        qty, _, _, _ = calc_position(entry_v, stop_v)
+        if qty <= 0:
+            qty = 0
+        if str(side).upper() == "BUY":
+            pnl = (exit_v - entry_v) * qty
+        else:
+            pnl = (entry_v - exit_v) * qty
+        return qty, round(pnl, 2)
+
     if category_name == "GAPUP PLUS":
         for x in items:
             result = str(x.get("result", ""))
+            entry = x.get("entry", "")
+            stoploss = x.get("stoploss", "")
+            exit_price = x.get("exit_price", "")
+            qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "SELL")
             score = 94 if "Target" in result else 84 if "Stoploss" in result else 88
             cards.append({
                 "symbol": x.get("symbol", ""),
-                "ltp": x.get("exit_price", ""),
+                "ltp": exit_price,
                 "score": score,
                 "strategy": "GAP UP",
                 "side": "SELL",
                 "result": result,
-                "entry": x.get("entry", ""),
-                "stoploss": x.get("stoploss", ""),
+                "entry": entry,
+                "stoploss": stoploss,
                 "target": x.get("target", ""),
-                "qty": "-",
-                "pl": f"{safe_float(x.get('pl', 0.0), 0.0):+}",
-                "pnl_value": safe_float(x.get("pl", 0.0), 0.0),
+                "qty": qty,
+                "pl": f"{pnl:+,.0f}",
+                "pnl_value": pnl,
                 "oi_rows": []
             })
 
@@ -2286,40 +2305,48 @@ def build_after_market_cards_for_category(items, category_name):
             for side_key, side_name in [("buy", "BUY"), ("sell", "SELL")]:
                 side = x.get(side_key, {}) or {}
                 result = str(side.get("result", ""))
+                entry = side.get("entry", "")
+                stoploss = side.get("stoploss", "")
+                exit_price = side.get("exit_price", "")
+                qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, side_name)
                 score = 96 if "Target" in result else 84 if "Stoploss" in result else 89
                 cards.append({
                     "symbol": x.get("symbol", ""),
-                    "ltp": side.get("exit_price", ""),
+                    "ltp": exit_price,
                     "score": score,
                     "strategy": "15M INSIDE",
                     "side": side_name,
                     "result": result,
-                    "entry": side.get("entry", ""),
-                    "stoploss": side.get("stoploss", ""),
+                    "entry": entry,
+                    "stoploss": stoploss,
                     "target": side.get("target", ""),
-                    "qty": "-",
-                    "pl": f"{safe_float(side.get('pl', 0.0), 0.0):+}",
-                    "pnl_value": safe_float(side.get("pl", 0.0), 0.0),
+                    "qty": qty,
+                    "pl": f"{pnl:+,.0f}",
+                    "pnl_value": pnl,
                     "oi_rows": []
                 })
 
     elif category_name == "PIVOT":
         for x in items:
             result = str(x.get("result", ""))
+            entry = x.get("entry", "")
+            stoploss = x.get("stoploss", "")
+            exit_price = x.get("exit_price", "")
+            qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "SELL")
             score = 92 if "Target" in result else 83 if "Stoploss" in result else 87
             cards.append({
                 "symbol": x.get("symbol", ""),
-                "ltp": x.get("exit_price", ""),
+                "ltp": exit_price,
                 "score": score,
                 "strategy": f"PIVOT {x.get('pivot_name', '')}",
                 "side": "SELL",
                 "result": result,
-                "entry": x.get("entry", ""),
-                "stoploss": x.get("stoploss", ""),
+                "entry": entry,
+                "stoploss": stoploss,
                 "target": x.get("target", ""),
-                "qty": "-",
-                "pl": f"{safe_float(x.get('pl', 0.0), 0.0):+}",
-                "pnl_value": safe_float(x.get("pl", 0.0), 0.0),
+                "qty": qty,
+                "pl": f"{pnl:+,.0f}",
+                "pnl_value": pnl,
                 "oi_rows": []
             })
 
