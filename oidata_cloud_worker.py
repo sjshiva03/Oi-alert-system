@@ -7,6 +7,10 @@ from fyers_apiv3 import fyersModel
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from bs4 import BeautifulSoup
+try:
+    from twilio.rest import Client as TwilioClient
+except Exception:
+    TwilioClient = None
 
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -15,6 +19,11 @@ CLIENT_ID = (os.getenv("CLIENT_ID") or "").strip()
 ACCESS_TOKEN = (os.getenv("ACCESS_TOKEN") or "").strip()
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
+
+TWILIO_ACCOUNT_SID = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+TWILIO_WHATSAPP_FROM = (os.getenv("TWILIO_WHATSAPP_FROM") or "").strip()
+TWILIO_WHATSAPP_TO = (os.getenv("TWILIO_WHATSAPP_TO") or "").strip()
 
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
@@ -89,18 +98,40 @@ last_alert_time = {}
 pivot_scan_done_keys = set()
 
 # ================= TELEGRAM SEND =================
-def send(msg: str):
-    print(msg, flush=True)
-    if not TELEGRAM_TOKEN or not CHAT_ID:
+def send_whatsapp_alert(msg: str):
+    if not msg:
+        return
+    if TwilioClient is None:
+        print("Twilio client not installed", flush=True)
+        return
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM, TWILIO_WHATSAPP_TO]):
         return
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=30
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        message = client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=TWILIO_WHATSAPP_TO,
+            body=str(msg)[:1500]
         )
+        print(f"Twilio WhatsApp sent: {message.sid}", flush=True)
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Twilio WhatsApp error: {e}", flush=True)
+
+
+def send(msg: str):
+    print(msg, flush=True)
+
+    if TELEGRAM_TOKEN and CHAT_ID:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                data={"chat_id": CHAT_ID, "text": msg},
+                timeout=30
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}", flush=True)
+
+    send_whatsapp_alert(msg)
 
 # ================= HELPERS =================
 def now_ist():
@@ -113,35 +144,18 @@ def log(msg: str):
     print(f"[{now_ist().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def _load_fonts():
-    from PIL import ImageFont
-
-    def load_font(size, bold=False):
-        try:
-            return ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
-        except Exception:
-            return ImageFont.load_default()
-
-    return {
-        # Header / top summary
-        "title": load_font(72, True),
-        "sub": load_font(34, True),
-
-        # Stats strip
-        "label": load_font(19, True),
-        "value": load_font(28, True),
-
-        # Card header / body
-        "card_title": load_font(28, True),
-        "card_pct": load_font(24, True),
-        "strategy": load_font(20, True),
-        "value_bold": load_font(18, True),
-        "small": load_font(15, True),
-        "tiny": load_font(12, False),
-
-        # Backward-compatible keys used elsewhere in file
-        "card": load_font(24, True),
-        "text": load_font(18, True),
-    }
+    try:
+        return {
+            "title": ImageFont.truetype("DejaVuSans-Bold.ttf", 44),
+            "sub": ImageFont.truetype("DejaVuSans-Bold.ttf", 24),
+            "card": ImageFont.truetype("DejaVuSans-Bold.ttf", 22),
+            "text": ImageFont.truetype("DejaVuSans.ttf", 16),
+            "small": ImageFont.truetype("DejaVuSans.ttf", 14),
+            "tiny": ImageFont.truetype("DejaVuSans.ttf", 11),
+        }
+    except Exception:
+        f = ImageFont.load_default()
+        return {"title": f, "sub": f, "card": f, "text": f, "small": f, "tiny": f}
 
 
 def _text_size(draw, value, font):
@@ -580,85 +594,85 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
     cards.sort(key=lambda z: safe_float(z.get("score", 0), 0), reverse=True)
     return cards
 
-def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + STRATEGY OUTCOME", analysis_dt=""):
+def _load_font(cards, title="STOCKS TO WATCH", subtitle="AFTER MARKET SUMMARY", analysis_dt=""):
     fonts = _load_fonts()
 
+    # compact layout for 8 stocks (2 columns x 4 rows)
     W = 1080
-    HEADER_H = 126
-    STATS_H = 88
-    RANK_H = 68
-    CARD_H = 254
+    HEADER_H = 105
+    STATS_H = 78
+    RANK_H = 60
+    CARD_H = 235
     GAP = 14
     PAD = 20
 
     total_rows = max(1, math.ceil(len(cards) / 2))
     H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + (total_rows * (CARD_H + GAP)) + 30
 
-    img = Image.new("RGB", (W, H), (243, 246, 250))
+    img = Image.new("RGB", (W, H), (244, 247, 252))
     draw = ImageDraw.Draw(img)
 
-    red_header = (236, 52, 46)
-    dark_panel = (25, 39, 60)
+    # colors
+    red_header = (235, 51, 45)
+    dark_panel = (28, 40, 58)
     white = (255, 255, 255)
-    border = (220, 226, 233)
-    text_dark = (30, 37, 46)
-    muted = (118, 126, 138)
-    buy_green = (46, 189, 132)
-    sell_red = (238, 83, 83)
-    soft_green = (228, 243, 235)
+    border = (225, 230, 236)
+    text_dark = (30, 36, 44)
+    muted = (110, 120, 130)
+    buy_green = (40, 184, 120)
+    sell_red = (235, 70, 80)
+    soft_green = (230, 244, 236)
     soft_red = (248, 232, 233)
-    pnl_green = (21, 150, 92)
-    pnl_red = (210, 60, 60)
-    amber = (231, 181, 20)
-    light_strip = (243, 245, 248)
+    pnl_green = (16, 145, 85)
+    pnl_red = (211, 47, 47)
+    amber = (228, 179, 18)
 
-    draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
-    draw.text((PAD + 16, PAD + 6), title, font=fonts["title"], fill=white)
-    draw.text((PAD + 18, PAD + 72), subtitle, font=fonts["sub"], fill=white)
+    # header
+    draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=28, fill=red_header)
+    draw.text((PAD + 18, PAD + 12), title, font=fonts["title"], fill=white)
+    draw.text((PAD + 18, PAD + 56), subtitle, font=fonts["sub"], fill=white)
 
     right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
     rw, _ = _text_size(draw, right_txt, fonts["sub"])
-    draw.text((W - PAD - rw - 18, PAD + 70), right_txt, font=fonts["sub"], fill=white)
+    draw.text((W - PAD - rw - 18, PAD + 48), right_txt, font=fonts["sub"], fill=white)
 
+    # stats
     y_stats = PAD + HEADER_H + GAP
-    draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
+    draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=22, fill=dark_panel)
 
     total_watch = len(cards)
     tgt = sum(1 for c in cards if "TARGET" in str(c.get("result", "")).upper())
     sl = sum(1 for c in cards if "STOPLOSS" in str(c.get("result", "")).upper())
     exit_n = sum(1 for c in cards if any(x in str(c.get("result", "")).upper() for x in ["EXIT", "DAY END", "NO ENTRY"]))
     net_pnl = round(sum(safe_float(c.get("pnl_value", 0.0), 0.0) for c in cards), 2)
-    win_pct = round((tgt / total_watch) * 100, 1) if total_watch else 0.0
 
     stats = [
-        ("Trades", str(total_watch)),
+        ("Watch", str(total_watch)),
         ("Target", str(tgt)),
-        ("SL", str(sl)),
+        ("Stoploss", str(sl)),
         ("Exit", str(exit_n)),
-        ("Win %", f"{win_pct}%"),
         ("Net P/L", f"₹{net_pnl:+,.0f}")
     ]
 
-    sx = PAD + 18
-    for idx, (label, value) in enumerate(stats):
-        draw.text((sx, y_stats + 10), label, font=fonts["label"], fill=(198, 208, 223))
-        val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 40), value, font=fonts["value"], fill=val_color)
-        sx += 145 if idx < 5 else 170
+    sx = PAD + 20
+    for label, value in stats:
+        draw.text((sx, y_stats + 12), label, font=fonts["small"], fill=(196, 208, 221))
+        col = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
+        draw.text((sx, y_stats + 38), value, font=fonts["card"], fill=col)
+        sx += 185
 
+    # ranked
     y_rank = y_stats + STATS_H + GAP
     draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=18, fill=white, outline=border, width=2)
-    draw.text((PAD + 16, y_rank + 8), "TOP PERFORMERS", font=fonts["value_bold"], fill=text_dark)
-    draw.text((PAD + 16, y_rank + 37), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
+    draw.text((PAD + 16, y_rank + 11), "TOP RANKED SETUPS", font=fonts["small"], fill=text_dark)
 
-    ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
-    rx = PAD + 290
+    ranked = sorted(cards, key=lambda x: safe_float(x.get("score", 0), 0), reverse=True)[:3]
+    rx = PAD + 300
     for i, c in enumerate(ranked, 1):
-        pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
-        txt = f"{i}) {c.get('symbol', '')} {pnl_txt}"
-        fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
-        draw.text((rx, y_rank + 10), txt, font=fonts["value_bold"], fill=fill)
-        rx += 240
+        txt = f"{i}) {c.get('symbol', '')} {int(safe_float(c.get('score', 0), 0))}%"
+        fill = (30, 150, 90) if i != 2 else (210, 70, 70)
+        draw.text((rx, y_rank + 14), txt, font=fonts["small"], fill=fill)
+        rx += 210
 
     def result_color(result_text):
         rt = str(result_text).upper()
@@ -686,30 +700,35 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
         tgtv = item.get("target", "")
         qty = item.get("qty", "")
         pl_txt = item.get("pl", "")
-        pnl_val = safe_float(item.get("pnl_value", 0.0), 0.0)
 
         draw.rounded_rectangle((x, y, x + 500, y + CARD_H), radius=22, fill=white, outline=border, width=2)
         draw.rounded_rectangle((x + 12, y + 12, x + 488, y + 48), radius=14, fill=header_color(side))
+
         title_txt = f"{symbol}-{ltp}" if ltp not in ("", None) else symbol
-        draw.text((x + 20, y + 12), title_txt, font=fonts["card_title"], fill=white)
-        draw.text((x + 388, y + 12), f"{score}%", font=fonts["card_pct"], fill=white)
+        draw.text((x + 24, y + 18), title_txt, font=fonts["card"], fill=white)
+        draw.text((x + 390, y + 18), f"{score}%", font=fonts["card"], fill=white)
 
-        draw.rounded_rectangle((x + 12, y + 58, x + 488, y + 94), radius=10, fill=soft_color(side))
+        draw.rounded_rectangle((x + 12, y + 58, x + 488, y + 92), radius=10, fill=soft_color(side))
         line2 = f"{strategy} • {side} • {result}"
-        draw.text((x + 20, y + 66), line2, font=fonts["strategy"], fill=result_color(result))
+        draw.text((x + 22, y + 66), line2, font=fonts["text"], fill=result_color(result))
 
-        draw.text((x + 20, y + 110), f"Entry:{entry}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 150, y + 110), f"SL:{slv}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 272, y + 110), f"Target:{tgtv}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 22, y + 106), f"Entry:{entry}", font=fonts["text"], fill=text_dark)
+        draw.text((x + 155, y + 106), f"SL:{slv}", font=fonts["text"], fill=text_dark)
+        draw.text((x + 275, y + 106), f"Target:{tgtv}", font=fonts["text"], fill=text_dark)
 
-        draw.text((x + 20, y + 143), f"Qty:{qty}", font=fonts["value_bold"], fill=text_dark)
-        draw.text((x + 140, y + 143), f"P/L:{pl_txt}", font=fonts["value_bold"], fill=(pnl_green if pnl_val >= 0 else pnl_red))
-        draw.text((x + 305, y + 143), f"{int(LEVERAGE)}X", font=fonts["strategy"], fill=amber)
+        draw.text((x + 22, y + 138), f"Qty:{qty}", font=fonts["text"], fill=text_dark)
+        draw.text(
+            (x + 145, y + 138),
+            f"P/L:{pl_txt}",
+            font=fonts["text"],
+            fill=(pnl_green if str(pl_txt).startswith("+") else pnl_red if str(pl_txt).startswith("-") else muted)
+        )
+        draw.text((x + 315, y + 138), f"{int(LEVERAGE)}X", font=fonts["text"], fill=amber)
 
-        draw.rounded_rectangle((x + 12, y + 184, x + 488, y + 222), radius=10, fill=light_strip)
-        draw.text((x + 20, y + 191), "Exit Type", font=fonts["label"], fill=muted)
-        draw.text((x + 132, y + 191), result.upper(), font=fonts["label"], fill=result_color(result))
-        draw.text((x + 20, y + 208), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
+        draw.rounded_rectangle((x + 12, y + 176, x + 488, y + 214), radius=10, fill=(242, 243, 246))
+        draw.text((x + 22, y + 184), "Exit Type", font=fonts["small"], fill=muted)
+        draw.text((x + 145, y + 184), result.upper(), font=fonts["small"], fill=result_color(result))
+        draw.text((x + 22, y + 202), "Realized result recorded in after-market book", font=fonts["tiny"], fill=text_dark)
 
     start_y = y_rank + RANK_H + GAP
     current_y = start_y
@@ -767,16 +786,16 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
     try:
         img_bytes = _load_font(
             cards=cards,
-            title="AFTER MARKET SUMMARY",
-            subtitle="RESULTS + P/L + STRATEGY OUTCOME",
+            title="STOCKS TO WATCH",
+            subtitle="AFTER MARKET SUMMARY",
             analysis_dt=analysis_date_str().upper()
         )
         files = {"photo": ("after_market_dashboard.png", img_bytes, "image/png")}
         data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
         requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
             data=data,
-            files={"document": files["photo"]},
+            files=files,
             timeout=60
         )
     except Exception as e:
@@ -914,9 +933,9 @@ def send_photo_from_text(text, caption=""):
         files = {"photo": ("report.png", img_bytes, "image/png")}
         data = {"chat_id": CHAT_ID, "caption": caption[:1024] if caption else ""}
         requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
             data=data,
-            files={"document": files["photo"]},
+            files=files,
             timeout=60
         )
     except Exception as e:
@@ -2263,40 +2282,23 @@ def chunk_list(items, size):
 def build_after_market_cards_for_category(items, category_name):
     cards = []
 
-    def make_qty_and_pnl(entry, stoploss, exit_price, side):
-        entry_v = safe_float(entry, 0.0)
-        stop_v = safe_float(stoploss, 0.0)
-        exit_v = safe_float(exit_price, 0.0)
-        qty, _, _, _ = calc_position(entry_v, stop_v)
-        if qty <= 0:
-            qty = 0
-        if str(side).upper() == "BUY":
-            pnl = (exit_v - entry_v) * qty
-        else:
-            pnl = (entry_v - exit_v) * qty
-        return qty, round(pnl, 2)
-
     if category_name == "GAPUP PLUS":
         for x in items:
             result = str(x.get("result", ""))
-            entry = x.get("entry", "")
-            stoploss = x.get("stoploss", "")
-            exit_price = x.get("exit_price", "")
-            qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "SELL")
             score = 94 if "Target" in result else 84 if "Stoploss" in result else 88
             cards.append({
                 "symbol": x.get("symbol", ""),
-                "ltp": exit_price,
+                "ltp": x.get("exit_price", ""),
                 "score": score,
                 "strategy": "GAP UP",
                 "side": "SELL",
                 "result": result,
-                "entry": entry,
-                "stoploss": stoploss,
+                "entry": x.get("entry", ""),
+                "stoploss": x.get("stoploss", ""),
                 "target": x.get("target", ""),
-                "qty": qty,
-                "pl": f"{pnl:+,.0f}",
-                "pnl_value": pnl,
+                "qty": "-",
+                "pl": f"{safe_float(x.get('pl', 0.0), 0.0):+}",
+                "pnl_value": safe_float(x.get("pl", 0.0), 0.0),
                 "oi_rows": []
             })
 
@@ -2305,48 +2307,40 @@ def build_after_market_cards_for_category(items, category_name):
             for side_key, side_name in [("buy", "BUY"), ("sell", "SELL")]:
                 side = x.get(side_key, {}) or {}
                 result = str(side.get("result", ""))
-                entry = side.get("entry", "")
-                stoploss = side.get("stoploss", "")
-                exit_price = side.get("exit_price", "")
-                qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, side_name)
                 score = 96 if "Target" in result else 84 if "Stoploss" in result else 89
                 cards.append({
                     "symbol": x.get("symbol", ""),
-                    "ltp": exit_price,
+                    "ltp": side.get("exit_price", ""),
                     "score": score,
                     "strategy": "15M INSIDE",
                     "side": side_name,
                     "result": result,
-                    "entry": entry,
-                    "stoploss": stoploss,
+                    "entry": side.get("entry", ""),
+                    "stoploss": side.get("stoploss", ""),
                     "target": side.get("target", ""),
-                    "qty": qty,
-                    "pl": f"{pnl:+,.0f}",
-                    "pnl_value": pnl,
+                    "qty": "-",
+                    "pl": f"{safe_float(side.get('pl', 0.0), 0.0):+}",
+                    "pnl_value": safe_float(side.get("pl", 0.0), 0.0),
                     "oi_rows": []
                 })
 
     elif category_name == "PIVOT":
         for x in items:
             result = str(x.get("result", ""))
-            entry = x.get("entry", "")
-            stoploss = x.get("stoploss", "")
-            exit_price = x.get("exit_price", "")
-            qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "SELL")
             score = 92 if "Target" in result else 83 if "Stoploss" in result else 87
             cards.append({
                 "symbol": x.get("symbol", ""),
-                "ltp": exit_price,
+                "ltp": x.get("exit_price", ""),
                 "score": score,
                 "strategy": f"PIVOT {x.get('pivot_name', '')}",
                 "side": "SELL",
                 "result": result,
-                "entry": entry,
-                "stoploss": stoploss,
+                "entry": x.get("entry", ""),
+                "stoploss": x.get("stoploss", ""),
                 "target": x.get("target", ""),
-                "qty": qty,
-                "pl": f"{pnl:+,.0f}",
-                "pnl_value": pnl,
+                "qty": "-",
+                "pl": f"{safe_float(x.get('pl', 0.0), 0.0):+}",
+                "pnl_value": safe_float(x.get("pl", 0.0), 0.0),
                 "oi_rows": []
             })
 
@@ -2354,7 +2348,7 @@ def build_after_market_cards_for_category(items, category_name):
     return cards
 
 
-def send_after_market_category_images(items, category_name, per_image=6):
+def send_after_market_category_images(items, category_name, per_image=8):
     if not items:
         log(f"No after-market items for {category_name}")
         return
@@ -2370,14 +2364,14 @@ def send_after_market_category_images(items, category_name, per_image=6):
         try:
             img_bytes = _load_font(
                 page_cards,
-                title="AFTER MARKET SUMMARY",
-                subtitle=f"RESULTS + P/L + {category_name}",
+                title="STOCKS TO WATCH",
+                subtitle=f"AFTER MARKET SUMMARY • {category_name}",
                 analysis_dt=analysis_date_str().upper()
             )
-            files = {"document": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
+            files = {"photo": (f"after_market_{category_name}_{idx}.png", img_bytes, "image/png")}
             data = {"chat_id": CHAT_ID, "caption": caption[:1024]}
             requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                 data=data,
                 files=files,
                 timeout=60
@@ -2416,9 +2410,9 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=6)
-    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=6)
-    send_after_market_category_images(pivot_items, "PIVOT", per_image=6)
+    send_after_market_category_images(gap_items, "GAPUP PLUS")
+    send_after_market_category_images(inside_items, "15 MIN INSIDE")
+    send_after_market_category_images(pivot_items, "PIVOT")
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
@@ -2472,7 +2466,8 @@ def main():
         f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
         f"Analysis day={analysis_date_str()}\n"
         f"WATCHLIST={WATCHLIST_RAW}\n"
-        f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
+        f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X\n"
+        f"WhatsApp configured={bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TWILIO_WHATSAPP_TO)}"
     )
 
     while True:
