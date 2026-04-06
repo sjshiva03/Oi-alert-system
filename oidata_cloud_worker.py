@@ -1657,32 +1657,32 @@ def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
         high = float(c[2]); low = float(c[3])
 
         if high >= stoploss and low <= target:
-            return "Stoploss 🛑", stoploss
+            return "STOPLOSS", stoploss
         if high >= stoploss:
-            return "Stoploss 🛑", stoploss
+            return "STOPLOSS", stoploss
         if low <= target:
-            return "Target 🎯", target
+            return "TARGET", target
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        return "DAY END", float(candles_after_entry[-1][4])
 
-    return "No Data", entry
+    return "NO DATA", entry
 
 def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
     for c in candles_after_entry:
         high = float(c[2]); low = float(c[3])
 
         if low <= stoploss and high >= target:
-            return "Stoploss 🛑", stoploss
+            return "STOPLOSS", stoploss
         if low <= stoploss:
-            return "Stoploss 🛑", stoploss
+            return "STOPLOSS", stoploss
         if high >= target:
-            return "Target 🎯", target
+            return "TARGET", target
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        return "DAY END", float(candles_after_entry[-1][4])
 
-    return "No Data", entry
+    return "NO DATA", entry
 
 # ================= PATTERN SCANNERS =================
 def scan_gapup_pattern(symbol):
@@ -2405,23 +2405,23 @@ def evaluate_pivot_after_market(symbol):
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
 
     if c3_low > entry:
-        result = "No Entry"
+        result = "NO ENTRY"
         exit_price = entry
         pl = 0.0
     elif c3_high >= stoploss and c3_low <= target:
-        result = "Stoploss 🛑"
+        result = "STOPLOSS"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_high >= stoploss:
-        result = "Stoploss 🛑"
+        result = "STOPLOSS"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_low <= target:
-        result = "Target 🎯"
+        result = "TARGET"
         exit_price = target
         pl = round(entry - exit_price, 2)
     else:
-        result = "Day End ⚪"
+        result = "DAY END"
         exit_price = float(c3[4])
         pl = round(entry - exit_price, 2)
 
@@ -2494,6 +2494,18 @@ def chunk_list(items, size):
 def build_after_market_cards_for_category(items, category_name):
     cards = []
 
+    def get_day_change_and_close(symbol_name):
+        try:
+            fy_symbol = convert_symbol(symbol_name)
+            q = fetch_quotes(fy_symbol)
+            ltp = safe_float(q.get("ltp", 0.0), 0.0)
+            prev_close = safe_float(q.get("prev_close", 0.0), 0.0)
+            day_pct = ((ltp - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
+            close_price = round(ltp, 2) if ltp > 0 else ""
+            return round(day_pct, 2), close_price
+        except Exception:
+            return 0.0, ""
+
     def make_qty_and_pnl(entry, stoploss, exit_price, side):
         entry_v = safe_float(entry, 0.0)
         stop_v = safe_float(stoploss, 0.0)
@@ -2509,74 +2521,89 @@ def build_after_market_cards_for_category(items, category_name):
 
     if category_name == "GAPUP PLUS":
         for x in items:
-            result = str(x.get("result", ""))
+            result = _clean_status_text(x.get("result", ""))
             entry = x.get("entry", "")
             stoploss = x.get("stoploss", "")
             exit_price = x.get("exit_price", "")
             qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "SELL")
-            score = 94 if "Target" in result else 84 if "Stoploss" in result else 88
+            score = 94 if "TARGET" in result else 84 if "STOPLOSS" in result else 88
+            day_pct, close_price = get_day_change_and_close(x.get("symbol", ""))
             cards.append({
                 "symbol": x.get("symbol", ""),
-                "ltp": exit_price,
+                "ltp": close_price,
+                "close_price": close_price,
+                "day_pct": day_pct,
                 "score": score,
                 "strategy": "GAP UP",
                 "side": "SELL",
                 "result": result,
+                "status": result,
                 "entry": entry,
                 "stoploss": stoploss,
                 "target": x.get("target", ""),
                 "qty": qty,
                 "pl": f"{pnl:+,.0f}",
+                "pl_text": f"{pnl:+,.0f}",
                 "pnl_value": pnl,
                 "oi_rows": []
             })
 
     elif category_name == "15 MIN INSIDE":
         for x in items:
+            day_pct, close_price = get_day_change_and_close(x.get("symbol", ""))
             for side_key, side_name in [("buy", "BUY"), ("sell", "SELL")]:
                 side = x.get(side_key, {}) or {}
-                result = str(side.get("result", ""))
+                result = _clean_status_text(side.get("result", ""))
                 entry = side.get("entry", "")
                 stoploss = side.get("stoploss", "")
                 exit_price = side.get("exit_price", "")
                 qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, side_name)
-                score = 96 if "Target" in result else 84 if "Stoploss" in result else 89
+                score = 96 if "TARGET" in result else 84 if "STOPLOSS" in result else 89
                 cards.append({
                     "symbol": x.get("symbol", ""),
-                    "ltp": exit_price,
+                    "ltp": close_price,
+                    "close_price": close_price,
+                    "day_pct": day_pct,
                     "score": score,
                     "strategy": "15M INSIDE",
                     "side": side_name,
                     "result": result,
+                    "status": result,
                     "entry": entry,
                     "stoploss": stoploss,
                     "target": side.get("target", ""),
                     "qty": qty,
                     "pl": f"{pnl:+,.0f}",
+                    "pl_text": f"{pnl:+,.0f}",
                     "pnl_value": pnl,
                     "oi_rows": []
                 })
 
     elif category_name == "PIVOT":
         for x in items:
-            result = str(x.get("result", ""))
+            result = _clean_status_text(x.get("result", ""))
             entry = x.get("entry", "")
             stoploss = x.get("stoploss", "")
             exit_price = x.get("exit_price", "")
             qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "SELL")
-            score = 92 if "Target" in result else 83 if "Stoploss" in result else 87
+            score = 92 if "TARGET" in result else 83 if "STOPLOSS" in result else 87
+            day_pct, close_price = get_day_change_and_close(x.get("symbol", ""))
             cards.append({
                 "symbol": x.get("symbol", ""),
-                "ltp": exit_price,
+                "ltp": close_price,
+                "close_price": close_price,
+                "day_pct": day_pct,
                 "score": score,
                 "strategy": f"PIVOT {x.get('pivot_name', '')}",
                 "side": "SELL",
                 "result": result,
+                "status": result,
                 "entry": entry,
                 "stoploss": stoploss,
                 "target": x.get("target", ""),
                 "qty": qty,
                 "pl": f"{pnl:+,.0f}",
+                "pl_text": f"{pnl:+,.0f}",
                 "pnl_value": pnl,
                 "oi_rows": []
             })
@@ -2717,11 +2744,23 @@ def _dashboard_fonts_final():
     }
 
 
-def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text):
+def _top_performers_items(cards, top_n=3):
+    ranked = sorted(list(cards or []), key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:top_n]
+    out = []
+    for idx, c in enumerate(ranked, 1):
+        sym = _card_symbol_name(c.get("symbol", ""))
+        pnl = safe_float(c.get("pnl_value", 0), 0)
+        out.append((idx, sym, pnl))
+    return out
+
+
+def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text=None, top_items=None):
     red = (239, 58, 50)
     white = (255, 255, 255)
     border = (205, 205, 205)
+    black = (0, 0, 0)
     dark_green = (0, 120, 0)
+    dark_red = (180, 0, 0)
 
     draw_rounded_rect(draw, (20, 20, width - 20, 90), 28, red)
     draw.text((38, 36), title_text, fill=white, font=fonts["title"])
@@ -2729,7 +2768,23 @@ def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text):
     draw.text((width - 30 - rw, 40), dt_text, fill=white, font=fonts["top_right"])
 
     draw_rounded_rect(draw, (20, 100, width - 20, 145), 18, white, outline=border, width=1)
-    draw.text((30, 113), f"Top Performers: {top_text}", fill=dark_green, font=fonts["top_perf"])
+
+    x = 30
+    y = 113
+    heading = "Top Performers:"
+    draw.text((x, y), heading, fill=black, font=fonts["top_perf"])
+    x += _text_size(draw, heading, fonts["top_perf"])[0] + 14
+
+    items = list(top_items or [])
+    if not items and top_text:
+        draw.text((x, y), str(top_text), fill=black, font=fonts["top_perf"])
+        return
+
+    for idx, sym, pnl in items:
+        txt = f"{idx}) {sym} {pnl:+,.0f}"
+        fill = dark_green if pnl >= 0 else dark_red
+        draw.text((x, y), txt, fill=fill, font=fonts["top_perf"])
+        x += _text_size(draw, txt, fonts["top_perf"])[0] + 24
 
 
 def _normalize_live_card_source(item):
@@ -2827,7 +2882,8 @@ def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
 
     dt_text = dt_text or now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
     top_text = top_performers or _top_performers_line(cards)
-    _draw_header_final(draw, fonts, W, "LIVE DASHBOARD", dt_text, top_text)
+    top_items = _top_performers_items(cards)
+    _draw_header_final(draw, fonts, W, "LIVE DASHBOARD", dt_text, top_text=top_text, top_items=top_items)
 
     top = 160
     gap = 18
@@ -2850,11 +2906,11 @@ def _normalize_after_card_source(item):
     symbol = _card_symbol_name(item.get("symbol", ""))
     return {
         "symbol": symbol,
-        "ltp": item.get("ltp", ""),
+        "ltp": item.get("ltp", item.get("close_price", "")),
         "day_pct": safe_float(item.get("day_pct", item.get("change_pct", 0)), 0.0),
         "side": str(item.get("side", "BUY")).upper(),
         "strategy": str(item.get("strategy", "15M INSIDE")),
-        "status": str(item.get("status", "HOLD")).upper(),
+        "status": _clean_status_text(item.get("status", item.get("result", "DAY END"))),
         "confidence": str(item.get("confidence", "")).strip(),
         "entry": item.get("entry", ""),
         "stoploss": item.get("stoploss", item.get("sl", "")),
@@ -2862,7 +2918,7 @@ def _normalize_after_card_source(item):
         "target": item.get("target", ""),
         "pl_text": item.get("pl_text", item.get("pl", "")),
         "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
-        "exit_type": str(item.get("exit_type", item.get("result", "DAY END"))).upper(),
+        "exit_type": _clean_status_text(item.get("exit_type", item.get("result", "DAY END"))),
         "close_price": item.get("close_price", item.get("exit_price", "")),
     }
 
@@ -2896,7 +2952,7 @@ def _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item):
     draw.text((x + card_w - 98, y + 18), _fmt_day_pct(item["day_pct"]), fill=day_fill, font=fonts["pill"])
 
     draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, soft_green if is_buy else soft_red)
-    conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
+    conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None, "") else ""
     strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
     strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
     draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
@@ -2922,7 +2978,8 @@ def build_after_market_dashboard_image(cards, top_performers=None, dt_text=None)
 
     dt_text = dt_text or now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
     top_text = top_performers or _top_performers_line(cards)
-    _draw_header_final(draw, fonts, W, "AFTER MARKET SUMMARY", dt_text, top_text)
+    top_items = _top_performers_items(cards)
+    _draw_header_final(draw, fonts, W, "AFTER MARKET SUMMARY", dt_text, top_text=top_text, top_items=top_items)
 
     top = 160
     gap = 18
