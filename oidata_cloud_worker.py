@@ -51,18 +51,6 @@ TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
 
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 
-def _parse_stock_set(env_name):
-    raw = (os.getenv(env_name) or "").strip()
-    if not raw:
-        return set()
-    return {x.strip().upper() for x in raw.split(",") if x.strip()}
-
-GAPUPPLUS_STOCKS = _parse_stock_set("GAPUPPLUS_STOCKS")
-INSIDE15_BUY_STOCKS = _parse_stock_set("INSIDE15_BUY_STOCKS")
-INSIDE15_SELL_STOCKS = _parse_stock_set("INSIDE15_SELL_STOCKS")
-PIVOT30_SELL_STOCKS = _parse_stock_set("PIVOT30_SELL_STOCKS")
-R2_BREAKOUT_STOCKS = _parse_stock_set("R2_BREAKOUT_STOCKS")
-
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
 
 # Pattern filters
@@ -1254,40 +1242,6 @@ def short_name(symbol: str) -> str:
     right = symbol.split(":")[1]
     return right.replace("-EQ", "").replace("-INDEX", "")
 
-
-def _stock_name_key(symbol: str) -> str:
-    try:
-        return short_name(symbol).strip().upper()
-    except Exception:
-        return str(symbol or "").strip().upper()
-
-def _strategy_stock_allowed(symbol: str, strategy: str, side: str = "") -> bool:
-    name = _stock_name_key(symbol)
-    strategy = str(strategy or "").upper()
-    side = str(side or "").upper()
-
-    if strategy == "GAPUP_PLUS":
-        return (not GAPUPPLUS_STOCKS) or (name in GAPUPPLUS_STOCKS)
-
-    if strategy == "INSIDE_15M":
-        if side == "BUY":
-            return (not INSIDE15_BUY_STOCKS) or (name in INSIDE15_BUY_STOCKS)
-        if side == "SELL":
-            return (not INSIDE15_SELL_STOCKS) or (name in INSIDE15_SELL_STOCKS)
-        return (
-            (not INSIDE15_BUY_STOCKS and not INSIDE15_SELL_STOCKS)
-            or name in INSIDE15_BUY_STOCKS
-            or name in INSIDE15_SELL_STOCKS
-        )
-
-    if strategy == "PIVOT_30M_WEEKLY_SELL":
-        return (not PIVOT30_SELL_STOCKS) or (name in PIVOT30_SELL_STOCKS)
-
-    if strategy == "R2_BREAKOUT_5M":
-        return (not R2_BREAKOUT_STOCKS) or (name in R2_BREAKOUT_STOCKS)
-
-    return True
-
 def candle_dt(ts: int):
     return datetime.fromtimestamp(ts, IST)
 
@@ -1738,8 +1692,6 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
 def scan_gapup_pattern(symbol):
     if symbol in closed_for_day:
         return None
-    if not _strategy_stock_allowed(symbol, "GAPUP_PLUS", "SELL"):
-        return None
 
     prev_day = get_previous_daily(symbol)
     day_5m = get_analysis_day_candles(symbol, 5, 7)
@@ -1773,8 +1725,6 @@ def scan_gapup_pattern(symbol):
 
 def scan_15m_inside_pattern(symbol):
     if symbol in closed_for_day:
-        return None
-    if not _strategy_stock_allowed(symbol, "INSIDE_15M"):
         return None
 
     day_15m = get_analysis_day_candles(symbol, 15, 7)
@@ -1849,8 +1799,6 @@ def eligible_for_pivot_scan(symbol):
 
 def scan_30m_pivot_sell(symbol):
     if symbol in closed_for_day:
-        return None
-    if not _strategy_stock_allowed(symbol, "PIVOT_30M_WEEKLY_SELL", "SELL"):
         return None
 
     if not eligible_for_pivot_scan(symbol):
@@ -1930,8 +1878,6 @@ def add_watch_candidate(symbol, payload):
         return
     if symbol in active_trades:
         return
-    if not _strategy_stock_allowed(symbol, payload.get("strategy", ""), payload.get("side", "")):
-        return
 
     prev = watch_candidates.get(symbol)
     if prev and prev.get("strategy") == payload.get("strategy"):
@@ -1990,9 +1936,6 @@ def try_entry_for_candidate(symbol):
 
     if strategy == "GAPUP_PLUS":
         if ltp <= c["entry"]:
-            if not _strategy_stock_allowed(symbol, strategy, "SELL"):
-                del watch_candidates[symbol]
-                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
@@ -2020,9 +1963,6 @@ def try_entry_for_candidate(symbol):
 
     if strategy == "INSIDE_15M":
         if ltp >= c["buy_entry"]:
-            if not _strategy_stock_allowed(symbol, strategy, "BUY"):
-                del watch_candidates[symbol]
-                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BULLISH":
                 if throttle_ok(f"{symbol}|blocked|BUY"):
@@ -2048,9 +1988,6 @@ def try_entry_for_candidate(symbol):
             return
 
         if ltp <= c["sell_entry"]:
-            if not _strategy_stock_allowed(symbol, strategy, "SELL"):
-                del watch_candidates[symbol]
-                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
@@ -2077,9 +2014,6 @@ def try_entry_for_candidate(symbol):
 
     if strategy == "PIVOT_30M_WEEKLY_SELL":
         if ltp <= c["entry"]:
-            if not _strategy_stock_allowed(symbol, strategy, "SELL"):
-                del watch_candidates[symbol]
-                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|PIVOTSELL"):
