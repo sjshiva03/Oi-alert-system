@@ -2081,109 +2081,100 @@ def close_trade(symbol, reason, exit_price):
     )
 
 def track_active_trade(symbol):
-    if symbol not in active_trades:
-        return
-
     trade = active_trades.get(symbol)
-if not trade:
-    return
-
-side = str(trade.get("side", "")).upper()
-target = safe_float(trade.get("target", 0), 0)
-stoploss = safe_float(trade.get("stoploss", 0), 0)
-
-# use latest candle / quote values
-ltp = safe_float(trade.get("ltp", 0), 0)
-day_low = safe_float(trade.get("day_low", ltp), ltp)
-day_high = safe_float(trade.get("day_high", ltp), ltp)
-
-hit_target = False
-hit_sl = False
-
-if side == "SELL":
-    if day_low <= target:
-        hit_target = True
-    elif day_high >= stoploss:
-        hit_sl = True
-
-elif side == "BUY":
-    if day_high >= target:
-        hit_target = True
-    elif day_low <= stoploss:
-        hit_sl = True
-
-if hit_target or hit_sl:
-    reason = "TARGET" if hit_target else "STOPLOSS"
-    trade["result"] = reason
-    trade["exit_type"] = reason
-    trade["exit_price"] = target if hit_target else stoploss
-
-    eod_stats["closed"].append({
-        "symbol": symbol,
-        "strategy": trade.get("strategy", ""),
-        "side": side,
-        "entry": trade.get("entry", ""),
-        "exit": trade["exit_price"],
-        "reason": reason,
-        "pnl": trade.get("pnl_value", 0),
-    })
-
-    if hit_target:
-        eod_stats["targets"].append(symbol)
-    else:
-        eod_stats["stoplosses"].append(symbol)
-
-    closed_for_day.add(symbol)
-    active_trades.pop(symbol, None)
-    return
-
-    trade = active_trades[symbol]
-    q = fetch_quotes(symbol)
-    ltp = q.get("ltp", 0.0)
-    if ltp <= 0:
+    if not trade:
         return
 
-    if trade["side"] == "BUY":
-        if ltp <= trade["stoploss"]:
-            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
-            return
-        if ltp >= trade["target"]:
-            close_trade(symbol, "Target 🎯", trade["target"])
-            return
+    q = fetch_quotes(symbol)
+    ltp = safe_float(q.get("ltp", 0), 0.0)
+    day_low = safe_float(q.get("low_price", q.get("low", ltp)), ltp)
+    day_high = safe_float(q.get("high_price", q.get("high", ltp)), ltp)
+
+    entry = safe_float(trade.get("entry", 0), 0.0)
+    target = safe_float(trade.get("target", 0), 0.0)
+    stoploss = safe_float(trade.get("stoploss", 0), 0.0)
+    qty = int(safe_float(trade.get("qty", 0), 0))
+    side = str(trade.get("side", "")).upper()
+
+    trade["ltp"] = round(ltp, 2)
+    trade["day_low"] = round(day_low, 2)
+    trade["day_high"] = round(day_high, 2)
+
+    # running pnl
+    if side == "BUY":
+        pnl = (ltp - entry) * qty
     else:
-        if ltp >= trade["stoploss"]:
-            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
-            return
-        if ltp <= trade["target"]:
-            close_trade(symbol, "Target 🎯", trade["target"])
-            return
+        pnl = (entry - ltp) * qty
 
-    if now_epoch() - trade.get("last_oi_check", 0) >= OI_INTERVAL_SECONDS:
-        oi_rows, bias = get_oi_snapshot(symbol, ltp)
-        status = hold_status(trade["side"], bias)
-        trade["last_oi_check"] = now_epoch()
+    trade["pnl_value"] = round(pnl, 2)
+    trade["pl_text"] = f"{pnl:+.0f}"
 
-        if throttle_ok(f"{symbol}|live_oi"):
-            send_live_trade_image(
-                trade,
-                ltp=ltp,
-                status=status,
-                oi_rows=oi_rows,
-                header_title="LIVE + OI + RISK + RANKING",
-                reason_text=f"Strategy {trade['strategy']} | OI bias {bias}",
-                caption=f"{short_name(symbol)} {status}"
-            )
+    hit_target = False
+    hit_sl = False
 
-        if status == "Exit ⚪" and throttle_ok(f"{symbol}|oi_exit"):
-            send_live_trade_image(
-                trade,
-                ltp=ltp,
-                status=status,
-                oi_rows=oi_rows,
-                header_title="OI EXIT SIGNAL",
-                reason_text="OI turned against trade",
-                caption=f"{short_name(symbol)} OI Exit"
-            )
+    # ===== TARGET / SL CHECK =====
+    if side == "SELL":
+        if day_low <= target:
+            hit_target = True
+        elif day_high >= stoploss:
+            hit_sl = True
+
+    elif side == "BUY":
+        if day_high >= target:
+            hit_target = True
+        elif day_low <= stoploss:
+            hit_sl = True
+
+    if hit_target or hit_sl:
+        reason = "TARGET" if hit_target else "STOPLOSS"
+        exit_px = target if hit_target else stoploss
+
+        trade["result"] = reason
+        trade["exit_type"] = reason
+        trade["exit_price"] = round(exit_px, 2)
+
+        closed_item = {
+            "symbol": symbol,
+            "strategy": trade.get("strategy", ""),
+            "side": side,
+            "entry": entry,
+            "exit": round(exit_px, 2),
+            "reason": reason,
+            "pnl": round(trade["pnl_value"], 2),
+        }
+        eod_stats["closed"].append(closed_item)
+
+        if hit_target:
+            eod_stats["targets"].append(closed_item)
+        else:
+            eod_stats["stoplosses"].append(closed_item)
+
+        closed_for_day.add(symbol)
+        active_trades.pop(symbol, None)
+
+        log(f"{short_name(symbol)} closed -> {reason} @ {exit_px}")
+        return
+
+    # ===== only for still-active trades =====
+    snap = get_oi_snapshot(symbol, ltp)
+    oi_rows = snap.get("rows", []) if isinstance(snap, dict) else []
+    bias = str(snap.get("bias", "")) if isinstance(snap, dict) else ""
+
+    trade["oi_rows"] = oi_rows
+    trade["oi_bias"] = bias
+
+    status = "BUY HOLD" if side == "BUY" else "SELL HOLD"
+
+    if throttle_ok(f"{symbol}|live_oi"):
+        send_live_trade_image(
+            trade,
+            ltp=ltp,
+            status=status,
+            oi_rows=oi_rows,
+            header_title="LIVE + OI + RISK + RANKING",
+            reason_text=f"Strategy {trade.get('strategy', '')} | OI bias {bias}",
+            caption=f"{short_name(symbol)} {status}"
+        )
 
 
 # ================= SCAN SCHEDULERS =================
@@ -3097,12 +3088,41 @@ def _should_send_live_dashboard():
         return True
     return False
 
+def _active_trade_cards_only():
+    cards = []
+    for sym, trade in active_trades.items():
+        oi_rows = trade.get("oi_rows", []) or []
+        cards.append({
+            "symbol": _card_symbol_name(sym) if "_card_symbol_name" in globals() else short_name(sym),
+            "ltp": trade.get("ltp", ""),
+            "day_pct": round(safe_float(trade.get("day_pct", 0), 0.0), 2),
+            "side": trade.get("side", "BUY"),
+            "strategy": trade.get("strategy", "LIVE"),
+            "status": "LIVE",
+            "confidence": trade.get("confidence", ""),
+            "entry": trade.get("entry", ""),
+            "stoploss": trade.get("stoploss", ""),
+            "qty": trade.get("qty", ""),
+            "target": trade.get("target", ""),
+            "pl_text": trade.get("pl_text", trade.get("pl", "")),
+            "pnl_value": safe_float(trade.get("pnl_value", trade.get("pnl", 0)), 0.0),
+            "exit_type": trade.get("result", ""),
+            "strikes": [{
+                "strike": r.get("strike", ""),
+                "pe_oi": human_format(r.get("put_oi", 0)),
+                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
+                "ce_oi": human_format(r.get("call_oi", 0)),
+                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
+            } for r in oi_rows[:5]]
+        })
+    return cards
+
 
 def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        cards = list(cards or _live_dashboard_cards())
+        cards = list(cards or _active_trade_cards_only())
         if not cards:
             log("No live dashboard cards to send")
             return
