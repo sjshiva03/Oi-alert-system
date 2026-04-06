@@ -1781,20 +1781,45 @@ def candle_touches_level(candle, level):
 def eligible_for_pivot_scan(symbol):
     prev_day = get_previous_daily(symbol)
     q = fetch_quotes(symbol)
-    if prev_day is None or not q:
+
+    if prev_day is None:
+        log(f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | prev_day missing")
+        return False
+
+    if not q:
+        log(f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | quotes missing")
         return False
 
     yesterday_close = float(prev_day[4])
     today_ltp = q.get("ltp", 0.0)
     prev_turnover = safe_float(prev_day[5], 0.0) * yesterday_close if len(prev_day) > 5 else 0.0
+    needed_ltp = yesterday_close * (1 + PIVOT_LTP_FILTER_PCT)
 
     if PIVOT_MIN_YDAY_TURNOVER > 0 and prev_turnover < PIVOT_MIN_YDAY_TURNOVER:
+        log(
+            f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | turnover low | "
+            f"prev_turnover={round(prev_turnover,2)} need={PIVOT_MIN_YDAY_TURNOVER}"
+        )
         return False
 
-    return today_ltp >= yesterday_close * (1 + PIVOT_LTP_FILTER_PCT)
+    if today_ltp < needed_ltp:
+        log(
+            f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | ltp filter failed | "
+            f"ltp={round(today_ltp,2)} need>={round(needed_ltp,2)} "
+            f"prev_close={round(yesterday_close,2)} filter_pct={round(PIVOT_LTP_FILTER_PCT*100,2)}%"
+        )
+        return False
+
+    log(
+        f"[PIVOT DEBUG] {short_name(symbol)} -> PASS eligible | "
+        f"ltp={round(today_ltp,2)} prev_close={round(yesterday_close,2)} "
+        f"turnover={round(prev_turnover,2)}"
+    )
+    return True
 
 def scan_30m_pivot_sell(symbol):
     if symbol in closed_for_day:
+        log(f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | already closed_for_day")
         return None
 
     if not eligible_for_pivot_scan(symbol):
@@ -1803,15 +1828,27 @@ def scan_30m_pivot_sell(symbol):
     prev_week = get_previous_weekly(symbol)
     day_30m = get_analysis_day_candles(symbol, 30, 21)
 
-    if prev_week is None or len(day_30m) < 3:
+    if prev_week is None:
+        log(f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | prev_week missing")
         return None
 
-    c1 = day_30m[0]; c2 = day_30m[1]
+    if len(day_30m) < 3:
+        log(f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | 30m candles missing | got={len(day_30m)}")
+        return None
+
+    c1 = day_30m[0]
+    c2 = day_30m[1]
+
     c1_open = float(c1[1]); c1_close = float(c1[4])
     c2_open = float(c2[1]); c2_close = float(c2[4])
     c2_high = float(c2[2]); c2_low = float(c2[3])
 
     if not (c1_close > c1_open and c2_close < c2_open):
+        log(
+            f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | candle pattern failed | "
+            f"C1 O={round(c1_open,2)} C={round(c1_close,2)} | "
+            f"C2 O={round(c2_open,2)} C={round(c2_close,2)}"
+        )
         return None
 
     r_levels = compute_weekly_r_levels(prev_week)
@@ -1821,15 +1858,31 @@ def scan_30m_pivot_sell(symbol):
             touched_levels.append((name, value))
 
     if not touched_levels:
+        touch_info = ", ".join([f"{k}={v}" for k, v in r_levels.items()])
+        log(
+            f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | no common pivot touch | "
+            f"levels: {touch_info}"
+        )
         return None
 
     pivot_name, pivot_value = touched_levels[-1]
 
     entry = round(c2_low, 2)
     stoploss = round(c2_high, 2)
+
     if stoploss <= entry:
+        log(
+            f"[PIVOT DEBUG] {short_name(symbol)} -> REJECT | stoploss<=entry | "
+            f"entry={entry} stoploss={stoploss}"
+        )
         return None
+
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
+
+    log(
+        f"[PIVOT DEBUG] {short_name(symbol)} -> PASS pivot | "
+        f"{pivot_name}={pivot_value} | entry={entry} stoploss={stoploss} target={target}"
+    )
 
     return {
         "symbol": symbol,
@@ -2377,7 +2430,13 @@ def evaluate_inside_after_market(symbol):
 def evaluate_pivot_after_market(symbol):
     prev_week = get_previous_weekly(symbol)
     day_30m = get_analysis_day_candles(symbol, 30, 21)
-    if prev_week is None or len(day_30m) < 3:
+
+    if prev_week is None:
+        log(f"[PIVOT AFTER DEBUG] {short_name(symbol)} -> REJECT | prev_week missing")
+        return None
+
+    if len(day_30m) < 3:
+        log(f"[PIVOT AFTER DEBUG] {short_name(symbol)} -> REJECT | 30m candles missing | got={len(day_30m)}")
         return None
 
     c1 = day_30m[0]; c2 = day_30m[1]; c3 = day_30m[2]
@@ -2387,6 +2446,11 @@ def evaluate_pivot_after_market(symbol):
     c3_low = float(c3[3]); c3_high = float(c3[2])
 
     if not (c1_close > c1_open and c2_close < c2_open):
+        log(
+            f"[PIVOT AFTER DEBUG] {short_name(symbol)} -> REJECT | candle pattern failed | "
+            f"C1 O={round(c1_open,2)} C={round(c1_close,2)} | "
+            f"C2 O={round(c2_open,2)} C={round(c2_close,2)}"
+        )
         return None
 
     r_levels = compute_weekly_r_levels(prev_week)
@@ -2394,14 +2458,22 @@ def evaluate_pivot_after_market(symbol):
     for name, value in r_levels.items():
         if candle_touches_level(c1, value) and candle_touches_level(c2, value):
             touched.append((name, value))
+
     if not touched:
+        log(f"[PIVOT AFTER DEBUG] {short_name(symbol)} -> REJECT | no common pivot touch")
         return None
 
     pivot_name, pivot_value = touched[-1]
     entry = round(c2_low, 2)
     stoploss = round(c2_high, 2)
+
     if stoploss <= entry:
+        log(
+            f"[PIVOT AFTER DEBUG] {short_name(symbol)} -> REJECT | stoploss<=entry | "
+            f"entry={entry} stoploss={stoploss}"
+        )
         return None
+
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
 
     if c3_low > entry:
@@ -2424,6 +2496,11 @@ def evaluate_pivot_after_market(symbol):
         result = "DAY END"
         exit_price = float(c3[4])
         pl = round(entry - exit_price, 2)
+
+    log(
+        f"[PIVOT AFTER DEBUG] {short_name(symbol)} -> PASS | "
+        f"{pivot_name}={pivot_value} | entry={entry} sl={stoploss} target={target} | result={result}"
+    )
 
     return {
         "symbol": short_name(symbol),
