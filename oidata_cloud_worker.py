@@ -50,10 +50,18 @@ TEXT_IMAGE_WIDTH = int(os.getenv("TEXT_IMAGE_WIDTH", "2000"))
 TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
 
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
-GAPUPPLUS_STOCKS_RAW = (os.getenv("GAPUPPLUS_STOCKS") or "").strip()
-INSIDE15_BUY_STOCKS_RAW = (os.getenv("INSIDE15_BUY_STOCKS") or "").strip()
-INSIDE15_SELL_STOCKS_RAW = (os.getenv("INSIDE15_SELL_STOCKS") or "").strip()
-PIVOT30_STOCKS_RAW = (os.getenv("PIVOT30_STOCKS") or "").strip()
+
+def _parse_stock_set(env_name):
+    raw = (os.getenv(env_name) or "").strip()
+    if not raw:
+        return set()
+    return {x.strip().upper() for x in raw.split(",") if x.strip()}
+
+GAPUPPLUS_STOCKS = _parse_stock_set("GAPUPPLUS_STOCKS")
+INSIDE15_BUY_STOCKS = _parse_stock_set("INSIDE15_BUY_STOCKS")
+INSIDE15_SELL_STOCKS = _parse_stock_set("INSIDE15_SELL_STOCKS")
+PIVOT30_SELL_STOCKS = _parse_stock_set("PIVOT30_SELL_STOCKS")
+R2_BREAKOUT_STOCKS = _parse_stock_set("R2_BREAKOUT_STOCKS")
 
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
 
@@ -106,46 +114,6 @@ def convert_symbol(sym: str) -> str:
     return f"NSE:{s}-EQ"
 
 SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
-
-def parse_symbol_set(raw: str):
-    out = set()
-    for part in str(raw or "").split(","):
-        sym = part.strip().upper()
-        if sym:
-            out.add(sym)
-    return out
-
-def base_symbol_name(symbol: str) -> str:
-    s = str(symbol or "").upper().strip()
-    if ":" in s:
-        s = s.split(":", 1)[1]
-    for suffix in ("-EQ", "-INDEX"):
-        if s.endswith(suffix):
-            s = s[:-len(suffix)]
-    return s.strip()
-
-GAPUPPLUS_STOCKS = parse_symbol_set(GAPUPPLUS_STOCKS_RAW)
-INSIDE15_BUY_STOCKS = parse_symbol_set(INSIDE15_BUY_STOCKS_RAW)
-INSIDE15_SELL_STOCKS = parse_symbol_set(INSIDE15_SELL_STOCKS_RAW)
-PIVOT30_STOCKS = parse_symbol_set(PIVOT30_STOCKS_RAW)
-
-def is_symbol_allowed(symbol: str, strategy: str, side: str = "") -> bool:
-    name = base_symbol_name(symbol)
-    strategy = str(strategy or "").upper()
-    side = str(side or "").upper()
-    if strategy == "GAPUP_PLUS":
-        return (not GAPUPPLUS_STOCKS) or (name in GAPUPPLUS_STOCKS)
-    if strategy == "INSIDE_15M":
-        if side == "BUY":
-            return (not INSIDE15_BUY_STOCKS) or (name in INSIDE15_BUY_STOCKS)
-        if side == "SELL":
-            return (not INSIDE15_SELL_STOCKS) or (name in INSIDE15_SELL_STOCKS)
-        buy_ok = (not INSIDE15_BUY_STOCKS) or (name in INSIDE15_BUY_STOCKS)
-        sell_ok = (not INSIDE15_SELL_STOCKS) or (name in INSIDE15_SELL_STOCKS)
-        return buy_ok or sell_ok
-    if strategy == "PIVOT_30M_WEEKLY_SELL":
-        return (not PIVOT30_STOCKS) or (name in PIVOT30_STOCKS)
-    return True
 
 # ================= GLOBAL STATE =================
 watch_candidates = {}
@@ -753,15 +721,15 @@ def _after_market_cards_from_closed():
             "side": x.get("side", "SELL"),
             "result": reason,
             "entry": x.get("entry", ""),
-            "stoploss": x.get("stoploss", ""),
-            "target": x.get("target", ""),
-            "qty": x.get("qty", ""),
+            "stoploss": "",
+            "target": "",
+            "qty": "",
             "pl": f"{pnl:+.2f}",
             "pnl_value": pnl,
-            "oi_rows": [],
-            "close_price": x.get("close_price", x.get("exit", "")),
-            "day_pct": x.get("day_pct", 0.0),
-            "confidence": x.get("confidence", ""),
+            "close_price": x.get("exit_price", ""),
+            "prev_close": x.get("prev_close", 0.0),
+            "day_pct": x.get("day_pct", ""),
+            "oi_rows": []
         })
     if not cards:
         cards.append({
@@ -800,6 +768,9 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
             "qty": "",
             "pl": f"{pnl:+.2f}",
             "pnl_value": pnl,
+            "close_price": x.get("exit_price", ""),
+            "prev_close": x.get("prev_close", 0.0),
+            "day_pct": x.get("day_pct", ""),
             "oi_rows": []
         })
 
@@ -838,6 +809,9 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
             "qty": "",
             "pl": f"{pnl:+.2f}",
             "pnl_value": pnl,
+            "close_price": x.get("exit_price", ""),
+            "prev_close": x.get("prev_close", 0.0),
+            "day_pct": x.get("day_pct", ""),
             "oi_rows": []
         })
 
@@ -1060,7 +1034,7 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
         return
     try:
         cards = list(cards or _after_market_cards_from_closed())
-        pages = list(chunk_list(cards, 8))
+        pages = list(chunk_list(cards, 6))
         total_pages = len(pages)
         for idx, page_cards in enumerate(pages, 1):
             img_bytes = build_after_market_dashboard_image(
@@ -1279,6 +1253,40 @@ def throttle_ok(key: str) -> bool:
 def short_name(symbol: str) -> str:
     right = symbol.split(":")[1]
     return right.replace("-EQ", "").replace("-INDEX", "")
+
+
+def _stock_name_key(symbol: str) -> str:
+    try:
+        return short_name(symbol).strip().upper()
+    except Exception:
+        return str(symbol or "").strip().upper()
+
+def _strategy_stock_allowed(symbol: str, strategy: str, side: str = "") -> bool:
+    name = _stock_name_key(symbol)
+    strategy = str(strategy or "").upper()
+    side = str(side or "").upper()
+
+    if strategy == "GAPUP_PLUS":
+        return (not GAPUPPLUS_STOCKS) or (name in GAPUPPLUS_STOCKS)
+
+    if strategy == "INSIDE_15M":
+        if side == "BUY":
+            return (not INSIDE15_BUY_STOCKS) or (name in INSIDE15_BUY_STOCKS)
+        if side == "SELL":
+            return (not INSIDE15_SELL_STOCKS) or (name in INSIDE15_SELL_STOCKS)
+        return (
+            (not INSIDE15_BUY_STOCKS and not INSIDE15_SELL_STOCKS)
+            or name in INSIDE15_BUY_STOCKS
+            or name in INSIDE15_SELL_STOCKS
+        )
+
+    if strategy == "PIVOT_30M_WEEKLY_SELL":
+        return (not PIVOT30_SELL_STOCKS) or (name in PIVOT30_SELL_STOCKS)
+
+    if strategy == "R2_BREAKOUT_5M":
+        return (not R2_BREAKOUT_STOCKS) or (name in R2_BREAKOUT_STOCKS)
+
+    return True
 
 def candle_dt(ts: int):
     return datetime.fromtimestamp(ts, IST)
@@ -1730,6 +1738,8 @@ def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
 def scan_gapup_pattern(symbol):
     if symbol in closed_for_day:
         return None
+    if not _strategy_stock_allowed(symbol, "GAPUP_PLUS", "SELL"):
+        return None
 
     prev_day = get_previous_daily(symbol)
     day_5m = get_analysis_day_candles(symbol, 5, 7)
@@ -1758,12 +1768,13 @@ def scan_gapup_pattern(symbol):
         "entry": entry,
         "stoploss": sl,
         "target": target,
-        "pattern_time": candle_dt(first[0]).strftime("%H:%M"),
-        "confidence": 92
+        "pattern_time": candle_dt(first[0]).strftime("%H:%M")
     }
 
 def scan_15m_inside_pattern(symbol):
     if symbol in closed_for_day:
+        return None
+    if not _strategy_stock_allowed(symbol, "INSIDE_15M"):
         return None
 
     day_15m = get_analysis_day_candles(symbol, 15, 7)
@@ -1795,9 +1806,7 @@ def scan_15m_inside_pattern(symbol):
         "sell_entry": round(l1, 2),
         "sell_stoploss": round(h1 * (1 + SL_BUFFER_PCT), 2),
         "sell_target": round(l1 - ((h1 * (1 + SL_BUFFER_PCT)) - l1) * TARGET_RR, 2),
-        "pattern_time": candle_dt(c2[0]).strftime("%H:%M"),
-        "buy_confidence": 94,
-        "sell_confidence": 94
+        "pattern_time": candle_dt(c2[0]).strftime("%H:%M")
     }
 
 def compute_weekly_r_levels(prev_week):
@@ -1841,6 +1850,8 @@ def eligible_for_pivot_scan(symbol):
 def scan_30m_pivot_sell(symbol):
     if symbol in closed_for_day:
         return None
+    if not _strategy_stock_allowed(symbol, "PIVOT_30M_WEEKLY_SELL", "SELL"):
+        return None
 
     if not eligible_for_pivot_scan(symbol):
         return None
@@ -1871,7 +1882,7 @@ def scan_30m_pivot_sell(symbol):
     pivot_name, pivot_value = touched_levels[-1]
 
     entry = round(c2_low, 2)
-    stoploss = round(c2_high * (1 + SL_BUFFER_PCT), 2)
+    stoploss = round(c2_high, 2)
     if stoploss <= entry:
         return None
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
@@ -1885,8 +1896,7 @@ def scan_30m_pivot_sell(symbol):
         "entry": entry,
         "stoploss": stoploss,
         "target": target,
-        "pattern_time": candle_dt(c2[0]).strftime("%H:%M"),
-        "confidence": 90
+        "pattern_time": candle_dt(c2[0]).strftime("%H:%M")
     }
 
 # ================= SUMMARY FORMATTERS =================
@@ -1920,30 +1930,7 @@ def add_watch_candidate(symbol, payload):
         return
     if symbol in active_trades:
         return
-
-    payload = dict(payload or {})
-    strategy = payload.get("strategy", "")
-
-    if strategy == "GAPUP_PLUS" and not is_symbol_allowed(symbol, strategy, "SELL"):
-        return
-
-    if strategy == "INSIDE_15M":
-        buy_allowed = is_symbol_allowed(symbol, strategy, "BUY")
-        sell_allowed = is_symbol_allowed(symbol, strategy, "SELL")
-        if not buy_allowed:
-            payload["buy_entry"] = ""
-            payload["buy_stoploss"] = ""
-            payload["buy_target"] = ""
-            payload["buy_confidence"] = ""
-        if not sell_allowed:
-            payload["sell_entry"] = ""
-            payload["sell_stoploss"] = ""
-            payload["sell_target"] = ""
-            payload["sell_confidence"] = ""
-        if not buy_allowed and not sell_allowed:
-            return
-
-    if strategy == "PIVOT_30M_WEEKLY_SELL" and not is_symbol_allowed(symbol, strategy, "SELL"):
+    if not _strategy_stock_allowed(symbol, payload.get("strategy", ""), payload.get("side", "")):
         return
 
     prev = watch_candidates.get(symbol)
@@ -1973,9 +1960,7 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
     trade["exposure"] = round(exposure, 2)
     trade["margin"] = round(margin, 2)
     trade["risk_per_share"] = round(risk_per_share, 2)
-    trade["oi_rows"] = list(oi_rows or [])[:5]
-    trade["oi_bias"] = oi_bias
-
+    reason = f"Risk ₹{int(RISK_AMOUNT)} | Qty {qty} | Margin ~{round(margin)} | OI {oi_bias}"
     send(
         f"✅ ENTRY CONFIRMED\n"
         f"{short_name(symbol)}\n"
@@ -1984,8 +1969,7 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
         f"Entry: {trade.get('entry', '')}\n"
         f"SL: {trade.get('stoploss', '')}\n"
         f"Target: {trade.get('target', '')}\n"
-        f"Qty: {qty}\n"
-        f"OI Bias: {oi_bias}"
+        f"{reason}"
     )
 
 def try_entry_for_candidate(symbol):
@@ -2006,6 +1990,9 @@ def try_entry_for_candidate(symbol):
 
     if strategy == "GAPUP_PLUS":
         if ltp <= c["entry"]:
+            if not _strategy_stock_allowed(symbol, strategy, "SELL"):
+                del watch_candidates[symbol]
+                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
@@ -2023,8 +2010,7 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("confidence", 92)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2033,7 +2019,10 @@ def try_entry_for_candidate(symbol):
         return
 
     if strategy == "INSIDE_15M":
-        if c.get("buy_entry") not in ("", None) and ltp >= c["buy_entry"]:
+        if ltp >= c["buy_entry"]:
+            if not _strategy_stock_allowed(symbol, strategy, "BUY"):
+                del watch_candidates[symbol]
+                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BULLISH":
                 if throttle_ok(f"{symbol}|blocked|BUY"):
@@ -2050,8 +2039,7 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["buy_stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("buy_confidence", 94)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "BUY"})
@@ -2059,7 +2047,10 @@ def try_entry_for_candidate(symbol):
             del watch_candidates[symbol]
             return
 
-        if c.get("sell_entry") not in ("", None) and ltp <= c["sell_entry"]:
+        if ltp <= c["sell_entry"]:
+            if not _strategy_stock_allowed(symbol, strategy, "SELL"):
+                del watch_candidates[symbol]
+                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
@@ -2076,8 +2067,7 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["sell_stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("sell_confidence", 94)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2087,6 +2077,9 @@ def try_entry_for_candidate(symbol):
 
     if strategy == "PIVOT_30M_WEEKLY_SELL":
         if ltp <= c["entry"]:
+            if not _strategy_stock_allowed(symbol, strategy, "SELL"):
+                del watch_candidates[symbol]
+                return
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|PIVOTSELL"):
@@ -2106,8 +2099,7 @@ def try_entry_for_candidate(symbol):
                 "pivot_value": c["pivot_value"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("confidence", 90)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2131,9 +2123,9 @@ def close_trade(symbol, reason, exit_price):
         pnl = round((trade["entry"] - exit_price) * qty, 2)
     trade["pnl"] = pnl
 
-    if reason.startswith("Target"):
+    if reason.startswith("Target") or reason == "TARGET":
         eod_stats["targets"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
-    elif reason.startswith("Stoploss"):
+    elif reason.startswith("Stoploss") or reason == "STOPLOSS":
         eod_stats["stoplosses"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
     else:
         eod_stats["dayend"].append({"symbol": short_name(symbol), "strategy": trade["strategy"], "pnl": pnl})
@@ -2144,23 +2136,24 @@ def close_trade(symbol, reason, exit_price):
         "side": trade["side"],
         "entry": trade["entry"],
         "exit": trade["exit_price"],
+        "ltp": trade["exit_price"],
+        "close_price": trade["exit_price"],
         "pnl": pnl,
+        "pnl_value": pnl,
+        "pl_text": f"{pnl:+.0f}",
         "reason": reason,
-        "qty": qty,
-        "target": trade.get("target", ""),
-        "stoploss": trade.get("stoploss", ""),
-        "close_price": trade.get("exit_price", ""),
-        "day_pct": trade.get("day_pct", 0.0),
-        "confidence": trade.get("confidence", ""),
+        "result": reason,
+        "prev_close": safe_float(trade.get("prev_close", 0), 0.0),
+        "day_pct": safe_float(trade.get("day_pct", 0), 0.0),
     })
 
     send(
-        f"📌 TRADE CLOSED\n"
+        f"📕 TRADE CLOSED\n"
         f"{short_name(symbol)}\n"
         f"Strategy: {trade.get('strategy', '')}\n"
-        f"Side: {trade.get('side', '')}\n"
         f"Reason: {reason}\n"
-        f"Exit: {trade.get('exit_price', '')}\n"
+        f"Exit: {trade['exit_price']}\n"
+        f"Qty: {qty}\n"
         f"P/L: {pnl:+.2f}"
     )
 
@@ -2173,6 +2166,7 @@ def track_active_trade(symbol):
     ltp = safe_float(q.get("ltp", 0), 0.0)
     day_low = safe_float(q.get("low_price", q.get("low", ltp)), ltp)
     day_high = safe_float(q.get("high_price", q.get("high", ltp)), ltp)
+    prev_close = safe_float(q.get("prev_close", 0), 0.0)
 
     entry = safe_float(trade.get("entry", 0), 0.0)
     target = safe_float(trade.get("target", 0), 0.0)
@@ -2180,15 +2174,12 @@ def track_active_trade(symbol):
     qty = int(safe_float(trade.get("qty", 0), 0))
     side = str(trade.get("side", "")).upper()
 
-    prev_close = safe_float(q.get("prev_close", 0), 0.0)
-    day_pct = ((ltp - prev_close) / prev_close * 100.0) if prev_close else 0.0
-
     trade["ltp"] = round(ltp, 2)
     trade["day_low"] = round(day_low, 2)
     trade["day_high"] = round(day_high, 2)
-    trade["day_pct"] = round(day_pct, 2)
+    trade["prev_close"] = round(prev_close, 2) if prev_close else 0.0
+    trade["day_pct"] = round(((ltp - prev_close) / prev_close * 100.0), 2) if prev_close else 0.0
 
-    # running pnl
     if side == "BUY":
         pnl = (ltp - entry) * qty
     else:
@@ -2200,13 +2191,11 @@ def track_active_trade(symbol):
     hit_target = False
     hit_sl = False
 
-    # ===== TARGET / SL CHECK =====
     if side == "SELL":
         if day_low <= target:
             hit_target = True
         elif day_high >= stoploss:
             hit_sl = True
-
     elif side == "BUY":
         if day_high >= target:
             hit_target = True
@@ -2216,7 +2205,6 @@ def track_active_trade(symbol):
     if hit_target or hit_sl:
         reason = "TARGET" if hit_target else "STOPLOSS"
         exit_px = target if hit_target else stoploss
-
         trade["result"] = reason
         trade["exit_type"] = reason
         trade["exit_price"] = round(exit_px, 2)
@@ -2227,11 +2215,17 @@ def track_active_trade(symbol):
             "side": side,
             "entry": entry,
             "exit": round(exit_px, 2),
+            "ltp": round(exit_px, 2),
+            "close_price": round(exit_px, 2),
+            "prev_close": trade.get("prev_close", 0.0),
+            "day_pct": trade.get("day_pct", 0.0),
             "reason": reason,
+            "result": reason,
             "pnl": round(trade["pnl_value"], 2),
+            "pnl_value": round(trade["pnl_value"], 2),
+            "pl_text": trade.get("pl_text", f"{trade['pnl_value']:+.0f}"),
         }
         eod_stats["closed"].append(closed_item)
-
         if hit_target:
             eod_stats["targets"].append(closed_item)
         else:
@@ -2243,17 +2237,13 @@ def track_active_trade(symbol):
         log(f"{short_name(symbol)} closed -> {reason} @ {exit_px}")
         return
 
-    # ===== only for still-active trades =====
     snap = get_oi_snapshot(symbol, ltp)
     oi_rows = snap.get("rows", []) if isinstance(snap, dict) else []
     bias = str(snap.get("bias", "")) if isinstance(snap, dict) else ""
 
     trade["oi_rows"] = oi_rows
     trade["oi_bias"] = bias
-
-    status = "BUY HOLD" if side == "BUY" else "SELL HOLD"
-    trade["status"] = status
-
+    trade["status"] = "BUY HOLD" if side == "BUY" else "SELL HOLD"
 
 # ================= SCAN SCHEDULERS =================
 def scan_gapup_once():
@@ -2332,7 +2322,7 @@ def run_live_day():
             scan_gapup_once()
             gap_summary_sent = True
             try:
-                send_live_dashboard_image(cards=_active_trade_cards_only(), caption="Live Dashboard")
+                send_live_dashboard_image(caption="Live Dashboard")
             except Exception as e:
                 log(f"LIVE DASHBOARD ERROR after gap scan: {e}")
 
@@ -2340,7 +2330,7 @@ def run_live_day():
             scan_inside15_once()
             inside_summary_sent = True
             try:
-                send_live_dashboard_image(cards=_active_trade_cards_only(), caption="Live Dashboard")
+                send_live_dashboard_image(caption="Live Dashboard")
             except Exception as e:
                 log(f"LIVE DASHBOARD ERROR after inside scan: {e}")
 
@@ -2477,7 +2467,7 @@ def evaluate_pivot_after_market(symbol):
 
     pivot_name, pivot_value = touched[-1]
     entry = round(c2_low, 2)
-    stoploss = round(c2_high * (1 + SL_BUFFER_PCT), 2)
+    stoploss = round(c2_high, 2)
     if stoploss <= entry:
         return None
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
@@ -2774,29 +2764,32 @@ def _card_symbol_name(symbol: str) -> str:
 
 def _top_performers_line(cards, top_n=3):
     ranked = sorted(list(cards or []), key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:top_n]
-    return ranked
+    parts = []
+    for idx, c in enumerate(ranked, 1):
+        sym = _card_symbol_name(c.get("symbol", ""))
+        pnl = safe_float(c.get("pnl_value", 0), 0)
+        parts.append(f"{idx}) {sym} {pnl:+,.0f}")
+    return "   ".join(parts) if parts else "No top performers"
 
 
 def _dashboard_fonts_final():
     return {
-        "title": _load_single_font(34, True),
-        "top_right": _load_single_font(18, True),
-        "top_perf": _load_single_font(16, True),
-        "card_title": _load_single_font(24, True),
-        "pill": _load_single_font(18, True),
-        "strategy": _load_single_font(20, True),
-        "body": _load_single_font(18, True),
-        "oi": _load_single_font(16, True),
+        "title": _load_single_font(40, True),
+        "top_right": _load_single_font(22, True),
+        "top_perf": _load_single_font(20, True),
+        "card_title": _load_single_font(28, True),
+        "pill": _load_single_font(20, True),
+        "strategy": _load_single_font(22, True),
+        "body": _load_single_font(20, True),
+        "oi": _load_single_font(18, True),
     }
 
 
-def _draw_header_final(draw, fonts, width, title_text, dt_text, top_items):
+def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text):
     red = (239, 58, 50)
     white = (255, 255, 255)
     border = (205, 205, 205)
-    black = (0, 0, 0)
     dark_green = (0, 120, 0)
-    dark_red = (180, 0, 0)
 
     draw_rounded_rect(draw, (20, 20, width - 20, 90), 28, red)
     draw.text((38, 36), title_text, fill=white, font=fonts["title"])
@@ -2804,26 +2797,7 @@ def _draw_header_final(draw, fonts, width, title_text, dt_text, top_items):
     draw.text((width - 30 - rw, 40), dt_text, fill=white, font=fonts["top_right"])
 
     draw_rounded_rect(draw, (20, 100, width - 20, 145), 18, white, outline=border, width=1)
-    x = 30
-    y = 113
-    label = "Top Performers: "
-    draw.text((x, y), label, fill=black, font=fonts["top_perf"])
-    x += _text_size(draw, label, fonts["top_perf"])[0]
-
-    items = list(top_items or [])[:3]
-    if not items:
-        draw.text((x, y), "No top performers", fill=black, font=fonts["top_perf"])
-        return
-
-    for idx, c in enumerate(items, 1):
-        sym = _card_symbol_name(c.get("symbol", ""))
-        pnl = safe_float(c.get("pnl_value", 0), 0)
-        name_txt = f"{idx}) {sym} "
-        pnl_txt = f"{pnl:+,.0f}"
-        draw.text((x, y), name_txt, fill=black, font=fonts["top_perf"])
-        x += _text_size(draw, name_txt, fonts["top_perf"])[0]
-        draw.text((x, y), pnl_txt, fill=dark_green if pnl >= 0 else dark_red, font=fonts["top_perf"])
-        x += _text_size(draw, pnl_txt, fonts["top_perf"])[0] + 24
+    draw.text((30, 113), f"Top Performers: {top_text}", fill=dark_green, font=fonts["top_perf"])
 
 
 def _normalize_live_card_source(item):
@@ -2894,8 +2868,8 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
         table_top = y + 248
 
-    headers = ["Strike", "PE OI", "PE Chg", "CE OI", "CE Chg"]
-    xs = [x + 20, x + 120, x + 220, x + 335, x + 445]
+    headers = ["Strike", "PE", "Chg", "CE", "Chg"]
+    xs = [x + 20, x + 100, x + 180, x + 250, x + 320]
     for xp, h in zip(xs, headers):
         draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
 
@@ -2915,21 +2889,21 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
 
 def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
     fonts = _dashboard_fonts_final()
-    W, H = 1080, 2000
+    W, H = 1080, 1125
     img = Image.new("RGB", (W, H), BG_COLOR)
     draw = ImageDraw.Draw(img)
 
     dt_text = dt_text or now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
-    top_items = top_performers or _top_performers_line(cards)
-    _draw_header_final(draw, fonts, W, "LIVE DASHBOARD", dt_text, top_items)
+    top_text = top_performers or _top_performers_line(cards)
+    _draw_header_final(draw, fonts, W, "LIVE DASHBOARD", dt_text, top_text)
 
     top = 160
     gap = 18
-    rows, cols = 4, 2
+    rows, cols = 2, 2
     card_w = (W - 60) // 2
-    card_h = 400
+    card_h = 450
 
-    for i, item in enumerate(list(cards or [])[:8]):
+    for i, item in enumerate(list(cards or [])[:4]):
         r = i // cols
         c = i % cols
         x = 20 + c * (card_w + gap)
@@ -2942,10 +2916,20 @@ def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
 def _normalize_after_card_source(item):
     item = dict(item or {})
     symbol = _card_symbol_name(item.get("symbol", ""))
+    ltp = safe_float(item.get("ltp", item.get("exit_price", item.get("close_price", 0))), 0.0)
+    prev_close = safe_float(item.get("prev_close", item.get("yesterday_close", item.get("prevclose", 0))), 0.0)
+    raw_day_pct = item.get("day_pct", item.get("change_pct", None))
+    if raw_day_pct in ("", None):
+        day_pct = ((ltp - prev_close) / prev_close * 100.0) if prev_close > 0 and ltp > 0 else 0.0
+    else:
+        day_pct = safe_float(raw_day_pct, 0.0)
+    close_price = item.get("close_price", item.get("exit_price", ""))
+    if close_price in ("", None):
+        close_price = _fmt_ltp(ltp) if ltp > 0 else ""
     return {
         "symbol": symbol,
         "ltp": item.get("ltp", ""),
-        "day_pct": safe_float(item.get("day_pct", item.get("change_pct", 0)), 0.0),
+        "day_pct": day_pct,
         "side": str(item.get("side", "BUY")).upper(),
         "strategy": str(item.get("strategy", "15M INSIDE")),
         "status": str(item.get("status", "HOLD")).upper(),
@@ -2957,8 +2941,7 @@ def _normalize_after_card_source(item):
         "pl_text": item.get("pl_text", item.get("pl", "")),
         "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
         "exit_type": str(item.get("exit_type", item.get("result", "DAY END"))).upper(),
-        "close_price": item.get("close_price", item.get("exit_price", "")),
-        "day_pct": safe_float(item.get("day_pct", item.get("change_pct", 0)), 0.0),
+        "close_price": close_price,
     }
 
 
@@ -3006,28 +2989,26 @@ def _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item):
 
     draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
     draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
-    draw.text((x + 170, y + 203), f"Close: {item['close_price']}", fill=gray, font=fonts["body"])
-    day_fill_txt = dark_green if safe_float(item.get("day_pct", 0), 0.0) >= 0 else dark_red
-    draw.text((x + 340, y + 203), f"Day Gain: {_fmt_day_pct(item.get('day_pct', 0))}", fill=day_fill_txt, font=fonts["body"])
+    draw.text((x + 220, y + 203), f"Close: {item['close_price']}", fill=gray, font=fonts["body"])
 
 
 def build_after_market_dashboard_image(cards, top_performers=None, dt_text=None):
     fonts = _dashboard_fonts_final()
-    W, H = 1080, 2000
+    W, H = 1080, 1585
     img = Image.new("RGB", (W, H), BG_COLOR)
     draw = ImageDraw.Draw(img)
 
     dt_text = dt_text or now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
-    top_items = top_performers or _top_performers_line(cards)
-    _draw_header_final(draw, fonts, W, "AFTER MARKET SUMMARY", dt_text, top_items)
+    top_text = top_performers or _top_performers_line(cards)
+    _draw_header_final(draw, fonts, W, "AFTER MARKET SUMMARY", dt_text, top_text)
 
     top = 160
     gap = 18
-    rows, cols = 4, 2
+    rows, cols = 3, 2
     card_w = (W - 60) // 2
-    card_h = 400
+    card_h = 450
 
-    for i, item in enumerate(list(cards or [])[:8]):
+    for i, item in enumerate(list(cards or [])[:6]):
         r = i // cols
         c = i % cols
         x = 20 + c * (card_w + gap)
@@ -3192,10 +3173,11 @@ def _active_trade_cards_only():
         cards.append({
             "symbol": _card_symbol_name(sym) if "_card_symbol_name" in globals() else short_name(sym),
             "ltp": trade.get("ltp", ""),
+            "prev_close": trade.get("prev_close", 0.0),
             "day_pct": round(safe_float(trade.get("day_pct", 0), 0.0), 2),
             "side": trade.get("side", "BUY"),
             "strategy": trade.get("strategy", "LIVE"),
-            "status": trade.get("status", "LIVE"),
+            "status": trade.get("status", "HOLD"),
             "confidence": trade.get("confidence", ""),
             "entry": trade.get("entry", ""),
             "stoploss": trade.get("stoploss", ""),
