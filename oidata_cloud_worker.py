@@ -28,6 +28,9 @@ SOFT_GRAY    = (235, 235, 235)
 
 BORDER       = (200, 200, 200)
 
+MANUAL_HOLIDAY ={ "2026-01-2026",2026-03-30",2026-04-14"
+                }
+
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -1285,69 +1288,8 @@ def dedupe_candles_by_ts(candles):
     out.sort(key=lambda x: x[0])
     return out
 
-# ================= MARKET TIME =================
-def fetch_nse_holidays_from_web(year=None):
-    if year is None:
-        year = now_ist().year
-
-    url = "https://www.nseindia.com/resources/exchange-communication-holidays"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/"
-    }
-
-    session = requests.Session()
-    session.headers.update(headers)
-
-    try:
-        session.get("https://www.nseindia.com", timeout=20)
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-    except Exception as e:
-        log(f"Holiday fetch failed: {e}")
-        return set()
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    text = soup.get_text("\n", strip=True)
-
-    holidays = set()
-    for token in text.replace(",", " ").split():
-        token = token.strip()
-        try:
-            dt = datetime.strptime(token, "%d-%b-%Y")
-            if dt.year == year:
-                holidays.add(dt.strftime("%Y-%m-%d"))
-        except Exception:
-            pass
-
-    return holidays
-
-
-def get_holiday_set():
-    env_holidays = set()
-    for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
-        p = part.strip()
-        if p:
-            env_holidays.add(p)
-
-    web_holidays = fetch_nse_holidays_from_web(now_ist().year)
-    merged = env_holidays | web_holidays
-
-    log(f"NSE holidays loaded: {sorted(list(merged))}")
-    return merged
-
-
-try:
-    HOLIDAYS = get_holiday_set()
-except Exception as e:
-    log(f"Holiday init failed: {e}")
-    HOLIDAYS = set()
-
 def is_market_day(dt_obj):
-    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in HOLIDAYS
+    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in MANUAL_HOLIDAYS
 
 def is_market_open():
     now = now_ist()
