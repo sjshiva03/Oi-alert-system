@@ -8,29 +8,6 @@ from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from bs4 import BeautifulSoup
 
-# =========================
-# COLORS (ADD THIS BLOCK)
-# =========================
-
-BG_COLOR     = (245, 245, 245)
-WHITE        = (255, 255, 255)
-BLACK        = (0, 0, 0)
-
-GREEN        = (46, 204, 113)
-DARK_GREEN   = (0, 150, 80)
-
-RED          = (231, 76, 60)
-DARK_RED     = (180, 40, 40)
-
-SOFT_GREEN   = (220, 245, 230)
-SOFT_RED     = (250, 220, 220)
-SOFT_GRAY    = (235, 235, 235)
-
-BORDER       = (200, 200, 200)
-
-MANUAL_HOLIDAYS ={ "2026-01-26","2026-03-30","2026-04-14"
-                }
-
 # ================= CONFIG =================
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -50,10 +27,6 @@ TEXT_IMAGE_WIDTH = int(os.getenv("TEXT_IMAGE_WIDTH", "2000"))
 TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
 
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
-GAPUPPLUS_STOCKS_RAW = (os.getenv("GAPUPPLUS_STOCKS") or "").strip()
-INSIDE15_BUY_STOCKS_RAW = (os.getenv("INSIDE15_BUY_STOCKS") or "").strip()
-INSIDE15_SELL_STOCKS_RAW = (os.getenv("INSIDE15_SELL_STOCKS") or "").strip()
-PIVOT30_STOCKS_RAW = (os.getenv("PIVOT30_STOCKS") or "").strip()
 
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
 
@@ -69,8 +42,6 @@ LEVERAGE = float(os.getenv("LEVERAGE", "5"))
 TARGET_RR = float(os.getenv("TARGET_RR", "1.0"))
 SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.1")) / 100.0
 MAX_QTY = int(os.getenv("MAX_QTY", "100000"))
-POSITION_RISK = float(os.getenv("POSITION_RISK", str(RISK_AMOUNT)))
-SOFT_GRAY = (240, 240, 240)
 
 # Live tracking
 LTP_INTERVAL_PER_STOCK = int(os.getenv("LTP_INTERVAL_PER_STOCK", "2"))
@@ -78,7 +49,6 @@ OI_INTERVAL_SECONDS = int(os.getenv("OI_INTERVAL_SECONDS", "180"))
 OI_STOCK_GAP_SECONDS = int(os.getenv("OI_STOCK_GAP_SECONDS", "10"))
 ALERT_GAP_SECONDS = int(os.getenv("ALERT_GAP_SECONDS", "300"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
-LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS", "60"))
 
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
@@ -107,46 +77,6 @@ def convert_symbol(sym: str) -> str:
 
 SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
 
-def parse_symbol_set(raw: str):
-    out = set()
-    for part in str(raw or "").split(","):
-        sym = part.strip().upper()
-        if sym:
-            out.add(sym)
-    return out
-
-def base_symbol_name(symbol: str) -> str:
-    s = str(symbol or "").upper().strip()
-    if ":" in s:
-        s = s.split(":", 1)[1]
-    for suffix in ("-EQ", "-INDEX"):
-        if s.endswith(suffix):
-            s = s[:-len(suffix)]
-    return s.strip()
-
-GAPUPPLUS_STOCKS = parse_symbol_set(GAPUPPLUS_STOCKS_RAW)
-INSIDE15_BUY_STOCKS = parse_symbol_set(INSIDE15_BUY_STOCKS_RAW)
-INSIDE15_SELL_STOCKS = parse_symbol_set(INSIDE15_SELL_STOCKS_RAW)
-PIVOT30_STOCKS = parse_symbol_set(PIVOT30_STOCKS_RAW)
-
-def is_symbol_allowed(symbol: str, strategy: str, side: str = "") -> bool:
-    name = base_symbol_name(symbol)
-    strategy = str(strategy or "").upper()
-    side = str(side or "").upper()
-    if strategy == "GAPUP_PLUS":
-        return (not GAPUPPLUS_STOCKS) or (name in GAPUPPLUS_STOCKS)
-    if strategy == "INSIDE_15M":
-        if side == "BUY":
-            return (not INSIDE15_BUY_STOCKS) or (name in INSIDE15_BUY_STOCKS)
-        if side == "SELL":
-            return (not INSIDE15_SELL_STOCKS) or (name in INSIDE15_SELL_STOCKS)
-        buy_ok = (not INSIDE15_BUY_STOCKS) or (name in INSIDE15_BUY_STOCKS)
-        sell_ok = (not INSIDE15_SELL_STOCKS) or (name in INSIDE15_SELL_STOCKS)
-        return buy_ok or sell_ok
-    if strategy == "PIVOT_30M_WEEKLY_SELL":
-        return (not PIVOT30_STOCKS) or (name in PIVOT30_STOCKS)
-    return True
-
 # ================= GLOBAL STATE =================
 watch_candidates = {}
 active_trades = {}
@@ -167,7 +97,6 @@ eod_stats = {
 }
 last_alert_time = {}
 pivot_scan_done_keys = set()
-last_live_dashboard_sent = 0.0
 
 # ================= TELEGRAM SEND =================
 def send(msg: str):
@@ -184,30 +113,6 @@ def send(msg: str):
         print(f"Telegram error: {e}")
 
 # ================= HELPERS =================
-
-# =========================
-# FORMAT HELPERS (ADD HERE)
-# =========================
-
-def _fmt_ltp(val):
-    try:
-        return f"{float(val):.2f}"
-    except:
-        return str(val)
-
-def _fmt_pct(val):
-    try:
-        return f"{float(val):+.2f}%"
-    except:
-        return str(val)
-
-def _fmt_day_pct(val):
-    try:
-        v = float(val)
-        return f"{v:.2f}%"
-    except:
-        return str(val)
-
 
 def _save_image_to_bytes(img, base_name):
     ext = TELEGRAM_IMAGE_FORMAT.lower().strip()
@@ -298,18 +203,18 @@ def _load_single_font(size, bold=False):
 
 def _load_fonts():
     return {
-        "title": _load_single_font(60, True),
-        "sub": _load_single_font(22, True),
-        "label": _load_single_font(20, True),
-        "value": _load_single_font(28, True),
-        "card_title": _load_single_font(30, True),
-        "card_pct": _load_single_font(24, True),
-        "strategy": _load_single_font(18, True),
-        "value_bold": _load_single_font(18, True),
-        "small": _load_single_font(16, True),
-        "tiny": _load_single_font(14, False),
-        "card": _load_single_font(26, True),
-        "text": _load_single_font(20, True),
+        "title": _load_single_font(96, True),
+        "sub": _load_single_font(42, True),
+        "label": _load_single_font(22, True),
+        "value": _load_single_font(32, True),
+        "card_title": _load_single_font(36, True),
+        "card_pct": _load_single_font(30, True),
+        "strategy": _load_single_font(28, True),
+        "value_bold": _load_single_font(26, True),
+        "small": _load_single_font(22, True),
+        "tiny": _load_single_font(18, False),
+        "card": _load_single_font(32, True),
+        "text": _load_single_font(26, True),
     }
 
 
@@ -753,15 +658,12 @@ def _after_market_cards_from_closed():
             "side": x.get("side", "SELL"),
             "result": reason,
             "entry": x.get("entry", ""),
-            "stoploss": x.get("stoploss", ""),
-            "target": x.get("target", ""),
-            "qty": x.get("qty", ""),
+            "stoploss": "",
+            "target": "",
+            "qty": "",
             "pl": f"{pnl:+.2f}",
             "pnl_value": pnl,
-            "oi_rows": [],
-            "close_price": x.get("close_price", x.get("exit", "")),
-            "day_pct": x.get("day_pct", 0.0),
-            "confidence": x.get("confidence", ""),
+            "oi_rows": []
         })
     if not cards:
         cards.append({
@@ -847,23 +749,17 @@ def build_after_market_cards(gap_items, inside_items, pivot_items):
 def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + STRATEGY OUTCOME", analysis_dt=""):
     fonts = _load_fonts()
 
-    # FINAL LOCKED SIZE
-    W = 1080
-    PAD = 20
-    HEADER_H = 120
-    STATS_H = 82
-    RANK_H = 60
-    CARD_H = 220
-    ROW_GAP = 18
-    COL_GAP = 16
-    TOP_MARGIN = 340
+    W = 1800
+    PAD = 28
+    HEADER_H = 140
+    STATS_H = 110
+    RANK_H = 72
+    CARD_H = 250
+    GAP = 24
 
     cards = list(cards or [])
-    cards = cards[:8]   # 8 cards per page
-    rows = 4
-    cols = 2
-
-    H = TOP_MARGIN + (rows * (CARD_H + ROW_GAP)) + 40
+    total_rows = max(1, math.ceil(len(cards) / 2))
+    H = PAD + HEADER_H + GAP + STATS_H + GAP + RANK_H + GAP + total_rows * (CARD_H + GAP) + 40
 
     img = Image.new("RGB", (W, H), (242, 244, 247))
     draw = ImageDraw.Draw(img)
@@ -874,57 +770,24 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     border = (216, 221, 228)
     text_dark = (40, 46, 55)
     muted = (122, 130, 141)
-
     buy_green = (46, 191, 135)
     sell_red = (240, 92, 87)
     soft_green = (232, 246, 239)
     soft_red = (250, 236, 236)
-
     pnl_green = (21, 150, 92)
     pnl_red = (210, 60, 60)
     amber = (231, 181, 20)
-    black = (25, 25, 25)
 
-    # FINAL FONT SIZES
-    font_title = _load_single_font(46, True)
-    font_sub = _load_single_font(22, True)
-
-    font_stat_label = _load_single_font(16, True)
-    font_stat_value = _load_single_font(22, True)
-
-    font_card_title = _load_single_font(22, True)
-    font_card_pct = _load_single_font(20, True)
-    font_strategy = _load_single_font(18, True)
-    font_body = _load_single_font(16, True)
-    font_small = _load_single_font(14, False)
-    font_exit = _load_single_font(16, True)
-
-    def txt_w(text, font):
-        return draw.textbbox((0, 0), str(text), font=font)[2]
-
-    def fit_text(text, font, max_w):
-        text = str(text or "")
-        if txt_w(text, font) <= max_w:
-            return text
-        while len(text) > 1:
-            text = text[:-1]
-            cand = text.rstrip() + "..."
-            if txt_w(cand, font) <= max_w:
-                return cand
-        return "..."
-
-    # HEADER
     draw.rounded_rectangle((PAD, PAD, W - PAD, PAD + HEADER_H), radius=30, fill=red_header)
-    draw.text((PAD + 20, PAD + 16), title, font=font_title, fill=white)
-    draw.text((PAD + 20, PAD + 70), subtitle, font=font_sub, fill=white)
+    draw.text((PAD + 28, PAD + 20), title, font=fonts["title"], fill=white)
+    draw.text((PAD + 28, PAD + 82), subtitle, font=fonts["sub"], fill=white)
 
     right_txt = analysis_dt or now_ist().strftime("%a, %b %d").upper()
-    rw = txt_w(right_txt, font_sub)
-    draw.text((W - PAD - rw - 20, PAD + 70), right_txt, font=font_sub, fill=white)
+    rw, _ = _text_size(draw, right_txt, fonts["sub"])
+    draw.text((W - PAD - rw - 28, PAD + 80), right_txt, font=fonts["sub"], fill=white)
 
-    # STATS
-    y_stats = PAD + HEADER_H + 18
-    draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=22, fill=dark_panel)
+    y_stats = PAD + HEADER_H + GAP
+    draw.rounded_rectangle((PAD, y_stats, W - PAD, y_stats + STATS_H), radius=24, fill=dark_panel)
 
     total_watch = len(cards)
     tgt = sum(1 for c in cards if "TARGET" in _clean_status_text(c.get("result", "")))
@@ -932,49 +795,35 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     exit_n = sum(1 for c in cards if any(x in _clean_status_text(c.get("result", "")) for x in ["EXIT", "DAY END", "NO ENTRY"]))
     net_pnl = round(sum(safe_float(c.get("pnl_value", 0.0), 0.0) for c in cards), 2)
     win_pct = round((tgt / total_watch) * 100, 1) if total_watch else 0.0
+    stats = [("Trades", str(total_watch)), ("Target", str(tgt)), ("SL", str(sl)), ("Exit", str(exit_n)), ("Win %", f"{win_pct}%"), ("Net P/L", f"₹{net_pnl:+,.0f}")]
 
-    stats = [
-        ("Trades", str(total_watch)),
-        ("Target", str(tgt)),
-        ("SL", str(sl)),
-        ("Exit", str(exit_n)),
-        ("Win %", f"{win_pct}%"),
-        ("Net P/L", f"₹{net_pnl:+,.0f}")
-    ]
+    sx = PAD + 26
+    for idx, (label, value) in enumerate(stats):
+        draw.text((sx, y_stats + 18), label, font=fonts["small"], fill=(220, 230, 240))
+        val_color = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
+        draw.text((sx, y_stats + 52), value, font=fonts["value_bold"], fill=val_color)
+        sx += 255 if idx < 5 else 290
 
-    sx = PAD + 16
-    stat_gap = 146
-    for i, (label, value) in enumerate(stats):
-        draw.text((sx, y_stats + 12), label, font=font_stat_label, fill=(220, 230, 240))
-        val_fill = white if label != "Net P/L" else (pnl_green if net_pnl >= 0 else pnl_red)
-        draw.text((sx, y_stats + 38), value, font=font_stat_value, fill=val_fill)
-        sx += stat_gap
-
-    # TOP PERFORMERS
-    y_rank = y_stats + STATS_H + 18
-    draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=16, fill=white, outline=border, width=2)
-    draw.text((PAD + 14, y_rank + 12), "TOP PERFORMERS", font=font_rank_title, fill=text_dark)
-    draw.text((PAD + 14, y_rank + 34), "Sorted by highest realized profit", font=font_rank_sub, fill=muted)
+    y_rank = y_stats + STATS_H + GAP
+    draw.rounded_rectangle((PAD, y_rank, W - PAD, y_rank + RANK_H), radius=18, fill=white, outline=border, width=2)
+    draw.text((PAD + 24, y_rank + 14), "TOP PERFORMERS", font=fonts["label"], fill=text_dark)
+    draw.text((PAD + 24, y_rank + 42), "Sorted by highest realized profit", font=fonts["small"], fill=muted)
 
     ranked = sorted(cards, key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:3]
-    rx = PAD + 250
-    for idx, c in enumerate(ranked, 1):
+    rx = PAD + 480
+    for i, c in enumerate(ranked, 1):
         pnl_txt = f"{safe_float(c.get('pnl_value', 0), 0):+,.0f}"
-        txt = fit_text(f"{idx}) {c.get('symbol', '')} {pnl_txt}", font_rank_item, 170)
+        txt = _fit_text(draw, f"{i}) {c.get('symbol', '')} {pnl_txt}", fonts["small"], 300)
         fill = pnl_green if safe_float(c.get("pnl_value", 0), 0) >= 0 else pnl_red
-        draw.text((rx, y_rank + 12), txt, font=font_rank_item, fill=fill)
-        rx += 180
-
-    card_w = (W - (PAD * 2) - COL_GAP) // 2
+        draw.text((rx, y_rank + 16), txt, font=fonts["small"], fill=fill)
+        rx += 320
 
     def draw_after_card(x, y, item):
         side = str(item.get("side", "SELL")).upper()
         result = _clean_status_text(item.get("result", ""))
         strategy = str(item.get("strategy", ""))
-
-        symbol = fit_text(_format_symbol_with_ltp(item.get("symbol", ""), item.get("ltp", "")), font_card_title, 300)
+        symbol = _fit_text(draw, _format_symbol_with_ltp(item.get("symbol", ""), item.get("ltp", "")), fonts["card_title"], 520)
         score = int(safe_float(item.get("score", 0), 0))
-
         entry = item.get("entry", "")
         slv = item.get("stoploss", "")
         tgtv = item.get("target", "")
@@ -984,51 +833,44 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
 
         header_fill = buy_green if side == "BUY" else sell_red
         soft_fill = soft_green if side == "BUY" else soft_red
-        result_fill = buy_green if result == "TARGET" else sell_red if result == "STOPLOSS" else black
-        pnl_fill = pnl_green if pnl_val >= 0 else pnl_red
 
-        draw.rounded_rectangle((x, y, x + card_w, y + CARD_H), radius=20, fill=white, outline=border, width=2)
+        draw.rounded_rectangle((x, y, x + 850, y + CARD_H), radius=24, fill=white, outline=border, width=2)
+        draw.rounded_rectangle((x + 14, y + 14, x + 836, y + 62), radius=18, fill=header_fill)
+        draw.text((x + 28, y + 22), symbol, font=fonts["card_title"], fill=white)
+        draw.text((x + 748, y + 22), f"{score}%", font=fonts["card_pct"], fill=white)
 
-        # top strip
-        draw.rounded_rectangle((x + 10, y + 10, x + card_w - 10, y + 44), radius=14, fill=header_fill)
-        draw.text((x + 18, y + 16), symbol, font=font_card_title, fill=white)
-        draw.text((x + card_w - 62, y + 16), f"{score}%", font=font_card_pct, fill=white)
+        draw.rounded_rectangle((x + 14, y + 78, x + 836, y + 124), radius=12, fill=soft_fill)
+        draw.text((x + 28, y + 88), strategy, font=fonts["strategy"], fill=text_dark)
+        draw.text((x + 220, y + 88), "•", font=fonts["strategy"], fill=text_dark)
+        draw.text((x + 250, y + 88), side, font=fonts["strategy"], fill=text_dark)
+        draw.text((x + 318, y + 88), "•", font=fonts["strategy"], fill=text_dark)
+        draw.text((x + 348, y + 88), result, font=fonts["strategy"], fill=header_fill)
 
-        # strategy strip
-        draw.rounded_rectangle((x + 10, y + 52, x + card_w - 10, y + 86), radius=10, fill=soft_fill)
-        draw.text((x + 18, y + 60), strategy, font=font_strategy, fill=text_dark)
-        draw.text((x + 118, y + 60), "•", font=font_strategy, fill=text_dark)
-        draw.text((x + 138, y + 60), side, font=font_strategy, fill=text_dark)
-        draw.text((x + 180, y + 60), "•", font=font_strategy, fill=text_dark)
-        draw.text((x + 200, y + 60), result, font=font_strategy, fill=result_fill)
+        draw.text((x + 28, y + 144), f"Entry: {entry}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 230, y + 144), f"SL: {slv}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 410, y + 144), f"Target: {tgtv}", font=fonts["value_bold"], fill=text_dark)
 
-        # body row 1
-        draw.text((x + 18, y + 104), f"Entry: {entry}", font=font_body, fill=text_dark)
-        draw.text((x + 126, y + 104), f"SL: {slv}", font=font_body, fill=text_dark)
-        draw.text((x + 230, y + 104), f"Target: {tgtv}", font=font_body, fill=text_dark)
+        draw.text((x + 28, y + 188), f"Qty: {qty}", font=fonts["value_bold"], fill=text_dark)
+        draw.text((x + 180, y + 188), f"P/L: {pl_txt}", font=fonts["value_bold"], fill=pnl_green if pnl_val >= 0 else pnl_red)
+        draw.text((x + 372, y + 188), f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X", font=fonts["value_bold"], fill=amber)
 
-        # body row 2
-        draw.text((x + 18, y + 136), f"Qty: {qty}", font=font_body, fill=text_dark)
-        draw.text((x + 110, y + 136), f"P/L: {pl_txt}", font=font_body, fill=pnl_fill)
-        lev_txt = f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X"
-        draw.text((x + 220, y + 136), lev_txt, font=font_body, fill=amber)
+        draw.text((x + 28, y + 224), "Exit Type", font=fonts["small"], fill=muted)
+        draw.text((x + 154, y + 224), result, font=fonts["small"], fill=header_fill if result in {"STOPLOSS", "TARGET"} else text_dark)
+        draw.text((x + 28, y + 246), "Realized result recorded in after-market book", font=fonts["small"], fill=text_dark)
 
-        # body row 3
-        draw.text((x + 18, y + 166), "Exit Type", font=font_small, fill=muted)
-        draw.text((x + 88, y + 166), result, font=font_exit, fill=result_fill)
+    start_y = y_rank + RANK_H + GAP
+    positions = []
+    cur_y = start_y
+    for idx, item in enumerate(cards):
+        col = idx % 2
+        if idx and idx % 2 == 0:
+            cur_y += CARD_H + GAP
+        positions.append((PAD if col == 0 else 922, cur_y))
 
-    # 4x2 grid
-    for i, item in enumerate(cards):
-        row = i // 2
-        col = i % 2
-        x = PAD + col * (card_w + COL_GAP)
-        y = TOP_MARGIN + row * (CARD_H + ROW_GAP)
+    for item, (x, y) in zip(cards, positions):
         draw_after_card(x, y, item)
 
     return _save_image_to_bytes(img, "after_market_dashboard")
-    
-        
-    
 
 def send_rich_summary_image(items, title="SUMMARY", subtitle="", caption=""):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -1055,18 +897,20 @@ def send_dashboard_image(items, title="STOCKS TO WATCH", subtitle="ULTIMATE DASH
     except Exception as e:
         log(f"Dashboard image error: {e}")
 
+
 def send_after_market_summary_image(cards=None, caption="After Market Summary"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
         cards = list(cards or _after_market_cards_from_closed())
-        pages = list(chunk_list(cards, 8))
+        pages = list(chunk_list(cards, max(1, AFTER_MARKET_PAGE_SIZE)))
         total_pages = len(pages)
         for idx, page_cards in enumerate(pages, 1):
-            img_bytes = build_after_market_dashboard_image(
+            img_bytes = _load_font(
                 cards=page_cards,
-                top_performers=_top_performers_line(page_cards),
-                dt_text=analysis_date_str().upper()
+                title="AFTER MARKET SUMMARY",
+                subtitle="RESULTS + P/L + STRATEGY OUTCOME",
+                analysis_dt=analysis_date_str().upper()
             )
             page_caption = caption
             if total_pages > 1:
@@ -1074,7 +918,6 @@ def send_after_market_summary_image(cards=None, caption="After Market Summary"):
             send_telegram_image(img_bytes.name, img_bytes, caption=page_caption)
     except Exception as e:
         log(f"After market summary image error: {e}")
-
 
 
 def build_live_trade_image(trade, ltp=None, status=None, oi_rows=None, header_title="STOCKS TO WATCH", reason_text=""):
@@ -1330,8 +1173,69 @@ def dedupe_candles_by_ts(candles):
     out.sort(key=lambda x: x[0])
     return out
 
+# ================= MARKET TIME =================
+def fetch_nse_holidays_from_web(year=None):
+    if year is None:
+        year = now_ist().year
+
+    url = "https://www.nseindia.com/resources/exchange-communication-holidays"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/"
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        session.get("https://www.nseindia.com", timeout=20)
+        r = session.get(url, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        log(f"Holiday fetch failed: {e}")
+        return set()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    text = soup.get_text("\n", strip=True)
+
+    holidays = set()
+    for token in text.replace(",", " ").split():
+        token = token.strip()
+        try:
+            dt = datetime.strptime(token, "%d-%b-%Y")
+            if dt.year == year:
+                holidays.add(dt.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+
+    return holidays
+
+
+def get_holiday_set():
+    env_holidays = set()
+    for part in NSE_HOLIDAYS_RAW.replace(";", ",").split(","):
+        p = part.strip()
+        if p:
+            env_holidays.add(p)
+
+    web_holidays = fetch_nse_holidays_from_web(now_ist().year)
+    merged = env_holidays | web_holidays
+
+    log(f"NSE holidays loaded: {sorted(list(merged))}")
+    return merged
+
+
+try:
+    HOLIDAYS = get_holiday_set()
+except Exception as e:
+    log(f"Holiday init failed: {e}")
+    HOLIDAYS = set()
+
 def is_market_day(dt_obj):
-    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in MANUAL_HOLIDAYS
+    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in HOLIDAYS
 
 def is_market_open():
     now = now_ist()
@@ -1758,8 +1662,7 @@ def scan_gapup_pattern(symbol):
         "entry": entry,
         "stoploss": sl,
         "target": target,
-        "pattern_time": candle_dt(first[0]).strftime("%H:%M"),
-        "confidence": 92
+        "pattern_time": candle_dt(first[0]).strftime("%H:%M")
     }
 
 def scan_15m_inside_pattern(symbol):
@@ -1795,9 +1698,7 @@ def scan_15m_inside_pattern(symbol):
         "sell_entry": round(l1, 2),
         "sell_stoploss": round(h1 * (1 + SL_BUFFER_PCT), 2),
         "sell_target": round(l1 - ((h1 * (1 + SL_BUFFER_PCT)) - l1) * TARGET_RR, 2),
-        "pattern_time": candle_dt(c2[0]).strftime("%H:%M"),
-        "buy_confidence": 94,
-        "sell_confidence": 94
+        "pattern_time": candle_dt(c2[0]).strftime("%H:%M")
     }
 
 def compute_weekly_r_levels(prev_week):
@@ -1871,7 +1772,7 @@ def scan_30m_pivot_sell(symbol):
     pivot_name, pivot_value = touched_levels[-1]
 
     entry = round(c2_low, 2)
-    stoploss = round(c2_high * (1 + SL_BUFFER_PCT), 2)
+    stoploss = round(c2_high, 2)
     if stoploss <= entry:
         return None
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
@@ -1885,8 +1786,7 @@ def scan_30m_pivot_sell(symbol):
         "entry": entry,
         "stoploss": stoploss,
         "target": target,
-        "pattern_time": candle_dt(c2[0]).strftime("%H:%M"),
-        "confidence": 90
+        "pattern_time": candle_dt(c2[0]).strftime("%H:%M")
     }
 
 # ================= SUMMARY FORMATTERS =================
@@ -1921,31 +1821,6 @@ def add_watch_candidate(symbol, payload):
     if symbol in active_trades:
         return
 
-    payload = dict(payload or {})
-    strategy = payload.get("strategy", "")
-
-    if strategy == "GAPUP_PLUS" and not is_symbol_allowed(symbol, strategy, "SELL"):
-        return
-
-    if strategy == "INSIDE_15M":
-        buy_allowed = is_symbol_allowed(symbol, strategy, "BUY")
-        sell_allowed = is_symbol_allowed(symbol, strategy, "SELL")
-        if not buy_allowed:
-            payload["buy_entry"] = ""
-            payload["buy_stoploss"] = ""
-            payload["buy_target"] = ""
-            payload["buy_confidence"] = ""
-        if not sell_allowed:
-            payload["sell_entry"] = ""
-            payload["sell_stoploss"] = ""
-            payload["sell_target"] = ""
-            payload["sell_confidence"] = ""
-        if not buy_allowed and not sell_allowed:
-            return
-
-    if strategy == "PIVOT_30M_WEEKLY_SELL" and not is_symbol_allowed(symbol, strategy, "SELL"):
-        return
-
     prev = watch_candidates.get(symbol)
     if prev and prev.get("strategy") == payload.get("strategy"):
         return
@@ -1973,19 +1848,16 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
     trade["exposure"] = round(exposure, 2)
     trade["margin"] = round(margin, 2)
     trade["risk_per_share"] = round(risk_per_share, 2)
-    trade["oi_rows"] = list(oi_rows or [])[:5]
-    trade["oi_bias"] = oi_bias
 
-    send(
-        f"✅ ENTRY CONFIRMED\n"
-        f"{short_name(symbol)}\n"
-        f"Strategy: {trade.get('strategy', '')}\n"
-        f"Side: {trade.get('side', '')}\n"
-        f"Entry: {trade.get('entry', '')}\n"
-        f"SL: {trade.get('stoploss', '')}\n"
-        f"Target: {trade.get('target', '')}\n"
-        f"Qty: {qty}\n"
-        f"OI Bias: {oi_bias}"
+    reason = f"Risk ₹{int(RISK_AMOUNT)} | Qty {qty} | Margin ~{round(margin)} | OI {oi_bias}"
+    send_live_trade_image(
+        trade,
+        ltp=trade["entry"],
+        status="ENTRY CONFIRMED",
+        oi_rows=oi_rows,
+        header_title="LIVE + OI + RISK + ENTRY",
+        reason_text=reason,
+        caption=f"{short_name(symbol)} Entry Confirmed"
     )
 
 def try_entry_for_candidate(symbol):
@@ -2023,8 +1895,7 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("confidence", 92)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2033,7 +1904,7 @@ def try_entry_for_candidate(symbol):
         return
 
     if strategy == "INSIDE_15M":
-        if c.get("buy_entry") not in ("", None) and ltp >= c["buy_entry"]:
+        if ltp >= c["buy_entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BULLISH":
                 if throttle_ok(f"{symbol}|blocked|BUY"):
@@ -2050,8 +1921,7 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["buy_stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("buy_confidence", 94)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "BUY"})
@@ -2059,7 +1929,7 @@ def try_entry_for_candidate(symbol):
             del watch_candidates[symbol]
             return
 
-        if c.get("sell_entry") not in ("", None) and ltp <= c["sell_entry"]:
+        if ltp <= c["sell_entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if bias != "BEARISH":
                 if throttle_ok(f"{symbol}|blocked|SELL"):
@@ -2076,8 +1946,7 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["sell_stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("sell_confidence", 94)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2106,8 +1975,7 @@ def try_entry_for_candidate(symbol):
                 "pivot_value": c["pivot_value"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0,
-                "confidence": c.get("confidence", 90)
+                "last_oi_alert": 0
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2145,114 +2013,70 @@ def close_trade(symbol, reason, exit_price):
         "entry": trade["entry"],
         "exit": trade["exit_price"],
         "pnl": pnl,
-        "reason": reason,
-        "qty": qty,
-        "target": trade.get("target", ""),
-        "stoploss": trade.get("stoploss", ""),
-        "close_price": trade.get("exit_price", ""),
-        "day_pct": trade.get("day_pct", 0.0),
-        "confidence": trade.get("confidence", ""),
+        "reason": reason
     })
 
-    send(
-        f"📌 TRADE CLOSED\n"
-        f"{short_name(symbol)}\n"
-        f"Strategy: {trade.get('strategy', '')}\n"
-        f"Side: {trade.get('side', '')}\n"
-        f"Reason: {reason}\n"
-        f"Exit: {trade.get('exit_price', '')}\n"
-        f"P/L: {pnl:+.2f}"
+    send_live_trade_image(
+        trade,
+        ltp=trade["exit_price"],
+        status=reason,
+        oi_rows=[],
+        header_title="TRADE CLOSED",
+        reason_text=f"Exit {trade['exit_price']} | Qty {qty} | P/L {pnl}",
+        caption=f"{short_name(symbol)} {reason}"
     )
 
 def track_active_trade(symbol):
-    trade = active_trades.get(symbol)
-    if not trade:
+    if symbol not in active_trades:
         return
 
+    trade = active_trades[symbol]
     q = fetch_quotes(symbol)
-    ltp = safe_float(q.get("ltp", 0), 0.0)
-    day_low = safe_float(q.get("low_price", q.get("low", ltp)), ltp)
-    day_high = safe_float(q.get("high_price", q.get("high", ltp)), ltp)
-
-    entry = safe_float(trade.get("entry", 0), 0.0)
-    target = safe_float(trade.get("target", 0), 0.0)
-    stoploss = safe_float(trade.get("stoploss", 0), 0.0)
-    qty = int(safe_float(trade.get("qty", 0), 0))
-    side = str(trade.get("side", "")).upper()
-
-    prev_close = safe_float(q.get("prev_close", 0), 0.0)
-    day_pct = ((ltp - prev_close) / prev_close * 100.0) if prev_close else 0.0
-
-    trade["ltp"] = round(ltp, 2)
-    trade["day_low"] = round(day_low, 2)
-    trade["day_high"] = round(day_high, 2)
-    trade["day_pct"] = round(day_pct, 2)
-
-    # running pnl
-    if side == "BUY":
-        pnl = (ltp - entry) * qty
-    else:
-        pnl = (entry - ltp) * qty
-
-    trade["pnl_value"] = round(pnl, 2)
-    trade["pl_text"] = f"{pnl:+.0f}"
-
-    hit_target = False
-    hit_sl = False
-
-    # ===== TARGET / SL CHECK =====
-    if side == "SELL":
-        if day_low <= target:
-            hit_target = True
-        elif day_high >= stoploss:
-            hit_sl = True
-
-    elif side == "BUY":
-        if day_high >= target:
-            hit_target = True
-        elif day_low <= stoploss:
-            hit_sl = True
-
-    if hit_target or hit_sl:
-        reason = "TARGET" if hit_target else "STOPLOSS"
-        exit_px = target if hit_target else stoploss
-
-        trade["result"] = reason
-        trade["exit_type"] = reason
-        trade["exit_price"] = round(exit_px, 2)
-
-        closed_item = {
-            "symbol": symbol,
-            "strategy": trade.get("strategy", ""),
-            "side": side,
-            "entry": entry,
-            "exit": round(exit_px, 2),
-            "reason": reason,
-            "pnl": round(trade["pnl_value"], 2),
-        }
-        eod_stats["closed"].append(closed_item)
-
-        if hit_target:
-            eod_stats["targets"].append(closed_item)
-        else:
-            eod_stats["stoplosses"].append(closed_item)
-
-        closed_for_day.add(symbol)
-        active_trades.pop(symbol, None)
-
-        log(f"{short_name(symbol)} closed -> {reason} @ {exit_px}")
+    ltp = q.get("ltp", 0.0)
+    if ltp <= 0:
         return
 
-    # ===== only for still-active trades =====
-    snap = get_oi_snapshot(symbol, ltp)
-    oi_rows = snap.get("rows", []) if isinstance(snap, dict) else []
-    bias = str(snap.get("bias", "")) if isinstance(snap, dict) else ""
+    if trade["side"] == "BUY":
+        if ltp <= trade["stoploss"]:
+            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
+            return
+        if ltp >= trade["target"]:
+            close_trade(symbol, "Target 🎯", trade["target"])
+            return
+    else:
+        if ltp >= trade["stoploss"]:
+            close_trade(symbol, "Stoploss 🛑", trade["stoploss"])
+            return
+        if ltp <= trade["target"]:
+            close_trade(symbol, "Target 🎯", trade["target"])
+            return
 
-    trade["oi_rows"] = oi_rows
-    trade["oi_bias"] = bias
+    if now_epoch() - trade.get("last_oi_check", 0) >= OI_INTERVAL_SECONDS:
+        oi_rows, bias = get_oi_snapshot(symbol, ltp)
+        status = hold_status(trade["side"], bias)
+        trade["last_oi_check"] = now_epoch()
 
-    status = "BUY HOLD" if side == "BUY" else "SELL HOLD"
-    trade["status"] = status
+        if throttle_ok(f"{symbol}|live_oi"):
+            send_live_trade_image(
+                trade,
+                ltp=ltp,
+                status=status,
+                oi_rows=oi_rows,
+                header_title="LIVE + OI + RISK + RANKING",
+                reason_text=f"Strategy {trade['strategy']} | OI bias {bias}",
+                caption=f"{short_name(symbol)} {status}"
+            )
+
+        if status == "Exit ⚪" and throttle_ok(f"{symbol}|oi_exit"):
+            send_live_trade_image(
+                trade,
+                ltp=ltp,
+                status=status,
+                oi_rows=oi_rows,
+                header_title="OI EXIT SIGNAL",
+                reason_text="OI turned against trade",
+                caption=f"{short_name(symbol)} OI Exit"
+            )
 
 
 # ================= SCAN SCHEDULERS =================
@@ -2316,11 +2140,9 @@ def scan_pivot_30m_once():
 
 # ================= LIVE LOOP =================
 def run_live_day():
-    global last_live_dashboard_sent
     gap_summary_sent = False
     inside_summary_sent = False
     eod_sent = False
-    last_live_dashboard_sent = 0.0
 
     while True:
         if not is_market_open():
@@ -2331,18 +2153,10 @@ def run_live_day():
         if not gap_summary_sent and nowt >= dtime(9, 20):
             scan_gapup_once()
             gap_summary_sent = True
-            try:
-                send_live_dashboard_image(cards=_active_trade_cards_only(), caption="Live Dashboard")
-            except Exception as e:
-                log(f"LIVE DASHBOARD ERROR after gap scan: {e}")
 
         if not inside_summary_sent and nowt >= dtime(9, 45):
             scan_inside15_once()
             inside_summary_sent = True
-            try:
-                send_live_dashboard_image(cards=_active_trade_cards_only(), caption="Live Dashboard")
-            except Exception as e:
-                log(f"LIVE DASHBOARD ERROR after inside scan: {e}")
 
         if should_run_pivot_scan():
             scan_pivot_30m_once()
@@ -2362,14 +2176,6 @@ def run_live_day():
             except Exception as e:
                 log(f"TRACK ERROR {sym}: {e}")
             time.sleep(LTP_INTERVAL_PER_STOCK)
-
-        try:
-            if _should_send_live_dashboard():
-                live_cards = _active_trade_cards_only()
-                if live_cards:
-                    send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
-        except Exception as e:
-            log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
 
         if not eod_sent and nowt >= dtime(15, 28):
             send_after_market_summary_image(caption="End of Day Report")
@@ -2477,7 +2283,7 @@ def evaluate_pivot_after_market(symbol):
 
     pivot_name, pivot_value = touched[-1]
     entry = round(c2_low, 2)
-    stoploss = round(c2_high * (1 + SL_BUFFER_PCT), 2)
+    stoploss = round(c2_high, 2)
     if stoploss <= entry:
         return None
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
@@ -2718,9 +2524,9 @@ def run_after_market_once():
         except Exception as e:
             log(f"PIVOT AFTER ERROR {sym}: {e}")
 
-    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=AFTER_MARKET_PAGE_SIZE)
-    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=AFTER_MARKET_PAGE_SIZE)
-    send_after_market_category_images(pivot_items, "PIVOT", per_image=AFTER_MARKET_PAGE_SIZE)
+    send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=6)
+    send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=6)
+    send_after_market_category_images(pivot_items, "PIVOT", per_image=6)
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
@@ -2763,512 +2569,6 @@ def build_eod_report():
             lines.append(f"{x['symbol']} | {x['strategy']} | {x['side']} | {x['reason']}")
 
     return "\n".join(lines).strip()
-
-
-
-# ================= FINAL DASHBOARD OVERRIDES =================
-def _card_symbol_name(symbol: str) -> str:
-    s = str(symbol or "")
-    return short_name(s) if ":" in s else s
-
-
-def _top_performers_line(cards, top_n=3):
-    ranked = sorted(list(cards or []), key=lambda x: safe_float(x.get("pnl_value", 0), 0), reverse=True)[:top_n]
-    return ranked
-
-
-def _dashboard_fonts_final():
-    return {
-        "title": _load_single_font(34, True),
-        "top_right": _load_single_font(18, True),
-        "top_perf": _load_single_font(16, True),
-        "card_title": _load_single_font(24, True),
-        "pill": _load_single_font(18, True),
-        "strategy": _load_single_font(20, True),
-        "body": _load_single_font(18, True),
-        "oi": _load_single_font(16, True),
-    }
-
-
-def _draw_header_final(draw, fonts, width, title_text, dt_text, top_items):
-    red = (239, 58, 50)
-    white = (255, 255, 255)
-    border = (205, 205, 205)
-    black = (0, 0, 0)
-    dark_green = (0, 120, 0)
-    dark_red = (180, 0, 0)
-
-    draw_rounded_rect(draw, (20, 20, width - 20, 90), 28, red)
-    draw.text((38, 36), title_text, fill=white, font=fonts["title"])
-    rw = _text_size(draw, dt_text, fonts["top_right"])[0]
-    draw.text((width - 30 - rw, 40), dt_text, fill=white, font=fonts["top_right"])
-
-    draw_rounded_rect(draw, (20, 100, width - 20, 145), 18, white, outline=border, width=1)
-    x = 30
-    y = 113
-    label = "Top Performers: "
-    draw.text((x, y), label, fill=black, font=fonts["top_perf"])
-    x += _text_size(draw, label, fonts["top_perf"])[0]
-
-    items = list(top_items or [])[:3]
-    if not items:
-        draw.text((x, y), "No top performers", fill=black, font=fonts["top_perf"])
-        return
-
-    for idx, c in enumerate(items, 1):
-        sym = _card_symbol_name(c.get("symbol", ""))
-        pnl = safe_float(c.get("pnl_value", 0), 0)
-        name_txt = f"{idx}) {sym} "
-        pnl_txt = f"{pnl:+,.0f}"
-        draw.text((x, y), name_txt, fill=black, font=fonts["top_perf"])
-        x += _text_size(draw, name_txt, fonts["top_perf"])[0]
-        draw.text((x, y), pnl_txt, fill=dark_green if pnl >= 0 else dark_red, font=fonts["top_perf"])
-        x += _text_size(draw, pnl_txt, fonts["top_perf"])[0] + 24
-
-
-def _normalize_live_card_source(item):
-    item = dict(item or {})
-    symbol = _card_symbol_name(item.get("symbol", ""))
-    return {
-        "symbol": symbol,
-        "ltp": item.get("ltp", ""),
-        "day_pct": safe_float(item.get("day_pct", item.get("change_pct", 0)), 0.0),
-        "side": str(item.get("side", "BUY")).upper(),
-        "strategy": str(item.get("strategy", "15M INSIDE")),
-        "status": str(item.get("status", "HOLD")).upper(),
-        "confidence": str(item.get("confidence", "")).strip(),
-        "entry": item.get("entry", ""),
-        "stoploss": item.get("stoploss", item.get("sl", "")),
-        "qty": item.get("qty", ""),
-        "target": item.get("target", ""),
-        "pl_text": item.get("pl_text", item.get("pl", "")),
-        "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
-        "exit_type": str(item.get("exit_type", "")).upper(),
-        "strikes": list(item.get("strikes", item.get("oi_rows", [])) or []),
-    }
-
-
-def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
-    white = (255, 255, 255)
-    border = (200, 200, 200)
-    green_head = (50, 180, 120)
-    red_head = (220, 70, 70)
-    dark_green = (0, 120, 0)
-    dark_red = (180, 0, 0)
-    black = (0, 0, 0)
-    gray = (110, 110, 110)
-    soft_green = (225, 245, 225)
-    soft_red = (250, 230, 230)
-
-    item = _normalize_live_card_source(item)
-    is_buy = item["side"] == "BUY"
-    head_fill = green_head if is_buy else red_head
-    day_fill = dark_green if item["day_pct"] >= 0 else dark_red
-
-    draw_rounded_rect(draw, (x, y, x + card_w, y + card_h), 22, white, outline=border, width=2)
-    draw_rounded_rect(draw, (x + 10, y + 10, x + card_w - 10, y + 55), 14, head_fill)
-
-    title_txt = _fit_text(draw, f"{item['symbol']}-{_fmt_ltp(item['ltp'])}", fonts["card_title"], card_w - 140)
-    draw.text((x + 16, y + 18), title_txt, fill=white, font=fonts["card_title"])
-
-    draw_rounded_rect(draw, (x + card_w - 108, y + 14, x + card_w - 18, y + 44), 15, white)
-    draw.text((x + card_w - 98, y + 18), _fmt_day_pct(item["day_pct"]), fill=day_fill, font=fonts["pill"])
-
-    draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, soft_green if is_buy else soft_red)
-    conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
-    strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
-    strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
-    draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
-
-    draw_rounded_rect(draw, (x + 14, y + 112, x + card_w - 14, y + 148), 10, SOFT_GRAY)
-    draw.text((x + 20, y + 119), f"Entry: {item['entry']}   SL: {item['stoploss']}   Qty: {item['qty']}", fill=black, font=fonts["body"])
-
-    draw_rounded_rect(draw, (x + 14, y + 154, x + card_w - 14, y + 190), 10, soft_green if is_buy else soft_red)
-    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red
-    draw.text((x + 20, y + 161), f"Target: {item['target']}   P/L: {item['pl_text']}", fill=pl_fill, font=fonts["body"])
-
-    table_top = y + 208
-    if item["exit_type"]:
-        exit_fill = dark_green if item["exit_type"] == "TARGET" else dark_red if item["exit_type"] == "STOPLOSS" else black
-        draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
-        draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
-        table_top = y + 248
-
-    headers = ["Strike", "PE OI", "PE Chg", "CE OI", "CE Chg"]
-    xs = [x + 20, x + 120, x + 220, x + 335, x + 445]
-    for xp, h in zip(xs, headers):
-        draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
-
-    yy = table_top + 28
-    for row in item["strikes"][:5]:
-        strike = str(row.get("strike", ""))
-        pe_oi = str(row.get("pe_oi", row.get("put_oi", "")))
-        pe_chg = str(row.get("pe_chg", row.get("put_oich", "")))
-        ce_oi = str(row.get("ce_oi", row.get("call_oi", "")))
-        ce_chg = str(row.get("ce_chg", row.get("call_oich", "")))
-        vals = [strike, pe_oi, pe_chg, ce_oi, ce_chg]
-        fills = [black, black, dark_green if "-" not in pe_chg else dark_red, black, dark_green if "-" not in ce_chg else dark_red]
-        for xp, val, fc in zip(xs, vals, fills):
-            draw.text((xp, yy), str(val), fill=fc, font=fonts["oi"])
-        yy += 28
-
-
-def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
-    fonts = _dashboard_fonts_final()
-    W, H = 1080, 2000
-    img = Image.new("RGB", (W, H), BG_COLOR)
-    draw = ImageDraw.Draw(img)
-
-    dt_text = dt_text or now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
-    top_items = top_performers or _top_performers_line(cards)
-    _draw_header_final(draw, fonts, W, "LIVE DASHBOARD", dt_text, top_items)
-
-    top = 160
-    gap = 18
-    rows, cols = 4, 2
-    card_w = (W - 60) // 2
-    card_h = 400
-
-    for i, item in enumerate(list(cards or [])[:8]):
-        r = i // cols
-        c = i % cols
-        x = 20 + c * (card_w + gap)
-        y = top + r * (card_h + gap)
-        _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item)
-
-    return _save_image_to_bytes(img, "live_dashboard")
-
-
-def _normalize_after_card_source(item):
-    item = dict(item or {})
-    symbol = _card_symbol_name(item.get("symbol", ""))
-    return {
-        "symbol": symbol,
-        "ltp": item.get("ltp", ""),
-        "day_pct": safe_float(item.get("day_pct", item.get("change_pct", 0)), 0.0),
-        "side": str(item.get("side", "BUY")).upper(),
-        "strategy": str(item.get("strategy", "15M INSIDE")),
-        "status": str(item.get("status", "HOLD")).upper(),
-        "confidence": str(item.get("confidence", "")).strip(),
-        "entry": item.get("entry", ""),
-        "stoploss": item.get("stoploss", item.get("sl", "")),
-        "qty": item.get("qty", ""),
-        "target": item.get("target", ""),
-        "pl_text": item.get("pl_text", item.get("pl", "")),
-        "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
-        "exit_type": str(item.get("exit_type", item.get("result", "DAY END"))).upper(),
-        "close_price": item.get("close_price", item.get("exit_price", "")),
-        "day_pct": safe_float(item.get("day_pct", item.get("change_pct", 0)), 0.0),
-    }
-
-
-def _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item):
-    white = (255, 255, 255)
-    border = (200, 200, 200)
-    green_head = (50, 180, 120)
-    red_head = (220, 70, 70)
-    dark_green = (0, 120, 0)
-    dark_red = (180, 0, 0)
-    black = (0, 0, 0)
-    gray = (110, 110, 110)
-    soft_green = (225, 245, 225)
-    soft_red = (250, 230, 230)
-    soft_neutral = (240, 240, 240)
-
-    item = _normalize_after_card_source(item)
-    is_buy = item["side"] == "BUY"
-    head_fill = green_head if is_buy else red_head
-    day_fill = dark_green if item["day_pct"] >= 0 else dark_red
-    exit_fill = dark_green if item["exit_type"] == "TARGET" else dark_red if item["exit_type"] == "STOPLOSS" else black
-
-    draw_rounded_rect(draw, (x, y, x + card_w, y + card_h), 22, white, outline=border, width=2)
-    draw_rounded_rect(draw, (x + 10, y + 10, x + card_w - 10, y + 55), 14, head_fill)
-
-    title_txt = _fit_text(draw, f"{item['symbol']}-{_fmt_ltp(item['ltp'])}", fonts["card_title"], card_w - 140)
-    draw.text((x + 16, y + 18), title_txt, fill=white, font=fonts["card_title"])
-
-    draw_rounded_rect(draw, (x + card_w - 108, y + 14, x + card_w - 18, y + 44), 15, white)
-    draw.text((x + card_w - 98, y + 18), _fmt_day_pct(item["day_pct"]), fill=day_fill, font=fonts["pill"])
-
-    draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, soft_green if is_buy else soft_red)
-    conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
-    strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
-    strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
-    draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
-
-    draw_rounded_rect(draw, (x + 14, y + 112, x + card_w - 14, y + 148), 10, SOFT_GRAY)
-    draw.text((x + 20, y + 119), f"Entry: {item['entry']}   SL: {item['stoploss']}   Qty: {item['qty']}", fill=black, font=fonts["body"])
-
-    block_fill = soft_green if item["exit_type"] == "TARGET" else soft_red if item["exit_type"] == "STOPLOSS" else soft_neutral
-    draw_rounded_rect(draw, (x + 14, y + 154, x + card_w - 14, y + 190), 10, block_fill)
-    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red if item["pnl_value"] < 0 else black
-    draw.text((x + 20, y + 161), f"Target: {item['target']}   P/L: {item['pl_text']}", fill=pl_fill, font=fonts["body"])
-
-    draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
-    draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
-    draw.text((x + 170, y + 203), f"Close: {item['close_price']}", fill=gray, font=fonts["body"])
-    day_fill_txt = dark_green if safe_float(item.get("day_pct", 0), 0.0) >= 0 else dark_red
-    draw.text((x + 340, y + 203), f"Day Gain: {_fmt_day_pct(item.get('day_pct', 0))}", fill=day_fill_txt, font=fonts["body"])
-
-
-def build_after_market_dashboard_image(cards, top_performers=None, dt_text=None):
-    fonts = _dashboard_fonts_final()
-    W, H = 1080, 2000
-    img = Image.new("RGB", (W, H), BG_COLOR)
-    draw = ImageDraw.Draw(img)
-
-    dt_text = dt_text or now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
-    top_items = top_performers or _top_performers_line(cards)
-    _draw_header_final(draw, fonts, W, "AFTER MARKET SUMMARY", dt_text, top_items)
-
-    top = 160
-    gap = 18
-    rows, cols = 4, 2
-    card_w = (W - 60) // 2
-    card_h = 400
-
-    for i, item in enumerate(list(cards or [])[:8]):
-        r = i // cols
-        c = i % cols
-        x = 20 + c * (card_w + gap)
-        y = top + r * (card_h + gap)
-        _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item)
-
-    return _save_image_to_bytes(img, "after_market_dashboard")
-
-
-def _cards_from_watch_candidates_live():
-    cards = []
-    for sym, cand in watch_candidates.items():
-        try:
-            q = fetch_quotes(sym)
-            ltp = q.get("ltp", "")
-            prev_close = q.get("prev_close", 0.0)
-            day_pct = ((safe_float(ltp, 0.0) - safe_float(prev_close, 0.0)) / safe_float(prev_close, 1.0) * 100.0) if safe_float(prev_close, 0.0) else 0.0
-        except Exception:
-            ltp = ""
-            day_pct = 0.0
-        oi_rows = []
-        try:
-            if cand.get("side") == "BUY":
-                oi_rows = build_buy_oi_rows(sym)[:5]
-            elif cand.get("side") == "SELL":
-                oi_rows = build_sell_oi_rows(sym)[:5]
-        except Exception:
-            oi_rows = []
-        qty = cand.get("qty", "")
-        if not qty and cand.get("entry") not in ("", None) and cand.get("stoploss") not in ("", None):
-            try:
-                qty, _, _, _ = calculate_position(cand.get("entry"), cand.get("stoploss"))
-            except Exception:
-                qty = ""
-        cards.append({
-            "symbol": _card_symbol_name(sym),
-            "ltp": ltp,
-            "day_pct": round(day_pct, 2),
-            "side": cand.get("side", "BUY"),
-            "strategy": cand.get("strategy", "15M INSIDE"),
-            "status": "HOLD",
-            "confidence": cand.get("confidence", ""),
-            "entry": cand.get("entry", ""),
-            "stoploss": cand.get("stoploss", ""),
-            "qty": qty,
-            "target": cand.get("target", ""),
-            "pl_text": cand.get("pl", ""),
-            "pnl_value": safe_float(cand.get("pnl", cand.get("pl", 0)), 0.0),
-            "exit_type": cand.get("result", ""),
-            "strikes": [{
-                "strike": r.get("strike", ""),
-                "pe_oi": human_format(r.get("put_oi", 0)),
-                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
-                "ce_oi": human_format(r.get("call_oi", 0)),
-                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            } for r in oi_rows]
-        })
-    return cards
-
-
-
-def _rows_to_dashboard_strikes(oi_rows):
-    out = []
-    for r in list(oi_rows or [])[:5]:
-        out.append({
-            "strike": r.get("strike", ""),
-            "pe_oi": human_format(r.get("put_oi", 0)),
-            "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
-            "ce_oi": human_format(r.get("call_oi", 0)),
-            "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-        })
-    return out
-
-
-def _cards_from_active_trades_live():
-    cards = []
-    for sym, trade in active_trades.items():
-        try:
-            q = fetch_quotes(sym)
-            ltp = q.get("ltp", "")
-            prev_close = q.get("prev_close", 0.0)
-            day_pct = ((safe_float(ltp, 0.0) - safe_float(prev_close, 0.0)) / safe_float(prev_close, 1.0) * 100.0) if safe_float(prev_close, 0.0) else 0.0
-        except Exception:
-            ltp = ""
-            day_pct = 0.0
-
-        oi_rows, bias = [], "NEUTRAL"
-        try:
-            if safe_float(ltp, 0.0) > 0:
-                oi_rows, bias = get_oi_snapshot(sym, safe_float(ltp, 0.0))
-        except Exception:
-            oi_rows, bias = [], "NEUTRAL"
-
-        status = hold_status(trade.get("side", ""), bias)
-        qty = trade.get("qty", "")
-        if not qty and trade.get("entry") not in ("", None) and trade.get("stoploss") not in ("", None):
-            try:
-                qty, _, _, _ = calc_position(safe_float(trade.get("entry", 0), 0.0), safe_float(trade.get("stoploss", 0), 0.0))
-            except Exception:
-                qty = ""
-
-        pnl_value = 0.0
-        try:
-            entry = safe_float(trade.get("entry", 0.0), 0.0)
-            if trade.get("side") == "BUY":
-                pnl_value = (safe_float(ltp, 0.0) - entry) * safe_float(qty, 0.0)
-            else:
-                pnl_value = (entry - safe_float(ltp, 0.0)) * safe_float(qty, 0.0)
-        except Exception:
-            pnl_value = 0.0
-
-        cards.append({
-            "symbol": _card_symbol_name(sym),
-            "ltp": ltp,
-            "day_pct": round(day_pct, 2),
-            "side": trade.get("side", "BUY"),
-            "strategy": trade.get("strategy", "LIVE"),
-            "status": _clean_status_text(status),
-            "confidence": trade.get("confidence", ""),
-            "entry": trade.get("entry", ""),
-            "stoploss": trade.get("stoploss", ""),
-            "qty": qty,
-            "target": trade.get("target", ""),
-            "pl_text": f"{pnl_value:+.0f}",
-            "pnl_value": pnl_value,
-            "exit_type": "",
-            "strikes": _rows_to_dashboard_strikes(oi_rows),
-        })
-    return cards
-
-
-def _live_dashboard_cards():
-    cards = []
-    seen = set()
-
-    for card in _cards_from_active_trades_live():
-        sym = str(card.get("symbol", ""))
-        seen.add(sym)
-        cards.append(card)
-
-    for card in _cards_from_watch_candidates_live():
-        sym = str(card.get("symbol", ""))
-        if sym in seen:
-            continue
-        cards.append(card)
-
-    return cards
-
-
-def _should_send_live_dashboard():
-    global last_live_dashboard_sent
-    now_ts = now_epoch()
-    if now_ts - last_live_dashboard_sent >= LIVE_DASHBOARD_INTERVAL_SECONDS:
-        last_live_dashboard_sent = now_ts
-        return True
-    return False
-
-def _active_trade_cards_only():
-    cards = []
-    for sym, trade in active_trades.items():
-        oi_rows = trade.get("oi_rows", []) or []
-        cards.append({
-            "symbol": _card_symbol_name(sym) if "_card_symbol_name" in globals() else short_name(sym),
-            "ltp": trade.get("ltp", ""),
-            "day_pct": round(safe_float(trade.get("day_pct", 0), 0.0), 2),
-            "side": trade.get("side", "BUY"),
-            "strategy": trade.get("strategy", "LIVE"),
-            "status": trade.get("status", "LIVE"),
-            "confidence": trade.get("confidence", ""),
-            "entry": trade.get("entry", ""),
-            "stoploss": trade.get("stoploss", ""),
-            "qty": trade.get("qty", ""),
-            "target": trade.get("target", ""),
-            "pl_text": trade.get("pl_text", trade.get("pl", "")),
-            "pnl_value": safe_float(trade.get("pnl_value", trade.get("pnl", 0)), 0.0),
-            "exit_type": trade.get("result", ""),
-            "strikes": [{
-                "strike": r.get("strike", ""),
-                "pe_oi": human_format(r.get("put_oi", 0)),
-                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
-                "ce_oi": human_format(r.get("call_oi", 0)),
-                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            } for r in oi_rows[:5]]
-        })
-    return cards
-
-
-def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
-    try:
-        cards = list(cards or _active_trade_cards_only())
-        if not cards:
-            log("No live dashboard cards to send")
-            return
-        img_bytes = build_live_dashboard_image(cards=cards, top_performers=_top_performers_line(cards), dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper())
-        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
-    except Exception as e:
-        log(f"Live dashboard image error: {e}")
-
-
-def send_after_market_summary_image(cards=None, caption="After Market Summary"):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        return
-    try:
-        cards = list(cards or _after_market_cards_from_closed())
-        pages = list(chunk_list(cards, 8))
-        total_pages = len(pages)
-        for idx, page_cards in enumerate(pages, 1):
-            img_bytes = build_after_market_dashboard_image(
-                cards=page_cards,
-                top_performers=_top_performers_line(page_cards),
-                dt_text=analysis_date_str().upper(),
-            )
-            page_caption = caption if total_pages == 1 else f"{caption} ({idx}/{total_pages})"
-            send_telegram_image(img_bytes.name, img_bytes, caption=page_caption)
-    except Exception as e:
-        log(f"After market summary image error: {e}")
-
-
-def send_after_market_category_images(items, category_name, per_image=AFTER_MARKET_PAGE_SIZE):
-    if not items:
-        log(f"No after-market items for {category_name}")
-        return
-    cards = build_after_market_cards_for_category(items, category_name)
-    pages = list(chunk_list(cards, max(1, per_image)))
-    for idx, page_cards in enumerate(pages, 1):
-        caption = f"After Market Summary • {category_name}"
-        if len(pages) > 1:
-            caption += f" ({idx}/{len(pages)})"
-        try:
-            img_bytes = build_after_market_dashboard_image(
-                cards=page_cards,
-                top_performers=_top_performers_line(page_cards),
-                dt_text=analysis_date_str().upper(),
-            )
-            send_telegram_image(f"after_market_{category_name}_{idx}.png", img_bytes, caption=caption)
-            log(f"Sent after-market {category_name} image {idx}/{len(pages)}")
-        except Exception as e:
-            log(f"After-market {category_name} image send error: {e}")
-
 
 # ================= MAIN =================
 def main():
