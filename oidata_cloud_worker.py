@@ -2084,6 +2084,59 @@ def track_active_trade(symbol):
     if symbol not in active_trades:
         return
 
+    trade = active_trades.get(symbol)
+if not trade:
+    return
+
+side = str(trade.get("side", "")).upper()
+target = safe_float(trade.get("target", 0), 0)
+stoploss = safe_float(trade.get("stoploss", 0), 0)
+
+# use latest candle / quote values
+ltp = safe_float(trade.get("ltp", 0), 0)
+day_low = safe_float(trade.get("day_low", ltp), ltp)
+day_high = safe_float(trade.get("day_high", ltp), ltp)
+
+hit_target = False
+hit_sl = False
+
+if side == "SELL":
+    if day_low <= target:
+        hit_target = True
+    elif day_high >= stoploss:
+        hit_sl = True
+
+elif side == "BUY":
+    if day_high >= target:
+        hit_target = True
+    elif day_low <= stoploss:
+        hit_sl = True
+
+if hit_target or hit_sl:
+    reason = "TARGET" if hit_target else "STOPLOSS"
+    trade["result"] = reason
+    trade["exit_type"] = reason
+    trade["exit_price"] = target if hit_target else stoploss
+
+    eod_stats["closed"].append({
+        "symbol": symbol,
+        "strategy": trade.get("strategy", ""),
+        "side": side,
+        "entry": trade.get("entry", ""),
+        "exit": trade["exit_price"],
+        "reason": reason,
+        "pnl": trade.get("pnl_value", 0),
+    })
+
+    if hit_target:
+        eod_stats["targets"].append(symbol)
+    else:
+        eod_stats["stoplosses"].append(symbol)
+
+    closed_for_day.add(symbol)
+    active_trades.pop(symbol, None)
+    return
+
     trade = active_trades[symbol]
     q = fetch_quotes(symbol)
     ltp = q.get("ltp", 0.0)
