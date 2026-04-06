@@ -71,6 +71,7 @@ OI_INTERVAL_SECONDS = int(os.getenv("OI_INTERVAL_SECONDS", "180"))
 OI_STOCK_GAP_SECONDS = int(os.getenv("OI_STOCK_GAP_SECONDS", "10"))
 ALERT_GAP_SECONDS = int(os.getenv("ALERT_GAP_SECONDS", "300"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
+LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS", "60"))
 
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
@@ -119,6 +120,7 @@ eod_stats = {
 }
 last_alert_time = {}
 pivot_scan_done_keys = set()
+last_live_dashboard_sent = 0.0
 
 # ================= TELEGRAM SEND =================
 def send(msg: str):
@@ -2250,9 +2252,11 @@ def scan_pivot_30m_once():
 
 # ================= LIVE LOOP =================
 def run_live_day():
+    global last_live_dashboard_sent
     gap_summary_sent = False
     inside_summary_sent = False
     eod_sent = False
+    last_live_dashboard_sent = 0.0
 
     while True:
         if not is_market_open():
@@ -2263,10 +2267,18 @@ def run_live_day():
         if not gap_summary_sent and nowt >= dtime(9, 20):
             scan_gapup_once()
             gap_summary_sent = True
+            try:
+                send_live_dashboard_image(caption="Live Dashboard")
+            except Exception as e:
+                log(f"LIVE DASHBOARD ERROR after gap scan: {e}")
 
         if not inside_summary_sent and nowt >= dtime(9, 45):
             scan_inside15_once()
             inside_summary_sent = True
+            try:
+                send_live_dashboard_image(caption="Live Dashboard")
+            except Exception as e:
+                log(f"LIVE DASHBOARD ERROR after inside scan: {e}")
 
         if should_run_pivot_scan():
             scan_pivot_30m_once()
@@ -2286,6 +2298,14 @@ def run_live_day():
             except Exception as e:
                 log(f"TRACK ERROR {sym}: {e}")
             time.sleep(LTP_INTERVAL_PER_STOCK)
+
+        try:
+            if _should_send_live_dashboard():
+                live_cards = _live_dashboard_cards()
+                if live_cards:
+                    send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
+        except Exception as e:
+            log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
 
         if not eod_sent and nowt >= dtime(15, 28):
             send_after_market_summary_image(caption="End of Day Report")
@@ -2985,11 +3005,109 @@ def _cards_from_watch_candidates_live():
     return cards
 
 
+
+def _rows_to_dashboard_strikes(oi_rows):
+    out = []
+    for r in list(oi_rows or [])[:5]:
+        out.append({
+            "strike": r.get("strike", ""),
+            "pe_oi": human_format(r.get("put_oi", 0)),
+            "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
+            "ce_oi": human_format(r.get("call_oi", 0)),
+            "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
+        })
+    return out
+
+
+def _cards_from_active_trades_live():
+    cards = []
+    for sym, trade in active_trades.items():
+        try:
+            q = fetch_quotes(sym)
+            ltp = q.get("ltp", "")
+            prev_close = q.get("prev_close", 0.0)
+            day_pct = ((safe_float(ltp, 0.0) - safe_float(prev_close, 0.0)) / safe_float(prev_close, 1.0) * 100.0) if safe_float(prev_close, 0.0) else 0.0
+        except Exception:
+            ltp = ""
+            day_pct = 0.0
+
+        oi_rows, bias = [], "NEUTRAL"
+        try:
+            if safe_float(ltp, 0.0) > 0:
+                oi_rows, bias = get_oi_snapshot(sym, safe_float(ltp, 0.0))
+        except Exception:
+            oi_rows, bias = [], "NEUTRAL"
+
+        status = hold_status(trade.get("side", ""), bias)
+        qty = trade.get("qty", "")
+        if not qty and trade.get("entry") not in ("", None) and trade.get("stoploss") not in ("", None):
+            try:
+                qty, _, _, _ = calc_position(safe_float(trade.get("entry", 0), 0.0), safe_float(trade.get("stoploss", 0), 0.0))
+            except Exception:
+                qty = ""
+
+        pnl_value = 0.0
+        try:
+            entry = safe_float(trade.get("entry", 0.0), 0.0)
+            if trade.get("side") == "BUY":
+                pnl_value = (safe_float(ltp, 0.0) - entry) * safe_float(qty, 0.0)
+            else:
+                pnl_value = (entry - safe_float(ltp, 0.0)) * safe_float(qty, 0.0)
+        except Exception:
+            pnl_value = 0.0
+
+        cards.append({
+            "symbol": _card_symbol_name(sym),
+            "ltp": ltp,
+            "day_pct": round(day_pct, 2),
+            "side": trade.get("side", "BUY"),
+            "strategy": trade.get("strategy", "LIVE"),
+            "status": _clean_status_text(status),
+            "confidence": trade.get("confidence", ""),
+            "entry": trade.get("entry", ""),
+            "stoploss": trade.get("stoploss", ""),
+            "qty": qty,
+            "target": trade.get("target", ""),
+            "pl_text": f"{pnl_value:+.0f}",
+            "pnl_value": pnl_value,
+            "exit_type": "",
+            "strikes": _rows_to_dashboard_strikes(oi_rows),
+        })
+    return cards
+
+
+def _live_dashboard_cards():
+    cards = []
+    seen = set()
+
+    for card in _cards_from_active_trades_live():
+        sym = str(card.get("symbol", ""))
+        seen.add(sym)
+        cards.append(card)
+
+    for card in _cards_from_watch_candidates_live():
+        sym = str(card.get("symbol", ""))
+        if sym in seen:
+            continue
+        cards.append(card)
+
+    return cards
+
+
+def _should_send_live_dashboard():
+    global last_live_dashboard_sent
+    now_ts = now_epoch()
+    if now_ts - last_live_dashboard_sent >= LIVE_DASHBOARD_INTERVAL_SECONDS:
+        last_live_dashboard_sent = now_ts
+        return True
+    return False
+
+
 def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        cards = list(cards or _cards_from_watch_candidates_live())
+        cards = list(cards or _live_dashboard_cards())
         if not cards:
             log("No live dashboard cards to send")
             return
