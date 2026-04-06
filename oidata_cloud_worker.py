@@ -2967,7 +2967,8 @@ def _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item):
 
     draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
     draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
-    draw.text((x + 220, y + 203), f"Close: {item['close_price']}", fill=gray, font=fonts["body"])
+    close_fill = dark_green if item["day_pct"] >= 0 else dark_red if item["day_pct"] < 0 else black
+    draw.text((x + 220, y + 203), f"Close: {item['close_price']}", fill=close_fill, font=fonts["body"])
 
 
 def build_after_market_dashboard_image(cards, top_performers=None, dt_text=None):
