@@ -80,7 +80,23 @@ LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
 PIVOT_MIN_YDAY_TURNOVER = float(os.getenv("PIVOT_MIN_YDAY_TURNOVER", "0"))
 
+
 NSE_HOLIDAYS_RAW = (os.getenv("NSE_HOLIDAYS") or "").strip()
+
+
+# Batch scan / retry
+SCAN_BATCH_SIZE = int(os.getenv("SCAN_BATCH_SIZE", "5"))
+SCAN_BATCH_SLEEP_SECONDS = int(os.getenv("SCAN_BATCH_SLEEP_SECONDS", "8"))
+SYMBOL_SCAN_SLEEP_SECONDS = float(os.getenv("SYMBOL_SCAN_SLEEP_SECONDS", "1.2"))
+
+HISTORY_RETRIES = int(os.getenv("HISTORY_RETRIES", "3"))
+HISTORY_RETRY_SLEEP_SECONDS = int(os.getenv("HISTORY_RETRY_SLEEP_SECONDS", "4"))
+
+MANUAL_ANALYSIS_DATE = (os.getenv("ANALYSIS_DATE") or "").strip()
+MANUAL_PREVIOUS_WORKING_DATE = (os.getenv("PREVIOUS_WORKING_DATE") or "").strip()
+
+# Simple in-memory cache for one bot session
+_HISTORY_CACHE = {}
 
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing CLIENT_ID or ACCESS_TOKEN")
@@ -288,7 +304,7 @@ def _fit_text(draw, value, font, max_width, suffix="..."):
 
 def _clean_status_text(value):
     value = str(value or "")
-    repl = {"🛑": "", "🎯": "", "⚪": "", "🟢": "", "🔴": ""}
+    repl = {"🛑": "", "🎯": "", "⚪": "", "": "", "": ""}
     for k, v in repl.items():
         value = value.replace(k, v)
     value = value.replace("  ", " ").strip()
@@ -861,6 +877,10 @@ def _load_font(cards, title="AFTER MARKET SUMMARY", subtitle="RESULTS + P/L + ST
     font_small = _load_single_font(14, False)
     font_exit = _load_single_font(16, True)
 
+    font_rank_title = _load_single_font(18, True)
+    font_rank_sub = _load_single_font(14, False)
+    font_rank_item = _load_single_font(16, True)
+
     def txt_w(text, font):
         return draw.textbbox((0, 0), str(text), font=font)[2]
 
@@ -1325,12 +1345,29 @@ def get_reference_symbol():
     return SYMBOLS[0]
 
 
+def _normalize_env_date(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return ""
+
+def manual_analysis_date_str():
+    return _normalize_env_date(MANUAL_ANALYSIS_DATE)
+
+def manual_previous_working_date_str():
+    return _normalize_env_date(MANUAL_PREVIOUS_WORKING_DATE)
+
 
 def get_last_available_session_date():
     ref_symbol = get_reference_symbol()
 
     for days_back in [10, 20, 40]:
-        candles = get_history(ref_symbol, 5, days_back)
+        candles = get_history(ref_symbol, 5, days_back, use_cache=False)
         if candles:
             try:
                 ts = int(candles[-1][0])
@@ -1349,26 +1386,14 @@ def get_last_available_session_date():
     return now_ist().strftime("%Y-%m-%d")
 
 def analysis_date_str():
-    return get_last_available_session_date()
-
-
-def log_analysis_date_debug():
-    ref_symbol = get_reference_symbol()
-    candles = get_history(ref_symbol, 5, 10)
-
-    log(f"Reference symbol: {ref_symbol}")
-
-    if candles and isinstance(candles[-1], list) and len(candles[-1]) > 0:
-        try:
-            ts = int(candles[-1][0])
-            last_dt = candle_dt(ts).strftime("%Y-%m-%d %H:%M")
-            log(f"Latest candle from FYERS: {last_dt}")
-        except Exception as e:
-            log(f"Debug parse error: {e}")
-    else:
-        log("No valid candles returned from FYERS for reference symbol")
-
-    log(f"Analysis date selected: {analysis_date_str()}")
+    manual = manual_analysis_date_str()
+    if manual:
+        return manual
+    try:
+        return get_last_available_session_date()
+    except Exception as e:
+        log(f"[ANALYSIS DATE ERROR] {e}")
+        return now_ist().strftime("%Y-%m-%d")
 
 # ================= FYERS =================
 fyers = fyersModel.FyersModel(
@@ -1384,7 +1409,12 @@ def check_auth():
         raise Exception(f"FYERS auth failed: {profile}")
     return profile
 
-def get_history(symbol, resolution, days=20):
+def get_history(symbol, resolution, days=20, use_cache=True):
+    cache_key = (symbol, str(resolution), int(days))
+
+    if use_cache and cache_key in _HISTORY_CACHE:
+        return list(_HISTORY_CACHE[cache_key])
+
     payload = {
         "symbol": symbol,
         "resolution": str(resolution),
@@ -1393,14 +1423,34 @@ def get_history(symbol, resolution, days=20):
         "range_to": now_ist().strftime("%Y-%m-%d"),
         "cont_flag": "1"
     }
-    try:
-        data = fyers.history(data=payload)
-    except TypeError:
-        data = fyers.history(payload)
-    except Exception as e:
-        log(f"HISTORY ERROR {symbol} {resolution}: {e}")
-        return []
-    return dedupe_candles_by_ts(data.get("candles", []))
+
+    last_err = None
+
+    for attempt in range(1, HISTORY_RETRIES + 1):
+        try:
+            try:
+                data = fyers.history(data=payload)
+            except TypeError:
+                data = fyers.history(payload)
+
+            candles = dedupe_candles_by_ts(data.get("candles", []))
+
+            if candles:
+                _HISTORY_CACHE[cache_key] = list(candles)
+                return candles
+
+            last_err = f"empty candles | resp={data}"
+            log(f"[HISTORY EMPTY] {short_name(symbol)} {resolution} attempt={attempt}/{HISTORY_RETRIES}")
+
+        except Exception as e:
+            last_err = str(e)
+            log(f"[HISTORY ERROR] {short_name(symbol)} {resolution} attempt={attempt}/{HISTORY_RETRIES} err={e}")
+
+        if attempt < HISTORY_RETRIES:
+            time.sleep(HISTORY_RETRY_SLEEP_SECONDS)
+
+    log(f"[HISTORY FAILED] {short_name(symbol)} {resolution} | last_err={last_err}")
+    return []
 
 def get_analysis_day_candles(symbol, resolution, days=20):
     candles = get_history(symbol, resolution, days)
@@ -1418,36 +1468,83 @@ def get_analysis_day_candles(symbol, resolution, days=20):
 
 def get_previous_daily(symbol):
     daily = get_history(symbol, "D", 40)
-    today_str = now_ist().strftime("%Y-%m-%d")
+    analysis_day = analysis_date_str()
+    manual_prev_day = manual_previous_working_date_str()
 
     prev = []
+    all_days = []
+    exact_match = None
+
     for c in daily:
         try:
             c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
-            if c_day < today_str:
+            all_days.append(c_day)
+
+            if manual_prev_day and c_day == manual_prev_day:
+                exact_match = c
+
+            if c_day < analysis_day:
                 prev.append(c)
         except Exception:
             pass
 
+    if exact_match is not None:
+        log(
+            f"[PREV DAY DEBUG] {short_name(symbol)} | "
+            f"analysis_day={analysis_day} | "
+            f"manual_prev_day={manual_prev_day} | "
+            f"prev_high={float(exact_match[2])}"
+        )
+        return exact_match
+
     prev.sort(key=lambda x: x[0])
-    return prev[-1] if prev else None
+
+    if prev:
+        sel = prev[-1]
+        log(
+            f"[PREV DAY DEBUG] {short_name(symbol)} | "
+            f"analysis_day={analysis_day} | "
+            f"prev_day={candle_dt(sel[0]).strftime('%Y-%m-%d')} | "
+            f"prev_high={float(sel[2])}"
+        )
+        return sel
+
+    log(
+        f"[PREV DAY DEBUG] {short_name(symbol)} | "
+        f"analysis_day={analysis_day} | "
+        f"manual_prev_day={manual_prev_day or 'AUTO'} | "
+        f"prev_day=None | daily_count={len(daily)} | days={all_days[-5:] if all_days else []}"
+    )
+    return None
 
 
 def get_previous_weekly(symbol):
     weekly = get_history(symbol, "W", 80)
-    today_str = now_ist().strftime("%Y-%m-%d")
+    analysis_day = analysis_date_str()
 
     prev = []
     for c in weekly:
         try:
             c_day = candle_dt(c[0]).strftime("%Y-%m-%d")
-            if c_day < today_str:
+            if c_day < analysis_day:
                 prev.append(c)
         except Exception:
             pass
 
     prev.sort(key=lambda x: x[0])
-    return prev[-1] if prev else None
+
+    if prev:
+        sel = prev[-1]
+        log(
+            f"[PREV WEEK DEBUG] {short_name(symbol)} | "
+            f"analysis_day={analysis_day} | "
+            f"prev_week={candle_dt(sel[0]).strftime('%Y-%m-%d')} | "
+            f"week_high={float(sel[2])}"
+        )
+        return sel
+
+    log(f"[PREV WEEK DEBUG] {short_name(symbol)} | analysis_day={analysis_day} | prev_week=None")
+    return None
 
 
 def fetch_quotes(symbol):
@@ -1636,9 +1733,9 @@ def format_oi_snapshot(rows):
 
 def hold_status(side, bias):
     if side == "BUY":
-        return "Buy Hold 🟢" if bias == "BULLISH" else "Exit ⚪"
+        return "Buy Hold " if bias == "BULLISH" else "Exit ⚪"
     if side == "SELL":
-        return "Sell Hold 🔴" if bias == "BEARISH" else "Exit ⚪"
+        return "Sell Hold " if bias == "BEARISH" else "Exit ⚪"
     return "Exit ⚪"
 
 # ================= POSITION SIZE =================
@@ -1656,36 +1753,183 @@ def calc_position(entry, stoploss):
     return qty, exposure, margin, risk_per_share
 
 # ================= RESULT ENGINE =================
-def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
-    for c in candles_after_entry:
-        high = float(c[2]); low = float(c[3])
+def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
+    print("\n🟢 BUY DEBUG START")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
 
-        if high >= stoploss and low <= target:
-            return "Stoploss 🛑", stoploss
-        if high >= stoploss:
-            return "Stoploss 🛑", stoploss
-        if low <= target:
-            return "Target 🎯", target
+    for i, c in enumerate(candles_after_entry):
+        high = float(c[2])
+        low = float(c[3])
+
+        print(f"Candle {i+1} → HIGH={high} LOW={low}")
+
+        if high >= target and low <= stoploss:
+            print("⚠️ BOTH HIT → STOPLOSS PRIORITY")
+            return "Stoploss", stoploss
+
+        if high >= target:
+            print(f"✅ TARGET HIT (HIGH {high} >= TARGET {target})")
+            return "Target", target
+
+        if low <= stoploss:
+            print(f"❌ STOPLOSS HIT (LOW {low} <= SL {stoploss})")
+            return "Stoploss", stoploss
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        last_close = float(candles_after_entry[-1][4])
+        print(f"📊 DAY END → CLOSE={last_close}")
+        return "Day End", last_close
 
+    print("⚠️ NO DATA")
     return "No Data", entry
 
-def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
-    for c in candles_after_entry:
-        high = float(c[2]); low = float(c[3])
+def evaluate_sell_result_detailed(candles_after_setup, entry, target, stoploss):
+    entry_idx = None
+    entry_time = ""
+    exit_idx = None
+    exit_time = ""
+    exit_price = entry
+    result = "No Entry"
 
-        if low <= stoploss and high >= target:
-            return "Stoploss 🛑", stoploss
-        if low <= stoploss:
-            return "Stoploss 🛑", stoploss
+    for i, c in enumerate(candles_after_setup, 1):
+        ts = c[0]
+        high = float(c[2])
+        low = float(c[3])
+
+        # entry for SELL happens when candle trades at or below entry
+        if entry_idx is None:
+            if low <= entry:
+                entry_idx = i
+                entry_time = candle_dt(ts).strftime("%H:%M")
+
+        if entry_idx is None:
+            continue
+
+        # after entry, check result on same candle / later candles
+        if low <= target and high >= stoploss:
+            result = "Stoploss"
+            exit_price = stoploss
+            exit_idx = i
+            exit_time = candle_dt(ts).strftime("%H:%M")
+            break
+        if low <= target:
+            result = "Target"
+            exit_price = target
+            exit_idx = i
+            exit_time = candle_dt(ts).strftime("%H:%M")
+            break
+        if high >= stoploss:
+            result = "Stoploss"
+            exit_price = stoploss
+            exit_idx = i
+            exit_time = candle_dt(ts).strftime("%H:%M")
+            break
+
+    if entry_idx is not None and exit_idx is None and candles_after_setup:
+        last_c = candles_after_setup[-1]
+        result = "Day End"
+        exit_price = float(last_c[4])
+        exit_idx = len(candles_after_setup)
+        exit_time = candle_dt(last_c[0]).strftime("%H:%M")
+
+    return {
+        "result": result,
+        "entry_candle": entry_idx,
+        "entry_time": entry_time,
+        "exit_candle": exit_idx,
+        "exit_time": exit_time,
+        "exit_price": round(exit_price, 2),
+    }
+
+
+def evaluate_buy_result_detailed(candles_after_setup, entry, target, stoploss):
+    entry_idx = None
+    entry_time = ""
+    exit_idx = None
+    exit_time = ""
+    exit_price = entry
+    result = "No Entry"
+
+    for i, c in enumerate(candles_after_setup, 1):
+        ts = c[0]
+        high = float(c[2])
+        low = float(c[3])
+
+        # entry for BUY happens when candle trades at or above entry
+        if entry_idx is None:
+            if high >= entry:
+                entry_idx = i
+                entry_time = candle_dt(ts).strftime("%H:%M")
+
+        if entry_idx is None:
+            continue
+
+        # after entry, check result on same candle / later candles
+        if high >= target and low <= stoploss:
+            result = "Stoploss"
+            exit_price = stoploss
+            exit_idx = i
+            exit_time = candle_dt(ts).strftime("%H:%M")
+            break
         if high >= target:
-            return "Target 🎯", target
+            result = "Target"
+            exit_price = target
+            exit_idx = i
+            exit_time = candle_dt(ts).strftime("%H:%M")
+            break
+        if low <= stoploss:
+            result = "Stoploss"
+            exit_price = stoploss
+            exit_idx = i
+            exit_time = candle_dt(ts).strftime("%H:%M")
+            break
+
+    if entry_idx is not None and exit_idx is None and candles_after_setup:
+        last_c = candles_after_setup[-1]
+        result = "Day End"
+        exit_price = float(last_c[4])
+        exit_idx = len(candles_after_setup)
+        exit_time = candle_dt(last_c[0]).strftime("%H:%M")
+
+    return {
+        "result": result,
+        "entry_candle": entry_idx,
+        "entry_time": entry_time,
+        "exit_candle": exit_idx,
+        "exit_time": exit_time,
+        "exit_price": round(exit_price, 2),
+    }
+
+
+
+def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
+    print("\n🔴 SELL DEBUG START")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+
+    for i, c in enumerate(candles_after_entry):
+        high = float(c[2])
+        low = float(c[3])
+
+        print(f"Candle {i+1} → HIGH={high} LOW={low}")
+
+        if low <= target and high >= stoploss:
+            print("⚠️ BOTH HIT → STOPLOSS PRIORITY")
+            return "Stoploss", stoploss
+
+        if low <= target:
+            print(f"✅ TARGET HIT (LOW {low} <= TARGET {target})")
+            return "Target", target
+
+        if high >= stoploss:
+            print(f"❌ STOPLOSS HIT (HIGH {high} >= SL {stoploss})")
+            return "Stoploss", stoploss
 
     if candles_after_entry:
-        return "Day End ⚪", float(candles_after_entry[-1][4])
+        last_close = float(candles_after_entry[-1][4])
+        print(f"📊 DAY END → CLOSE={last_close}")
+        return "Day End", last_close
 
+    print("⚠️ NO DATA")
     return "No Data", entry
 
 # ================= PATTERN SCANNERS =================
@@ -1712,6 +1956,11 @@ def scan_gapup_pattern(symbol):
     sl = round(h * (1 + SL_BUFFER_PCT), 2)
     target = round(entry - (sl - entry) * TARGET_RR, 2)
 
+    print("\n📊 GAPUP DEBUG")
+    print(f"OPEN={o} HIGH={h} LOW={l}")
+    print(f"PREV HIGH={prev_high}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+
     return {
         "symbol": symbol,
         "strategy": "GAPUP_PLUS",
@@ -1722,6 +1971,8 @@ def scan_gapup_pattern(symbol):
         "target": target,
         "pattern_time": candle_dt(first[0]).strftime("%H:%M")
     }
+    
+
 
 def scan_15m_inside_pattern(symbol):
     if symbol in closed_for_day:
@@ -1745,6 +1996,11 @@ def scan_15m_inside_pattern(symbol):
 
     if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
+
+    print("\n📊 15M INSIDE DEBUG")
+    print(f"CANDLE1 HIGH={h1} LOW={l1}")
+    print(f"CANDLE2 HIGH={h2} LOW={l2}")
+    print(f"BUY ENTRY={buy_entry} SELL ENTRY={sell_entry}")
 
     return {
         "symbol": symbol,
@@ -1834,6 +2090,12 @@ def scan_30m_pivot_sell(symbol):
     if stoploss <= entry:
         return None
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
+
+    print("\n📊 PIVOT DEBUG")
+    print(f"C1 HIGH={c1_high} LOW={c1_low}")
+    print(f"C2 HIGH={c2_high} LOW={c2_low}")
+    print(f"C3 HIGH={c3_high} LOW={c3_low}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
 
     return {
         "symbol": symbol,
@@ -2312,6 +2574,7 @@ def evaluate_gapup_after_market(symbol):
 
     first = day_5m[0]
     prev_high = float(prev_day[2])
+    prev_close = float(prev_day[4])
 
     o = float(first[1]); h = float(first[2]); l = float(first[3]); c = float(first[4])
     gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0.0
@@ -2325,7 +2588,9 @@ def evaluate_gapup_after_market(symbol):
     target = round(entry - (stoploss - entry) * TARGET_RR, 2)
     later = day_5m[1:]
     result, exit_price = evaluate_sell_result(later, entry, target, stoploss)
+    exit_price = round(exit_price, 2)
     pl = round(entry - exit_price, 2)
+    day_pct = round(((exit_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
 
     return {
         "symbol": short_name(symbol),
@@ -2334,14 +2599,20 @@ def evaluate_gapup_after_market(symbol):
         "target": target,
         "stoploss": stoploss,
         "result": result,
-        "exit_price": round(exit_price, 2),
+        "exit_price": exit_price,
+        "close_price": exit_price,
+        "prev_close": round(prev_close, 2),
+        "day_pct": day_pct,
         "pl": pl
     }
 
 def evaluate_inside_after_market(symbol):
+    prev_day = get_previous_daily(symbol)
     day_15m = get_analysis_day_candles(symbol, 15, 7)
-    if len(day_15m) < 2:
+    if prev_day is None or len(day_15m) < 2:
         return None
+
+    prev_close = float(prev_day[4])
 
     c1 = day_15m[0]; c2 = day_15m[1]
     h1 = float(c1[2]); l1 = float(c1[3]); c1_close = float(c1[4])
@@ -2361,26 +2632,53 @@ def evaluate_inside_after_market(symbol):
     buy_sl = round(l1 * (1 - SL_BUFFER_PCT), 2)
     buy_target = round(buy_entry + (buy_entry - buy_sl) * TARGET_RR, 2)
     buy_result, buy_exit = evaluate_buy_result(later, buy_entry, buy_target, buy_sl)
+    buy_exit = round(buy_exit, 2)
     buy_pl = round(buy_exit - buy_entry, 2)
+    buy_day_pct = round(((buy_exit - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
 
     sell_entry = round(l1, 2)
     sell_sl = round(h1 * (1 + SL_BUFFER_PCT), 2)
     sell_target = round(sell_entry - (sell_sl - sell_entry) * TARGET_RR, 2)
     sell_result, sell_exit = evaluate_sell_result(later, sell_entry, sell_target, sell_sl)
+    sell_exit = round(sell_exit, 2)
     sell_pl = round(sell_entry - sell_exit, 2)
+    sell_day_pct = round(((sell_exit - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
 
     return {
         "symbol": short_name(symbol),
         "range_pct": round(range_pct, 2),
-        "buy": {"entry": buy_entry, "target": buy_target, "stoploss": buy_sl, "result": buy_result, "exit_price": round(buy_exit, 2), "pl": buy_pl},
-        "sell": {"entry": sell_entry, "target": sell_target, "stoploss": sell_sl, "result": sell_result, "exit_price": round(sell_exit, 2), "pl": sell_pl},
+        "buy": {
+            "entry": buy_entry,
+            "target": buy_target,
+            "stoploss": buy_sl,
+            "result": buy_result,
+            "exit_price": buy_exit,
+            "close_price": buy_exit,
+            "prev_close": round(prev_close, 2),
+            "day_pct": buy_day_pct,
+            "pl": buy_pl
+        },
+        "sell": {
+            "entry": sell_entry,
+            "target": sell_target,
+            "stoploss": sell_sl,
+            "result": sell_result,
+            "exit_price": sell_exit,
+            "close_price": sell_exit,
+            "prev_close": round(prev_close, 2),
+            "day_pct": sell_day_pct,
+            "pl": sell_pl
+        },
     }
 
 def evaluate_pivot_after_market(symbol):
+    prev_day = get_previous_daily(symbol)
     prev_week = get_previous_weekly(symbol)
     day_30m = get_analysis_day_candles(symbol, 30, 21)
-    if prev_week is None or len(day_30m) < 3:
+    if prev_day is None or prev_week is None or len(day_30m) < 3:
         return None
+
+    prev_close = float(prev_day[4])
 
     c1 = day_30m[0]; c2 = day_30m[1]; c3 = day_30m[2]
     c1_open = float(c1[1]); c1_close = float(c1[4])
@@ -2411,21 +2709,24 @@ def evaluate_pivot_after_market(symbol):
         exit_price = entry
         pl = 0.0
     elif c3_high >= stoploss and c3_low <= target:
-        result = "Stoploss 🛑"
+        result = "Stoploss"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_high >= stoploss:
-        result = "Stoploss 🛑"
+        result = "Stoploss"
         exit_price = stoploss
         pl = round(entry - exit_price, 2)
     elif c3_low <= target:
-        result = "Target 🎯"
+        result = "Target"
         exit_price = target
         pl = round(entry - exit_price, 2)
     else:
-        result = "Day End ⚪"
+        result = "Day End"
         exit_price = float(c3[4])
         pl = round(entry - exit_price, 2)
+
+    exit_price = round(exit_price, 2)
+    day_pct = round(((exit_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
 
     return {
         "symbol": short_name(symbol),
@@ -2435,19 +2736,24 @@ def evaluate_pivot_after_market(symbol):
         "target": target,
         "stoploss": stoploss,
         "result": result,
-        "exit_price": round(exit_price, 2),
+        "exit_price": exit_price,
+        "close_price": exit_price,
+        "prev_close": round(prev_close, 2),
+        "day_pct": day_pct,
         "pl": pl
     }
 
 def format_gapup_results(items):
     if not items:
-        return "📘 GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
-    lines = ["📘 GAP UP PLUS - IF ENTRY TAKEN", ""]
+        return " GAP UP PLUS - IF ENTRY TAKEN\n\nNone"
+    lines = [" GAP UP PLUS - IF ENTRY TAKEN", ""]
     for x in items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
             x["symbol"],
             f"SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"Entry Candle:{x.get('entry_candle')} Entry Time:{x.get('entry_time')}",
+            f"Exit Candle:{x.get('exit_candle')} Exit Time:{x.get('exit_time')}",
             f"Result:{x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
             ""
         ]
@@ -2455,17 +2761,21 @@ def format_gapup_results(items):
 
 def format_inside_results(items):
     if not items:
-        return "📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
-    lines = ["📘 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
+        return " 15 MIN INSIDE CANDLE - IF ENTRY TAKEN\n\nNone"
+    lines = [" 15 MIN INSIDE CANDLE - IF ENTRY TAKEN", ""]
     for x in items:
         b = x["buy"]; s = x["sell"]
         bsign = "+" if b["pl"] > 0 else ""
         ssign = "+" if s["pl"] > 0 else ""
         lines += [
             f"{x['symbol']} ({x['range_pct']}%)",
-            f"🟢 BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
+            f" BUY  Entry:{b['entry']} Target:{b['target']} SL:{b['stoploss']}",
+            f"      Entry Candle:{b.get('entry_candle')} Entry Time:{b.get('entry_time')}",
+            f"      Exit Candle:{b.get('exit_candle')} Exit Time:{b.get('exit_time')}",
             f"      {b['result']} Exit:{b['exit_price']} P/L:{bsign}{b['pl']}",
-            f"🔴 SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
+            f" SELL Entry:{s['entry']} Target:{s['target']} SL:{s['stoploss']}",
+            f"      Entry Candle:{s.get('entry_candle')} Entry Time:{s.get('entry_time')}",
+            f"      Exit Candle:{s.get('exit_candle')} Exit Time:{s.get('exit_time')}",
             f"      {s['result']} Exit:{s['exit_price']} P/L:{ssign}{s['pl']}",
             ""
         ]
@@ -2473,14 +2783,16 @@ def format_inside_results(items):
 
 def format_pivot_results(items):
     if not items:
-        return "📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
-    lines = ["📘 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
+        return " 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN\n\nNone"
+    lines = [" 30 MIN WEEKLY PIVOT SELL - IF ENTRY TAKEN", ""]
     for x in items:
         sign = "+" if x["pl"] > 0 else ""
         lines += [
             x["symbol"],
             f"Level:{x['pivot_name']} ({x['pivot_value']})",
-            f"🔴 SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f" SELL Entry:{x['entry']} Target:{x['target']} SL:{x['stoploss']}",
+            f"      Entry Candle:{x.get('entry_candle')} Entry Time:{x.get('entry_time')}",
+            f"      Exit Candle:{x.get('exit_candle')} Exit Time:{x.get('exit_time')}",
             f"      {x['result']} Exit:{x['exit_price']} P/L:{sign}{x['pl']}",
             ""
         ]
@@ -2530,6 +2842,9 @@ def build_after_market_cards_for_category(items, category_name):
                 "qty": qty,
                 "pl": f"{pnl:+,.0f}",
                 "pnl_value": pnl,
+                "close_price": x.get("close_price", exit_price),
+                "prev_close": x.get("prev_close", 0.0),
+                "day_pct": x.get("day_pct", 0.0),
                 "oi_rows": []
             })
 
@@ -2556,6 +2871,9 @@ def build_after_market_cards_for_category(items, category_name):
                     "qty": qty,
                     "pl": f"{pnl:+,.0f}",
                     "pnl_value": pnl,
+                    "close_price": side.get("close_price", exit_price),
+                    "prev_close": side.get("prev_close", 0.0),
+                    "day_pct": side.get("day_pct", 0.0),
                     "oi_rows": []
                 })
 
@@ -2580,6 +2898,9 @@ def build_after_market_cards_for_category(items, category_name):
                 "qty": qty,
                 "pl": f"{pnl:+,.0f}",
                 "pnl_value": pnl,
+                "close_price": x.get("close_price", exit_price),
+                "prev_close": x.get("prev_close", 0.0),
+                "day_pct": x.get("day_pct", 0.0),
                 "oi_rows": []
             })
 
@@ -2612,6 +2933,201 @@ def send_after_market_category_images(items, category_name, per_image=AFTER_MARK
         except Exception as e:
             log(f"After-market {category_name} image send error: {e}")
 
+def prefetch_after_market_symbol_data(symbol):
+    return {
+        "prev_day": get_previous_daily(symbol),
+        "prev_week": get_previous_weekly(symbol),
+        "day_5m": get_analysis_day_candles(symbol, 5, 7),
+        "day_15m": get_analysis_day_candles(symbol, 15, 7),
+        "day_30m": get_analysis_day_candles(symbol, 30, 21),
+    }
+
+
+def evaluate_gapup_after_market_prefetched(symbol, data):
+    prev_day = data.get("prev_day")
+    day_5m = data.get("day_5m", [])
+    if prev_day is None or len(day_5m) < 1:
+        return None
+
+    first = day_5m[0]
+    prev_high = float(prev_day[2])
+    prev_close = float(prev_day[4])
+
+    o = float(first[1]); h = float(first[2]); l = float(first[3]); c = float(first[4])
+    gap_pct = ((o - prev_high) / prev_high) * 100 if prev_high else 0.0
+    candle_pct = pct_range(h, l, c)
+
+    if not (o > prev_high and gap_pct >= GAPUP_MIN_PCT and candle_pct <= GAPUP_CANDLE_MAX_PCT):
+        return None
+
+    entry = round(l, 2)
+    stoploss = round(h * (1 + SL_BUFFER_PCT), 2)
+    target = round(entry - (stoploss - entry) * TARGET_RR, 2)
+
+    details = evaluate_sell_result_detailed(day_5m[1:], entry, target, stoploss)
+    exit_price = details["exit_price"]
+
+    if details["entry_candle"] is None:
+        pl = 0.0
+        day_pct = 0.0
+    else:
+        pl = round(entry - exit_price, 2)
+        day_pct = round(((exit_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
+
+    return {
+        "symbol": short_name(symbol),
+        "gap_pct": round(gap_pct, 2),
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": details["result"],
+        "entry_candle": details["entry_candle"],
+        "entry_time": details["entry_time"],
+        "exit_candle": details["exit_candle"],
+        "exit_time": details["exit_time"],
+        "exit_price": exit_price,
+        "close_price": exit_price,
+        "prev_close": round(prev_close, 2),
+        "day_pct": day_pct,
+        "pl": pl
+    }
+
+
+def evaluate_inside_after_market_prefetched(symbol, data):
+    prev_day = data.get("prev_day")
+    day_15m = data.get("day_15m", [])
+    if prev_day is None or len(day_15m) < 2:
+        return None
+
+    prev_close = float(prev_day[4])
+
+    c1 = day_15m[0]; c2 = day_15m[1]
+    h1 = float(c1[2]); l1 = float(c1[3]); c1_close = float(c1[4])
+    h2 = float(c2[2]); l2 = float(c2[3])
+
+    if c1_close <= 0:
+        return None
+
+    range_pct = pct_range(h1, l1, c1_close)
+    inside = h2 <= h1 and l2 >= l1
+    if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
+        return None
+
+    later = day_15m[2:]
+
+    buy_entry = round(h1, 2)
+    buy_sl = round(l1 * (1 - SL_BUFFER_PCT), 2)
+    buy_target = round(buy_entry + (buy_entry - buy_sl) * TARGET_RR, 2)
+    buy_details = evaluate_buy_result_detailed(later, buy_entry, buy_target, buy_sl)
+    buy_exit = buy_details["exit_price"]
+    buy_pl = round(buy_exit - buy_entry, 2) if buy_details["entry_candle"] is not None else 0.0
+    buy_day_pct = round(((buy_exit - prev_close) / prev_close) * 100.0, 2) if prev_close and buy_details["entry_candle"] is not None else 0.0
+
+    sell_entry = round(l1, 2)
+    sell_sl = round(h1 * (1 + SL_BUFFER_PCT), 2)
+    sell_target = round(sell_entry - (sell_sl - sell_entry) * TARGET_RR, 2)
+    sell_details = evaluate_sell_result_detailed(later, sell_entry, sell_target, sell_sl)
+    sell_exit = sell_details["exit_price"]
+    sell_pl = round(sell_entry - sell_exit, 2) if sell_details["entry_candle"] is not None else 0.0
+    sell_day_pct = round(((sell_exit - prev_close) / prev_close) * 100.0, 2) if prev_close and sell_details["entry_candle"] is not None else 0.0
+
+    return {
+        "symbol": short_name(symbol),
+        "range_pct": round(range_pct, 2),
+        "buy": {
+            "entry": buy_entry,
+            "target": buy_target,
+            "stoploss": buy_sl,
+            "result": buy_details["result"],
+            "entry_candle": buy_details["entry_candle"],
+            "entry_time": buy_details["entry_time"],
+            "exit_candle": buy_details["exit_candle"],
+            "exit_time": buy_details["exit_time"],
+            "exit_price": buy_exit,
+            "close_price": buy_exit,
+            "prev_close": round(prev_close, 2),
+            "day_pct": buy_day_pct,
+            "pl": buy_pl
+        },
+        "sell": {
+            "entry": sell_entry,
+            "target": sell_target,
+            "stoploss": sell_sl,
+            "result": sell_details["result"],
+            "entry_candle": sell_details["entry_candle"],
+            "entry_time": sell_details["entry_time"],
+            "exit_candle": sell_details["exit_candle"],
+            "exit_time": sell_details["exit_time"],
+            "exit_price": sell_exit,
+            "close_price": sell_exit,
+            "prev_close": round(prev_close, 2),
+            "day_pct": sell_day_pct,
+            "pl": sell_pl
+        },
+    }
+
+def evaluate_pivot_after_market_prefetched(symbol, data):
+    prev_day = data.get("prev_day")
+    prev_week = data.get("prev_week")
+    day_30m = data.get("day_30m", [])
+    if prev_day is None or prev_week is None or len(day_30m) < 3:
+        return None
+
+    prev_close = float(prev_day[4])
+
+    c1 = day_30m[0]; c2 = day_30m[1]
+    c1_open = float(c1[1]); c1_close = float(c1[4])
+    c2_open = float(c2[1]); c2_close = float(c2[4])
+    c2_high = float(c2[2]); c2_low = float(c2[3])
+
+    if not (c1_close > c1_open and c2_close < c2_open):
+        return None
+
+    r_levels = compute_weekly_r_levels(prev_week)
+    touched = []
+    for name, value in r_levels.items():
+        if candle_touches_level(c1, value) and candle_touches_level(c2, value):
+            touched.append((name, value))
+    if not touched:
+        return None
+
+    pivot_name, pivot_value = touched[-1]
+    entry = round(c2_low, 2)
+    stoploss = round(c2_high, 2)
+    if stoploss <= entry:
+        return None
+    target = round(entry - (stoploss - entry) * TARGET_RR, 2)
+
+    later = day_30m[2:]
+    details = evaluate_sell_result_detailed(later, entry, target, stoploss)
+    exit_price = details["exit_price"]
+
+    if details["entry_candle"] is None:
+        pl = 0.0
+        day_pct = 0.0
+    else:
+        pl = round(entry - exit_price, 2)
+        day_pct = round(((exit_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
+
+    return {
+        "symbol": short_name(symbol),
+        "pivot_name": pivot_name,
+        "pivot_value": pivot_value,
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": details["result"],
+        "entry_candle": details["entry_candle"],
+        "entry_time": details["entry_time"],
+        "exit_candle": details["exit_candle"],
+        "exit_time": details["exit_time"],
+        "exit_price": exit_price,
+        "close_price": exit_price,
+        "prev_close": round(prev_close, 2),
+        "day_pct": day_pct,
+        "pl": pl
+    }
+
 
 def run_after_market_once():
     send("📡 Running after-market scan...")
@@ -2620,27 +3136,45 @@ def run_after_market_once():
     inside_items = []
     pivot_items = []
 
-    for sym in SYMBOLS:
-        try:
-            g = evaluate_gapup_after_market(sym)
-            if g:
-                gap_items.append(g)
-        except Exception as e:
-            log(f"GAP AFTER ERROR {sym}: {e}")
+    symbols = list(SYMBOLS)
+    total = len(symbols)
+    _HISTORY_CACHE.clear()
 
-        try:
-            i = evaluate_inside_after_market(sym)
-            if i:
-                inside_items.append(i)
-        except Exception as e:
-            log(f"15M AFTER ERROR {sym}: {e}")
+    for batch_start in range(0, total, SCAN_BATCH_SIZE):
+        batch = symbols[batch_start: batch_start + SCAN_BATCH_SIZE]
+        batch_no = (batch_start // SCAN_BATCH_SIZE) + 1
+        total_batches = math.ceil(total / SCAN_BATCH_SIZE)
 
-        try:
-            p = evaluate_pivot_after_market(sym)
-            if p:
-                pivot_items.append(p)
-        except Exception as e:
-            log(f"PIVOT AFTER ERROR {sym}: {e}")
+        log(f"[AFTER MARKET] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
+
+        for idx, sym in enumerate(batch, 1):
+            log(f"[AFTER MARKET] {short_name(sym)} | batch {batch_no}/{total_batches} | item {idx}/{len(batch)}")
+
+            try:
+                data = prefetch_after_market_symbol_data(sym)
+
+                g = evaluate_gapup_after_market_prefetched(sym, data)
+                if g:
+                    gap_items.append(g)
+
+                i = evaluate_inside_after_market_prefetched(sym, data)
+                if i:
+                    inside_items.append(i)
+
+                p = evaluate_pivot_after_market_prefetched(sym, data)
+                if p:
+                    pivot_items.append(p)
+
+            except Exception as e:
+                log(f"[AFTER MARKET ERROR] {sym}: {e}")
+
+            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
+
+        log(f"[AFTER MARKET] Finished batch {batch_no}/{total_batches}")
+
+        if batch_start + SCAN_BATCH_SIZE < total:
+            log(f"[AFTER MARKET] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
+            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
 
     send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=AFTER_MARKET_PAGE_SIZE)
     send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=AFTER_MARKET_PAGE_SIZE)
@@ -2724,14 +3258,36 @@ def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text):
     white = (255, 255, 255)
     border = (205, 205, 205)
     dark_green = (0, 120, 0)
+    dark_red = (180, 0, 0)
+    black = (0, 0, 0)
 
     draw_rounded_rect(draw, (20, 20, width - 20, 90), 28, red)
     draw.text((38, 36), title_text, fill=white, font=fonts["title"])
     rw = _text_size(draw, dt_text, fonts["top_right"])[0]
     draw.text((width - 30 - rw, 40), dt_text, fill=white, font=fonts["top_right"])
 
-    draw_rounded_rect(draw, (20, 100, width - 20, 145), 18, white, outline=border, width=1)
-    draw.text((30, 113), f"Top Performers: {top_text}", fill=dark_green, font=fonts["top_perf"])
+    draw_rounded_rect(draw, (20, 100, width - 20, 145), 18, WHITE, outline=border, width=1)
+
+    label = "Top Performers:"
+    draw.text((30, 113), label, fill=black, font=fonts["top_perf"])
+    x = 30 + _text_size(draw, label, fonts["top_perf"])[0] + 12
+
+    parts = [p.strip() for p in str(top_text or "").split("   ") if p.strip()]
+    if not parts:
+        draw.text((x, 113), "No top performers", fill=black, font=fonts["top_perf"])
+        return
+
+    for part in parts:
+        last_token = part.split()[-1] if part.split() else ""
+        if str(last_token).startswith("-"):
+            fill = dark_red
+        elif str(last_token).startswith("+"):
+            fill = dark_green
+        else:
+            fill = black
+
+        draw.text((x, 113), part, fill=fill, font=fonts["top_perf"])
+        x += _text_size(draw, part, fonts["top_perf"])[0] + 24
 
 
 def _normalize_live_card_source(item):
@@ -2852,21 +3408,35 @@ def _normalize_after_card_source(item):
     symbol = _card_symbol_name(item.get("symbol", ""))
     ltp = safe_float(item.get("ltp", item.get("exit_price", item.get("close_price", 0))), 0.0)
     prev_close = safe_float(item.get("prev_close", item.get("yesterday_close", item.get("prevclose", 0))), 0.0)
+
     raw_day_pct = item.get("day_pct", item.get("change_pct", None))
     if raw_day_pct in ("", None):
         day_pct = ((ltp - prev_close) / prev_close * 100.0) if prev_close > 0 and ltp > 0 else 0.0
     else:
         day_pct = safe_float(raw_day_pct, 0.0)
+
     close_price = item.get("close_price", item.get("exit_price", ""))
     if close_price in ("", None):
         close_price = _fmt_ltp(ltp) if ltp > 0 else ""
+
+    raw_result = _clean_status_text(item.get("result", ""))
+    raw_status = _clean_status_text(item.get("status", ""))
+    raw_exit = _clean_status_text(item.get("exit_type", ""))
+
+    # After market should prefer actual result always
+    final_status = raw_result if raw_result not in ("", "WATCH") else raw_status
+    if final_status in ("", "WATCH"):
+        final_status = "DAY END"
+
+    final_exit = raw_exit if raw_exit not in ("", "WATCH") else final_status
+
     return {
         "symbol": symbol,
         "ltp": item.get("ltp", ""),
         "day_pct": day_pct,
         "side": str(item.get("side", "BUY")).upper(),
         "strategy": str(item.get("strategy", "15M INSIDE")),
-        "status": str(item.get("status", "HOLD")).upper(),
+        "status": final_status,
         "confidence": str(item.get("confidence", "")).strip(),
         "entry": item.get("entry", ""),
         "stoploss": item.get("stoploss", item.get("sl", "")),
@@ -2874,29 +3444,49 @@ def _normalize_after_card_source(item):
         "target": item.get("target", ""),
         "pl_text": item.get("pl_text", item.get("pl", "")),
         "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
-        "exit_type": str(item.get("exit_type", item.get("result", "DAY END"))).upper(),
+        "exit_type": final_exit,
         "close_price": close_price,
     }
-
 
 def _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item):
     white = (255, 255, 255)
     border = (200, 200, 200)
     green_head = (50, 180, 120)
     red_head = (220, 70, 70)
+    neutral_head = (150, 150, 150)
+
     dark_green = (0, 120, 0)
     dark_red = (180, 0, 0)
     black = (0, 0, 0)
     gray = (110, 110, 110)
+
     soft_green = (225, 245, 225)
     soft_red = (250, 230, 230)
-    soft_neutral = (240, 240, 240)
+    soft_neutral = (235, 235, 235)
 
     item = _normalize_after_card_source(item)
     is_buy = item["side"] == "BUY"
-    head_fill = green_head if is_buy else red_head
-    day_fill = dark_green if item["day_pct"] >= 0 else dark_red
-    exit_fill = dark_green if item["exit_type"] == "TARGET" else dark_red if item["exit_type"] == "STOPLOSS" else black
+
+    status_upper = str(item.get("status", "")).upper()
+    exit_upper = str(item.get("exit_type", "")).upper()
+
+    is_no_entry = "NO ENTRY" in status_upper or "NO ENTRY" in exit_upper
+    is_target = "TARGET" in status_upper or "TARGET" in exit_upper
+    is_stop = "STOPLOSS" in status_upper or "STOPLOSS" in exit_upper
+    is_day_end = "DAY END" in status_upper or "DAY END" in exit_upper
+
+    if is_no_entry:
+        head_fill = neutral_head
+        strategy_fill = black
+        strategy_bg = soft_neutral
+        day_fill = black
+        exit_fill = black
+    else:
+        head_fill = green_head if is_buy else red_head
+        strategy_fill = dark_green if is_buy else dark_red
+        strategy_bg = soft_green if is_buy else soft_red
+        day_fill = dark_green if item["day_pct"] >= 0 else dark_red
+        exit_fill = dark_green if is_target else dark_red if is_stop else black
 
     draw_rounded_rect(draw, (x, y, x + card_w, y + card_h), 22, white, outline=border, width=2)
     draw_rounded_rect(draw, (x + 10, y + 10, x + card_w - 10, y + 55), 14, head_fill)
@@ -2907,23 +3497,31 @@ def _draw_after_card_final(draw, fonts, x, y, card_w, card_h, item):
     draw_rounded_rect(draw, (x + card_w - 108, y + 14, x + card_w - 18, y + 44), 15, white)
     draw.text((x + card_w - 98, y + 18), _fmt_day_pct(item["day_pct"]), fill=day_fill, font=fonts["pill"])
 
-    draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, soft_green if is_buy else soft_red)
-    conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
-    strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
+    draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, strategy_bg)
+    strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}"
     strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
-    draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
+    draw.text((x + 20, y + 76), strategy_line, fill=strategy_fill, font=fonts["strategy"])
 
     draw_rounded_rect(draw, (x + 14, y + 112, x + card_w - 14, y + 148), 10, SOFT_GRAY)
     draw.text((x + 20, y + 119), f"Entry: {item['entry']}   SL: {item['stoploss']}   Qty: {item['qty']}", fill=black, font=fonts["body"])
 
-    block_fill = soft_green if item["exit_type"] == "TARGET" else soft_red if item["exit_type"] == "STOPLOSS" else soft_neutral
+    if is_no_entry:
+        block_fill = soft_neutral
+        pl_fill = gray
+    else:
+        block_fill = soft_green if is_target else soft_red if is_stop else soft_neutral
+        pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red if item["pnl_value"] < 0 else black
+
     draw_rounded_rect(draw, (x + 14, y + 154, x + card_w - 14, y + 190), 10, block_fill)
-    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red if item["pnl_value"] < 0 else black
     draw.text((x + 20, y + 161), f"Target: {item['target']}   P/L: {item['pl_text']}", fill=pl_fill, font=fonts["body"])
 
+    # force exit line from actual exit_type/status, never WATCH fallback here
+    final_exit = item.get("exit_type", "") or item.get("status", "") or "DAY END"
+    final_exit = _clean_status_text(final_exit)
+
     draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
-    draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
-    draw.text((x + 220, y + 203), f"Close: {item['close_price']}", fill=gray, font=fonts["body"])
+    draw.text((x + 20, y + 203), f"Exit: {final_exit}", fill=exit_fill, font=fonts["body"])
+    draw.text((x + 220, y + 203), f"Close: {item['close_price']}", fill=black, font=fonts["body"])
 
 
 def build_after_market_dashboard_image(cards, top_performers=None, dt_text=None):
@@ -3189,12 +3787,12 @@ def send_after_market_category_images(items, category_name, per_image=AFTER_MARK
 # ================= MAIN =================
 def main():
     profile = check_auth()
-    log_analysis_date_debug()
     send(
         f"🚀 BOT STARTED\n"
         f"Profile status: {profile.get('s')}\n"
         f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
         f"Analysis day={analysis_date_str()}\n"
+        f"Manual prev working day={manual_previous_working_date_str() or 'AUTO'}\n"
         f"WATCHLIST={WATCHLIST_RAW}\n"
         f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
     )
@@ -3207,6 +3805,8 @@ def main():
                 run_after_market_once()
             sleep_until_next_market_open()
             
+
+    
 
 if __name__ == "__main__":
     main()
