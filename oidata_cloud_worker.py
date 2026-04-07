@@ -7,7 +7,6 @@ from fyers_apiv3 import fyersModel
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from bs4 import BeautifulSoup
-
 # =========================
 # COLORS (ADD THIS BLOCK)
 # =========================
@@ -94,8 +93,6 @@ HISTORY_RETRY_SLEEP_SECONDS = int(os.getenv("HISTORY_RETRY_SLEEP_SECONDS", "4"))
 
 MANUAL_ANALYSIS_DATE = (os.getenv("ANALYSIS_DATE") or "").strip()
 MANUAL_PREVIOUS_WORKING_DATE = (os.getenv("PREVIOUS_WORKING_DATE") or "").strip()
-
-
 
 # Simple in-memory cache for one bot session
 _HISTORY_CACHE = {}
@@ -2036,6 +2033,23 @@ def compute_weekly_r_levels(prev_week):
         "R5": round(r5, 2),
     }
 
+def compute_daily_r_levels(prev_day):
+    h = float(prev_day[2])
+    l = float(prev_day[3])
+    c = float(prev_day[4])
+
+    p = (h + l + c) / 3.0
+    r1 = 2 * p - l
+    r2 = p + (h - l)
+    r3 = h + 2 * (p - l)
+
+    return {
+        "P": round(p, 2),
+        "R1": round(r1, 2),
+        "R2": round(r2, 2),
+        "R3": round(r3, 2),
+    }
+
 def candle_touches_level(candle, level):
     high = float(candle[2]); low = float(candle[3])
     return low <= level <= high
@@ -2502,6 +2516,43 @@ def scan_pivot_30m_once():
     pattern_summary["pivot30"] = items
     send_rich_summary_image(convert_pivot_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="30 MIN WEEKLY PIVOT SELL", caption="30 Min Weekly Pivot Sell")
 
+
+def scan_r2_breakout(symbol, df_5m, prev_week):
+    try:
+        levels = compute_weekly_r_levels(prev_week)
+        r2 = levels.get("R2")
+
+        if not r2 or df_5m is None or len(df_5m) < 5:
+            return None
+
+        for i in range(len(df_5m)):
+            row = df_5m.iloc[i]
+
+            o = row["Open"]
+            c = row["Close"]
+            h = row["High"]
+            l = row["Low"]
+            t = row["Datetime"]
+
+            if o <= r2 and c > r2:
+                print(f"[R2 DEBUG] {symbol} | R2={r2:.2f} | Entry={h} | SL={l}")
+
+                return {
+                    "symbol": symbol,
+                    "strategy": "R2 Breakout",
+                    "entry": h,
+                    "stoploss": l,
+                    "time": t,
+                    "r2": r2
+                }
+
+        return None
+
+    except Exception as e:
+        print(f"[R2 ERROR] {symbol} -> {e}")
+        return None
+
+
 # ================= LIVE LOOP =================
 def run_live_day():
     global last_live_dashboard_sent
@@ -2906,6 +2957,34 @@ def build_after_market_cards_for_category(items, category_name):
                 "oi_rows": []
             })
 
+
+    elif category_name == "R2 BREAKOUT":
+        for x in items:
+            result = str(x.get("result", ""))
+            entry = x.get("entry", "")
+            stoploss = x.get("stoploss", "")
+            exit_price = x.get("exit_price", "")
+            qty, pnl = make_qty_and_pnl(entry, stoploss, exit_price, "BUY")
+            score = 95 if "Target" in result else 84 if "Stoploss" in result else 88
+            cards.append({
+                "symbol": x.get("symbol", ""),
+                "ltp": exit_price,
+                "score": score,
+                "strategy": f"R2 BREAKOUT ({x.get('r2', '')})",
+                "side": "BUY",
+                "result": result,
+                "entry": entry,
+                "stoploss": stoploss,
+                "target": x.get("target", ""),
+                "qty": qty,
+                "pl": f"{pnl:+,.0f}",
+                "pnl_value": pnl,
+                "close_price": x.get("close_price", exit_price),
+                "prev_close": x.get("prev_close", 0.0),
+                "day_pct": x.get("day_pct", 0.0),
+                "oi_rows": []
+            })
+
     cards.sort(key=lambda z: safe_float(z.get("score", 0), 0), reverse=True)
     return cards
 
@@ -3131,12 +3210,76 @@ def evaluate_pivot_after_market_prefetched(symbol, data):
     }
 
 
+def evaluate_r2_breakout_after_market_prefetched(symbol, data):
+    prev_day = data.get("prev_day")
+    day_5m = data.get("day_5m", [])
+
+    if prev_day is None or len(day_5m) < 1:
+        return None
+
+    prev_close = float(prev_day[4])
+    r_levels = compute_daily_r_levels(prev_day)
+    r2 = float(r_levels.get("R2", 0.0))
+    if r2 <= 0:
+        return None
+
+    breakout_idx = None
+    breakout_candle = None
+
+    for idx, c in enumerate(day_5m):
+        o = float(c[1]); h = float(c[2]); l = float(c[3]); cl = float(c[4])
+
+        if o <= r2 and cl > r2:
+            breakout_idx = idx
+            breakout_candle = c
+            log(f"[R2 BREAKOUT DEBUG] {short_name(symbol)} | prev_day_R2={r2} | O={o} H={h} L={l} C={cl}")
+            break
+
+    if breakout_candle is None:
+        return None
+
+    entry = round(float(breakout_candle[2]), 2)
+    stoploss = round(float(breakout_candle[3]) * (1 - SL_BUFFER_PCT), 2)
+    if entry <= stoploss:
+        return None
+    target = round(entry + (entry - stoploss) * TARGET_RR, 2)
+
+    later = day_5m[breakout_idx + 1:]
+    details = evaluate_buy_result_detailed(later, entry, target, stoploss)
+    exit_price = details["exit_price"]
+
+    if details["entry_candle"] is None:
+        pl = 0.0
+        day_pct = 0.0
+    else:
+        pl = round(exit_price - entry, 2)
+        day_pct = round(((exit_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
+
+    return {
+        "symbol": short_name(symbol),
+        "r2": round(r2, 2),
+        "entry": entry,
+        "target": target,
+        "stoploss": stoploss,
+        "result": details["result"],
+        "entry_candle": details["entry_candle"],
+        "entry_time": details["entry_time"],
+        "exit_candle": details["exit_candle"],
+        "exit_time": details["exit_time"],
+        "exit_price": exit_price,
+        "close_price": exit_price,
+        "prev_close": round(prev_close, 2),
+        "day_pct": day_pct,
+        "pl": pl
+    }
+    
 def run_after_market_once():
     send("📡 Running after-market scan...")
 
     gap_items = []
     inside_items = []
     pivot_items = []
+    r2_items=[]
 
     symbols = list(SYMBOLS)
     total = len(symbols)
@@ -3167,6 +3310,10 @@ def run_after_market_once():
                 if p:
                     pivot_items.append(p)
 
+                r = evaluate_r2_breakout_after_market_prefetched(sym, data)
+                if r:
+                    r2_items.append(r)
+
             except Exception as e:
                 log(f"[AFTER MARKET ERROR] {sym}: {e}")
 
@@ -3181,6 +3328,7 @@ def run_after_market_once():
     send_after_market_category_images(gap_items, "GAPUP PLUS", per_image=AFTER_MARKET_PAGE_SIZE)
     send_after_market_category_images(inside_items, "15 MIN INSIDE", per_image=AFTER_MARKET_PAGE_SIZE)
     send_after_market_category_images(pivot_items, "PIVOT", per_image=AFTER_MARKET_PAGE_SIZE)
+    send_after_market_category_images(r2_items, "R2 BREAKOUT", per_image=AFTER_MARKET_PAGE_SIZE)
 
     nxt = next_market_open_datetime()
     send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
@@ -3790,14 +3938,15 @@ def send_after_market_category_images(items, category_name, per_image=AFTER_MARK
 def main():
     profile = check_auth()
     send(
-    f"🚀 BOT STARTED\n"
-    f"Profile status: {profile.get('s')}\n"
-    f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
-    f"Analysis day={analysis_date_str()}\n"
-    f"Manual prev working day={manual_previous_working_date_str() or 'AUTO'}\n"
-    f"WATCHLIST={WATCHLIST_RAW}\n"
-    f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
-)
+        f"🚀 BOT STARTED\n"
+        f"Profile status: {profile.get('s')}\n"
+        f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
+        f"Analysis day={analysis_date_str()}\n"
+        f"Manual prev working day={manual_previous_working_date_str() or 'AUTO'}\n"
+        f"WATCHLIST={WATCHLIST_RAW}\n"
+        f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
+    )
+
     while True:
         if is_market_open():
             run_live_day()
