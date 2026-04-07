@@ -95,6 +95,8 @@ HISTORY_RETRY_SLEEP_SECONDS = int(os.getenv("HISTORY_RETRY_SLEEP_SECONDS", "4"))
 MANUAL_ANALYSIS_DATE = (os.getenv("ANALYSIS_DATE") or "").strip()
 MANUAL_PREVIOUS_WORKING_DATE = (os.getenv("PREVIOUS_WORKING_DATE") or "").strip()
 
+
+
 # Simple in-memory cache for one bot session
 _HISTORY_CACHE = {}
 
@@ -1356,15 +1358,8 @@ def _normalize_env_date(value: str) -> str:
             pass
     return ""
 
-def analysis_date_str():
-    manual = manual_analysis_date_str()
-    if manual:
-        return manual
-    try:
-        return get_last_available_session_date()
-    except Exception as e:
-        log(f"[ANALYSIS DATE ERROR] {e}")
-        return now_ist().strftime("%Y-%m-%d")
+def manual_analysis_date_str():
+    return _normalize_env_date(MANUAL_ANALYSIS_DATE)
 
 def manual_previous_working_date_str():
     return _normalize_env_date(MANUAL_PREVIOUS_WORKING_DATE)
@@ -3795,15 +3790,14 @@ def send_after_market_category_images(items, category_name, per_image=AFTER_MARK
 def main():
     profile = check_auth()
     send(
-        f"🚀 BOT STARTED\n"
-        f"Profile status: {profile.get('s')}\n"
-        f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
-        f"Analysis day={analysis_date_str()}\n"
-        f"Manual prev working day={manual_previous_working_date_str() or 'AUTO'}\n"
-        f"WATCHLIST={WATCHLIST_RAW}\n"
-        f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
-    )
-
+    f"🚀 BOT STARTED\n"
+    f"Profile status: {profile.get('s')}\n"
+    f"AFTER_MARKET_RUN={AFTER_MARKET_RUN}\n"
+    f"Analysis day={analysis_date_str()}\n"
+    f"Manual prev working day={manual_previous_working_date_str() or 'AUTO'}\n"
+    f"WATCHLIST={WATCHLIST_RAW}\n"
+    f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
+)
     while True:
         if is_market_open():
             run_live_day()
