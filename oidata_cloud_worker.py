@@ -1356,8 +1356,15 @@ def _normalize_env_date(value: str) -> str:
             pass
     return ""
 
-def manual_analysis_date_str():
-    return _normalize_env_date(MANUAL_ANALYSIS_DATE)
+def analysis_date_str():
+    manual = manual_analysis_date_str()
+    if manual:
+        return manual
+    try:
+        return get_last_available_session_date()
+    except Exception as e:
+        log(f"[ANALYSIS DATE ERROR] {e}")
+        return now_ist().strftime("%Y-%m-%d")
 
 def manual_previous_working_date_str():
     return _normalize_env_date(MANUAL_PREVIOUS_WORKING_DATE)
