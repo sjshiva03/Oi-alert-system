@@ -2272,10 +2272,10 @@ def try_entry_for_candidate(symbol):
     def _blocked_message(side, reason):
         if throttle_ok(f"{symbol}|blocked|{side}"):
             send(f"⚠️ ENTRY BLOCKED
-{short_name(symbol)}
-Strategy: {strategy}
-{side} trigger hit, but {reason}")
-        block_trade(symbol, strategy, side, reason)
+            {short_name(symbol)}
+            Strategy: {strategy}
+            {side} trigger hit, but {reason}")
+            block_trade(symbol, strategy, side, reason)
 
     if strategy == "GAPUP_PLUS":
         if ltp <= c["entry"]:
