@@ -1958,7 +1958,7 @@ def scan_gapup_pattern(symbol):
     print("\n📊 GAPUP DEBUG")
     print(f"OPEN={o} HIGH={h} LOW={l}")
     print(f"PREV HIGH={prev_high}")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
 
     return {
         "symbol": symbol,
@@ -1995,6 +1995,9 @@ def scan_15m_inside_pattern(symbol):
 
     if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
+
+    buy_entry = round(h1, 2)
+    sell_entry = round(l1, 2)
 
     print("\n📊 15M INSIDE DEBUG")
     print(f"CANDLE1 HIGH={h1} LOW={l1}")
