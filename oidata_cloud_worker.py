@@ -2604,11 +2604,11 @@ def run_live_day():
 
         try:
             if _should_send_live_dashboard():
-                live_cards = _active_trade_cards_only()
+                live_cards = _live_dashboard_cards()
                 if live_cards:
                     send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
         except Exception as e:
-            log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
+          log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
 
         if not eod_sent and nowt >= dtime(15, 28):
             send_after_market_summary_image(caption="End of Day Report")
@@ -3883,11 +3883,16 @@ def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        cards = list(cards or _active_trade_cards_only())
+        cards = list(cards or _live_dashboard_cards())
+        log(f"LIVE DASHBOARD COUNTS | active={len(active_trades)} watch={len(watch_candidates)} cards={len(cards)}")
         if not cards:
             log("No live dashboard cards to send")
             return
-        img_bytes = build_live_dashboard_image(cards=cards, top_performers=_top_performers_line(cards), dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper())
+        img_bytes = build_live_dashboard_image(
+            cards=cards,
+            top_performers=_top_performers_line(cards),
+            dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
+        )
         send_telegram_image(img_bytes.name, img_bytes, caption=caption)
     except Exception as e:
         log(f"Live dashboard image error: {e}")
