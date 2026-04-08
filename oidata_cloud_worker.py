@@ -1294,10 +1294,10 @@ def human_format(n):
 def arrow(v):
     v = safe_float(v, 0.0)
     if v > 0:
-        return "↑"
+        return "▲"
     if v < 0:
-        return "↓"
-    return "→"
+        return "▼"
+    return "•"
 
 def dedupe_candles_by_ts(candles):
     seen = {}
@@ -2137,7 +2137,7 @@ def scan_30m_pivot_sell(symbol):
     print(f"C1 HIGH={c1_high} LOW={c1_low}")
     print(f"C2 HIGH={c2_high} LOW={c2_low}")
     print(f"C3 HIGH={c3_high} LOW={c3_low}")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl if 'sl' in locals() else stoploss}")
 
     return {
         "symbol": symbol,
@@ -3542,24 +3542,23 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
         table_top = y + 248
 
-    # bordered table
+    # bordered table - compact 5 column layout for better readability
     table_left = x + 14
     table_right = x + card_w - 14
     row_h = 28
     header_h = 28
-    col_names = ["Strike", "PE", "PE Chg", "CE", "CE Chg", "PE Day", "CE Day"]
-    col_widths = [68, 56, 76, 56, 76, 70, 70]
-    # shrink slightly if needed
+    col_names = ["Strike", "PE", "PE Chg", "CE", "CE Chg"]
+    col_widths = [72, 68, 92, 68, 92]
+
     total_w = sum(col_widths)
     avail_w = table_right - table_left
     if total_w > avail_w:
         scale = avail_w / total_w
-        col_widths = [max(42, int(w * scale)) for w in col_widths]
+        col_widths = [max(54, int(w * scale)) for w in col_widths]
         total_w = sum(col_widths)
-    table_bottom = table_top + header_h + row_h * 5
-    draw.rounded_rectangle((table_left, table_top, table_left + total_w, table_bottom), radius=8, fill=(250,250,250), outline=grid, width=1)
 
-    # header background
+    table_bottom = table_top + header_h + row_h * 5
+    draw.rounded_rectangle((table_left, table_top, table_left + total_w, table_bottom), radius=8, fill=(250, 250, 250), outline=grid, width=1)
     draw.rectangle((table_left, table_top, table_left + total_w, table_top + header_h), fill=(240, 240, 240), outline=grid, width=1)
 
     cx = table_left
@@ -3569,7 +3568,6 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
             draw.line((cx, table_top, cx, table_bottom), fill=grid, width=1)
         cx += w
 
-    # horizontal lines
     for i in range(1, 6):
         yy = table_top + header_h + (i - 1) * row_h
         draw.line((table_left, yy, table_left + total_w, yy), fill=grid, width=1)
@@ -3580,9 +3578,9 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
 
     def val_color(v, default=black):
         s = str(v)
-        if s.startswith('-') or '↓' in s:
+        if s.startswith('-') or '▼' in s:
             return dark_red
-        if s.startswith('+') or '↑' in s:
+        if s.startswith('+') or '▲' in s:
             return dark_green
         return default
 
@@ -3594,10 +3592,8 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
             str(row.get("pe_chg", row.get("put_oich", ""))),
             str(row.get("ce_oi", row.get("call_oi", ""))),
             str(row.get("ce_chg", row.get("call_oich", ""))),
-            str(row.get("pe_day", row.get("put_oichp", ""))),
-            str(row.get("ce_day", row.get("call_oichp", ""))),
         ]
-        fills = [black, black, val_color(vals[2]), black, val_color(vals[4]), val_color(vals[5]), val_color(vals[6])]
+        fills = [black, black, val_color(vals[2]), black, val_color(vals[4])]
         cx = table_left
         for val, fc, w in zip(vals, fills, col_widths):
             txt = _fit_text(draw, val, fonts["oi"], w - 6, suffix="")
@@ -3835,8 +3831,6 @@ def _rows_to_dashboard_strikes(oi_rows):
             "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
             "ce_oi": human_format(r.get("call_oi", 0)),
             "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            "pe_day": human_format(r.get("put_day_oi_change", r.get("put_oichp", 0))),
-            "ce_day": human_format(r.get("call_day_oi_change", r.get("call_oichp", 0))),
         })
     return out
 
