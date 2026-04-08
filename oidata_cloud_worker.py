@@ -153,7 +153,8 @@ blocked_entries = []
 pattern_summary = {
     "gapup": [],
     "inside15": [],
-    "pivot30": []
+    "pivot30": [],
+    "r2": []
 }
 eod_stats = {
     "entries": [],
@@ -170,6 +171,7 @@ gapup_scan_done = False
 inside15_scan_done = False
 last_pivot_scan_ts = 0.0
 last_after_market_run_for_analysis = ""
+r2_live_sent_symbols = set()
 
 # ================= TELEGRAM SEND =================
 def send(msg: str):
@@ -383,6 +385,128 @@ def _wrap_text(draw, value, font, max_width):
             current = word
     lines.append(current)
     return lines
+
+
+def _draw_simple_table_grid(draw, left, top, widths, row_h, rows, line_color=(0, 0, 0)):
+    total_w = sum(widths)
+    total_h = row_h * rows
+    draw.rectangle((left, top, left + total_w, top + total_h), outline=line_color, width=1)
+    x = left
+    for w in widths[:-1]:
+        x += w
+        draw.line((x, top, x, top + total_h), fill=line_color, width=1)
+    for i in range(1, rows):
+        y = top + i * row_h
+        draw.line((left, y, left + total_w, y), fill=line_color, width=1)
+
+
+def build_strategy_table_image(title, items, columns, color, filename):
+    items = list(items or [])
+    widths = [70, 210, 150, 120, 100]
+    row_h = 38
+    title_h = 34
+    header_h = 38
+    margin = 18
+    table_w = sum(widths)
+    table_h = row_h * (len(items) + 1)
+    W = table_w + margin * 2
+    H = margin * 2 + title_h + table_h
+
+    img = Image.new("RGB", (W, H), "white")
+    draw = ImageDraw.Draw(img)
+
+    title_font = _load_single_font(24, True)
+    header_font = _load_single_font(18, True)
+    text_font = _load_single_font(18, True)
+
+    title_y = margin
+    tw = _text_size(draw, title, title_font)[0]
+    draw.text(((W - tw) / 2, title_y), title, fill=BLACK, font=title_font)
+
+    top = margin + title_h
+    _draw_simple_table_grid(draw, margin, top, widths, row_h, len(items) + 1, line_color=BORDER)
+
+    x = margin
+    for idx, col in enumerate(columns):
+        cw = widths[idx]
+        tw = _text_size(draw, col, header_font)[0]
+        draw.text((x + (cw - tw) / 2, top + 8), str(col), fill=BLACK, font=header_font)
+        x += cw
+
+    for ridx, row in enumerate(items, 1):
+        y = top + ridx * row_h
+        x = margin
+        for cidx, val in enumerate(row):
+            cw = widths[cidx]
+            sval = "" if val is None else str(val)
+            fill = color if (cidx == len(row) - 1 and sval not in ("", "None")) else BLACK
+            tw = _text_size(draw, sval, text_font)[0]
+            draw.text((x + (cw - tw) / 2, y + 7), sval, fill=fill, font=text_font)
+            x += cw
+
+    return _save_image_to_bytes(img, filename)
+
+
+def _simple_gapup_rows(items):
+    rows = []
+    for i, item in enumerate(items or [], 1):
+        rows.append([
+            i,
+            short_name(item.get("symbol", "")),
+            round(safe_float(item.get("prev_high", ""), safe_float(item.get("entry", 0), 0.0)), 2) if item.get("prev_high") not in (None, "") or item.get("entry") not in (None, "") else "",
+            round(safe_float(item.get("open", ""), safe_float(item.get("entry", 0), 0.0)), 2) if item.get("open") not in (None, "") or item.get("entry") not in (None, "") else "",
+            f"{round(safe_float(item.get('gap_pct', 0), 0.0), 2)}%"
+        ])
+    return rows
+
+
+def _simple_inside_rows(items):
+    rows = []
+    for i, item in enumerate(items or [], 1):
+        rows.append([
+            i,
+            short_name(item.get("symbol", "")),
+            round(safe_float(item.get("buy_entry", 0), 0.0), 2),
+            round(safe_float(item.get("sell_entry", 0), 0.0), 2),
+            f"{round(safe_float(item.get('range_pct', 0), 0.0), 2)}%"
+        ])
+    return rows
+
+
+def _simple_pivot_rows(items):
+    rows = []
+    for i, item in enumerate(items or [], 1):
+        rows.append([
+            i,
+            short_name(item.get("symbol", "")),
+            round(safe_float(item.get("pivot_value", 0), 0.0), 2),
+            round(safe_float(item.get("entry", 0), 0.0), 2),
+            str(item.get("pivot_name", ""))
+        ])
+    return rows
+
+
+def _simple_r2_rows(items):
+    rows = []
+    for i, item in enumerate(items or [], 1):
+        rows.append([
+            i,
+            short_name(item.get("symbol", "")),
+            round(safe_float(item.get("r2", 0), 0.0), 2),
+            round(safe_float(item.get("entry", 0), 0.0), 2),
+            str(item.get("breakout_time", item.get("time", "")))
+        ])
+    return rows
+
+
+def send_simple_pattern_image(title, rows, columns, color, filename, caption):
+    if not TELEGRAM_TOKEN or not CHAT_ID or not rows:
+        return
+    try:
+        img_bytes = build_strategy_table_image(title, rows, columns, color, filename)
+        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
+    except Exception as e:
+        log(f"{title} simple image error: {e}")
 
 
 def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
@@ -2074,6 +2198,8 @@ def scan_gapup_pattern(symbol):
         "symbol": symbol,
         "strategy": "GAPUP_PLUS",
         "side": "SELL",
+        "prev_high": round(prev_high, 2),
+        "open": round(o, 2),
         "gap_pct": round(gap_pct, 2),
         "entry": entry,
         "stoploss": sl,
@@ -2599,6 +2725,7 @@ def scan_gapup_once():
             log(f"GAP SCAN ERROR {sym}: {e}")
     pattern_summary["gapup"] = items
     send_rich_summary_image(convert_gapup_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="GAP UP PLUS", caption="Gap Up Plus")
+    send_simple_pattern_image("GAP UP PLUS", _simple_gapup_rows(items), ["Sl.No", "Stock Name", "Prev High", "Open", "Chg%"], DARK_GREEN, "gapup_simple", "Gap Up Plus")
 
 def scan_inside15_once():
     items = []
@@ -2612,6 +2739,7 @@ def scan_inside15_once():
             log(f"15M SCAN ERROR {sym}: {e}")
     pattern_summary["inside15"] = items
     send_rich_summary_image(convert_inside_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="15 MIN INSIDE CANDLE", caption="15 Min Inside")
+    send_simple_pattern_image("15 MIN INSIDE", _simple_inside_rows(items), ["Sl.No", "Stock Name", "Buy High", "Sell Low", "Range%"], (0, 120, 220), "inside15_simple", "15 Min Inside")
 
 def pivot_scan_key():
     now = now_ist()
@@ -2644,6 +2772,7 @@ def scan_pivot_30m_once():
             log(f"PIVOT SCAN ERROR {sym}: {e}")
     pattern_summary["pivot30"] = items
     send_rich_summary_image(convert_pivot_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="30 MIN WEEKLY PIVOT SELL", caption="30 Min Weekly Pivot Sell")
+    send_simple_pattern_image("PIVOT BREAKOUT", _simple_pivot_rows(items), ["Sl.No", "Stock Name", "Pivot", "Entry", "Level"], (230, 140, 0), "pivot_simple", "30 Min Weekly Pivot Sell")
 
 
 def scan_r2_breakout(symbol, df_5m, prev_week):
@@ -2682,6 +2811,63 @@ def scan_r2_breakout(symbol, df_5m, prev_week):
         return None
 
 
+def scan_r2_live_once():
+    items = []
+    for sym in R2_SYMBOLS:
+        try:
+            if sym in closed_for_day or sym in active_trades or sym in r2_live_sent_symbols:
+                continue
+
+            prev_day = get_previous_daily(sym)
+            day_5m = get_analysis_day_candles(sym, 5, 7)
+            if prev_day is None or len(day_5m) < 1:
+                continue
+
+            r_levels = compute_daily_r_levels(prev_day)
+            r2 = float(r_levels.get("R2", 0.0))
+            if r2 <= 0:
+                continue
+
+            breakout_candle = None
+            for c in day_5m:
+                o = float(c[1]); cl = float(c[4])
+                if o <= r2 and cl > r2:
+                    breakout_candle = c
+                    break
+
+            if breakout_candle is None:
+                continue
+
+            h = float(breakout_candle[2])
+            l = float(breakout_candle[3])
+            entry = round(h, 2)
+            stoploss = round(l * (1 - SL_BUFFER_PCT), 2)
+            if entry <= stoploss:
+                continue
+            target = round(entry + (entry - stoploss) * TARGET_RR, 2)
+
+            payload = {
+                "symbol": sym,
+                "strategy": "R2 Breakout",
+                "side": "BUY",
+                "entry": entry,
+                "stoploss": stoploss,
+                "target": target,
+                "r2": round(r2, 2),
+                "breakout_time": candle_dt(breakout_candle[0]).strftime("%H:%M")
+            }
+            items.append(payload)
+            add_watch_candidate(sym, payload)
+            r2_live_sent_symbols.add(sym)
+        except Exception as e:
+            log(f"R2 SCAN ERROR {sym}: {e}")
+
+    pattern_summary["r2"] = items
+    if items:
+        send_simple_pattern_image("R2 BREAKOUT", _simple_r2_rows(items), ["Sl.No", "Stock Name", "R2", "Entry", "Time"], (120, 0, 200), "r2_simple", "R2 Breakout")
+
+
+
 # ================= LIVE LOOP =================
 def run_live_day():
     global last_live_dashboard_sent
@@ -2716,6 +2902,8 @@ def run_live_day():
 
         if should_run_pivot_scan():
             scan_pivot_30m_once()
+
+        scan_r2_live_once()
 
         for sym in list(watch_candidates.keys()):
             if sym in closed_for_day or sym in active_trades:
