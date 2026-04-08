@@ -73,7 +73,8 @@ OI_INTERVAL_SECONDS = int(os.getenv("OI_INTERVAL_SECONDS", "180"))
 OI_STOCK_GAP_SECONDS = int(os.getenv("OI_STOCK_GAP_SECONDS", "10"))
 ALERT_GAP_SECONDS = int(os.getenv("ALERT_GAP_SECONDS", "300"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
-LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS", "60"))
+LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS", "300"))
+ONLY_STRONG_SIGNALS = (os.getenv("ONLY_STRONG_SIGNALS", "true").strip().lower() == "true")
 
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
@@ -139,6 +140,9 @@ eod_stats = {
 last_alert_time = {}
 pivot_scan_done_keys = set()
 last_live_dashboard_sent = 0.0
+gapup_scan_done = False
+inside15_scan_done = False
+last_pivot_scan_ts = 0.0
 
 # ================= TELEGRAM SEND =================
 def send(msg: str):
@@ -1294,10 +1298,10 @@ def human_format(n):
 def arrow(v):
     v = safe_float(v, 0.0)
     if v > 0:
-        return "▲"
+        return "↑"
     if v < 0:
-        return "▼"
-    return "•"
+        return "↓"
+    return "→"
 
 def dedupe_candles_by_ts(candles):
     seen = {}
@@ -1624,26 +1628,12 @@ def normalize_chain_fast(options_list):
 
         sym = str(x.get("symbol", "")).upper()
 
-        oi_val = safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0)
-        prev_oi_val = safe_float(
-            x.get("prev_oi")
-            or x.get("previous_oi")
-            or x.get("prevOi")
-            or x.get("previousOi")
-            or x.get("poi"),
-            0.0,
-        )
-        day_oi_change_val = oi_val - prev_oi_val if prev_oi_val else 0.0
-
         row = {
             "ltp": safe_float(x.get("ltp") or x.get("last_price") or x.get("lastPrice"), 0.0),
             "chg": safe_float(x.get("chg") or x.get("change") or x.get("ch"), 0.0),
             "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility"), 0.0),
-            "oi": oi_val,
-            "prev_oi": prev_oi_val,
-            "day_oi_change": day_oi_change_val,
+            "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0),
             "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange"), 0.0),
-            "oichp": safe_float(x.get("oichp") or x.get("oi_change_pct") or x.get("oiChangePct"), 0.0),
             "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol"), 0.0),
         }
 
@@ -1661,14 +1651,8 @@ def normalize_chain_fast(options_list):
             "strike": int(strike),
             "call_oi": c.get("oi", 0.0),
             "call_oich": c.get("oi_change", 0.0),
-            "call_oichp": safe_float(c.get("oichp") or c.get("oi_change_pct") or c.get("oiChangePct") or 0.0, 0.0),
-            "call_prev_oi": c.get("prev_oi", 0.0),
-            "call_day_oi_change": c.get("day_oi_change", 0.0),
             "put_oi": p.get("oi", 0.0),
             "put_oich": p.get("oi_change", 0.0),
-            "put_oichp": safe_float(p.get("oichp") or p.get("oi_change_pct") or p.get("oiChangePct") or 0.0, 0.0),
-            "put_prev_oi": p.get("prev_oi", 0.0),
-            "put_day_oi_change": p.get("day_oi_change", 0.0),
         })
     return rows
 
@@ -1725,14 +1709,14 @@ def get_oi_snapshot(symbol, ltp):
     atm_idx = strikes.index(atm)
 
     start = max(0, atm_idx - 2)
-    end = start + 5
-    if end > len(parsed):
-        end = len(parsed)
-        start = max(0, end - 5)
+    end = min(len(parsed), start + 5)
     selected = parsed[start:end]
+    if len(selected) < 5 and len(parsed) >= 5:
+        start = max(0, end - 5)
+        selected = parsed[start:start + 5]
 
-    ce_total = sum(r["call_oich"] for r in selected)
-    pe_total = sum(r["put_oich"] for r in selected)
+    ce_total = sum(safe_float(r.get("call_oich", 0), 0.0) for r in selected)
+    pe_total = sum(safe_float(r.get("put_oich", 0), 0.0) for r in selected)
 
     bias = "NEUTRAL"
     if pe_total > ce_total:
@@ -1759,6 +1743,45 @@ def hold_status(side, bias):
     if side == "SELL":
         return "Sell Hold " if bias == "BEARISH" else "Exit ⚪"
     return "Exit ⚪"
+
+
+def calculate_pcr(oi_rows):
+    try:
+        pe_total = sum(safe_float(r.get("put_oi", 0), 0.0) for r in oi_rows)
+        ce_total = sum(safe_float(r.get("call_oi", 0), 0.0) for r in oi_rows)
+        if ce_total <= 0:
+            return 0.0
+        return round(pe_total / ce_total, 2)
+    except Exception:
+        return 0.0
+
+def oi_bias_from_rows(oi_rows):
+    try:
+        pe_total = sum(safe_float(r.get("put_oich", 0), 0.0) for r in oi_rows)
+        ce_total = sum(safe_float(r.get("call_oich", 0), 0.0) for r in oi_rows)
+        if pe_total > ce_total:
+            return "BULLISH"
+        if ce_total > pe_total:
+            return "BEARISH"
+    except Exception:
+        pass
+    return "NEUTRAL"
+
+def is_strong_signal(oi_rows, side):
+    try:
+        if not oi_rows or len(oi_rows) < 3:
+            return False
+        atm = oi_rows[len(oi_rows)//2]
+        pe_chg = safe_float(atm.get("put_oich", 0), 0.0)
+        ce_chg = safe_float(atm.get("call_oich", 0), 0.0)
+        side = str(side or "").upper()
+        if side == "BUY":
+            return pe_chg > 0 and ce_chg <= 0
+        if side == "SELL":
+            return ce_chg > 0 and pe_chg <= 0
+    except Exception:
+        pass
+    return False
 
 # ================= POSITION SIZE =================
 def calc_position(entry, stoploss):
@@ -2019,12 +2042,11 @@ def scan_15m_inside_pattern(symbol):
     if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
 
-    buy_entry = round(h1, 2)
-    sell_entry = round(l1, 2)
-
     print("\n📊 15M INSIDE DEBUG")
     print(f"CANDLE1 HIGH={h1} LOW={l1}")
     print(f"CANDLE2 HIGH={h2} LOW={l2}")
+    buy_entry = round(h1, 2)
+    sell_entry = round(l1, 2)
     print(f"BUY ENTRY={buy_entry} SELL ENTRY={sell_entry}")
 
     return {
@@ -2137,7 +2159,7 @@ def scan_30m_pivot_sell(symbol):
     print(f"C1 HIGH={c1_high} LOW={c1_low}")
     print(f"C2 HIGH={c2_high} LOW={c2_low}")
     print(f"C3 HIGH={c3_high} LOW={c3_low}")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl if 'sl' in locals() else stoploss}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
 
     return {
         "symbol": symbol,
@@ -2210,7 +2232,7 @@ def send_entry_alert(symbol, trade, oi_rows, oi_bias):
     trade["exposure"] = round(exposure, 2)
     trade["margin"] = round(margin, 2)
     trade["risk_per_share"] = round(risk_per_share, 2)
-    reason = f"Risk ₹{int(RISK_AMOUNT)} | Qty {qty} | Margin ~{round(margin)} | OI {oi_bias}"
+    reason = f"Risk ₹{int(RISK_AMOUNT)} | Qty {qty} | Margin ~{round(margin)} | OI {oi_bias} | PCR {trade.get('pcr', '')}"
     send(
         f"✅ ENTRY CONFIRMED\n"
         f"{short_name(symbol)}\n"
@@ -2238,13 +2260,28 @@ def try_entry_for_candidate(symbol):
     c = watch_candidates[symbol]
     strategy = c["strategy"]
 
+    def _entry_ok(side, oi_rows, bias):
+        if side == "BUY" and bias != "BULLISH":
+            return False
+        if side == "SELL" and bias != "BEARISH":
+            return False
+        if ONLY_STRONG_SIGNALS and not is_strong_signal(oi_rows, side):
+            return False
+        return True
+
+    def _blocked_message(side, reason):
+        if throttle_ok(f"{symbol}|blocked|{side}"):
+            send(f"⚠️ ENTRY BLOCKED
+{short_name(symbol)}
+Strategy: {strategy}
+{side} trigger hit, but {reason}")
+        block_trade(symbol, strategy, side, reason)
+
     if strategy == "GAPUP_PLUS":
         if ltp <= c["entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
-            if bias != "BEARISH":
-                if throttle_ok(f"{symbol}|blocked|SELL"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
-                block_trade(symbol, strategy, "SELL", "OI against SELL")
+            if not _entry_ok("SELL", oi_rows, bias):
+                _blocked_message("SELL", "OI is against SELL" if bias != "BEARISH" else "signal is weak")
                 del watch_candidates[symbol]
                 return
 
@@ -2257,7 +2294,10 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0
+                "last_oi_alert": 0,
+                "oi_rows": oi_rows,
+                "oi_bias": bias,
+                "pcr": calculate_pcr(oi_rows),
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2268,10 +2308,8 @@ def try_entry_for_candidate(symbol):
     if strategy == "INSIDE_15M":
         if ltp >= c["buy_entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
-            if bias != "BULLISH":
-                if throttle_ok(f"{symbol}|blocked|BUY"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nBUY trigger hit, but OI is against BUY")
-                block_trade(symbol, strategy, "BUY", "OI against BUY")
+            if not _entry_ok("BUY", oi_rows, bias):
+                _blocked_message("BUY", "OI is against BUY" if bias != "BULLISH" else "signal is weak")
                 return
 
             trade = {
@@ -2283,7 +2321,10 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["buy_stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0
+                "last_oi_alert": 0,
+                "oi_rows": oi_rows,
+                "oi_bias": bias,
+                "pcr": calculate_pcr(oi_rows),
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "BUY"})
@@ -2293,10 +2334,8 @@ def try_entry_for_candidate(symbol):
 
         if ltp <= c["sell_entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
-            if bias != "BEARISH":
-                if throttle_ok(f"{symbol}|blocked|SELL"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
-                block_trade(symbol, strategy, "SELL", "OI against SELL")
+            if not _entry_ok("SELL", oi_rows, bias):
+                _blocked_message("SELL", "OI is against SELL" if bias != "BEARISH" else "signal is weak")
                 return
 
             trade = {
@@ -2308,7 +2347,10 @@ def try_entry_for_candidate(symbol):
                 "stoploss": c["sell_stoploss"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0
+                "last_oi_alert": 0,
+                "oi_rows": oi_rows,
+                "oi_bias": bias,
+                "pcr": calculate_pcr(oi_rows),
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2319,10 +2361,8 @@ def try_entry_for_candidate(symbol):
     if strategy == "PIVOT_30M_WEEKLY_SELL":
         if ltp <= c["entry"]:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
-            if bias != "BEARISH":
-                if throttle_ok(f"{symbol}|blocked|PIVOTSELL"):
-                    send(f"⚠️ ENTRY BLOCKED\n{short_name(symbol)}\nStrategy: {strategy}\nSELL trigger hit, but OI is against SELL")
-                block_trade(symbol, strategy, "SELL", "OI against SELL")
+            if not _entry_ok("SELL", oi_rows, bias):
+                _blocked_message("SELL", "OI is against SELL" if bias != "BEARISH" else "signal is weak")
                 del watch_candidates[symbol]
                 return
 
@@ -2337,7 +2377,10 @@ def try_entry_for_candidate(symbol):
                 "pivot_value": c["pivot_value"],
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
-                "last_oi_alert": 0
+                "last_oi_alert": 0,
+                "oi_rows": oi_rows,
+                "oi_bias": bias,
+                "pcr": calculate_pcr(oi_rows),
             }
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
@@ -2476,15 +2519,8 @@ def track_active_trade(symbol):
         return
 
     snap = get_oi_snapshot(symbol, ltp)
-    if isinstance(snap, dict):
-        oi_rows = list(snap.get("rows", []) or [])
-        bias = str(snap.get("bias", "NEUTRAL"))
-    elif isinstance(snap, tuple) and len(snap) >= 2:
-        oi_rows = list(snap[0] or [])
-        bias = str(snap[1] or "NEUTRAL")
-    else:
-        oi_rows = []
-        bias = "NEUTRAL"
+    oi_rows = snap.get("rows", []) if isinstance(snap, dict) else []
+    bias = str(snap.get("bias", "")) if isinstance(snap, dict) else ""
 
     trade["oi_rows"] = oi_rows
     trade["oi_bias"] = bias
@@ -2593,6 +2629,9 @@ def run_live_day():
     inside_summary_sent = False
     eod_sent = False
     last_live_dashboard_sent = 0.0
+gapup_scan_done = False
+inside15_scan_done = False
+last_pivot_scan_ts = 0.0
 
     while True:
         if not is_market_open():
@@ -3476,20 +3515,6 @@ def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text):
 def _normalize_live_card_source(item):
     item = dict(item or {})
     symbol = _card_symbol_name(item.get("symbol", ""))
-    strikes = list(item.get("strikes", item.get("oi_rows", [])) or [])
-    ltp_val = safe_float(item.get("ltp", 0), 0.0)
-    atm_strike = None
-    strike_nums = []
-    for row in strikes:
-        try:
-            strike_nums.append(safe_float(row.get("strike", 0), 0.0))
-        except Exception:
-            pass
-    valid_nums = [s for s in strike_nums if s > 0]
-    if valid_nums and ltp_val > 0:
-        atm_strike = min(valid_nums, key=lambda s: abs(s - ltp_val))
-    elif len(valid_nums) >= 3:
-        atm_strike = valid_nums[len(valid_nums) // 2]
     return {
         "symbol": symbol,
         "ltp": item.get("ltp", ""),
@@ -3505,15 +3530,13 @@ def _normalize_live_card_source(item):
         "pl_text": item.get("pl_text", item.get("pl", "")),
         "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
         "exit_type": str(item.get("exit_type", "")).upper(),
-        "strikes": strikes,
-        "atm_strike": atm_strike,
+        "strikes": list(item.get("strikes", item.get("oi_rows", [])) or []),
     }
 
 
 def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     white = (255, 255, 255)
     border = (200, 200, 200)
-    grid = (210, 210, 210)
     green_head = (50, 180, 120)
     red_head = (220, 70, 70)
     dark_green = (0, 120, 0)
@@ -3557,73 +3580,23 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
         table_top = y + 248
 
-    # bordered table - wider columns, taller rows, ATM highlight
-    table_left = x + 14
-    table_right = x + card_w - 14
-    row_h = 34
-    header_h = 32
-    col_names = ["Strike", "PE", "PE Chg", "CE", "CE Chg"]
-    col_widths = [78, 80, 104, 80, 104]
+    headers = ["Strike", "PE", "Chg", "CE", "Chg"]
+    xs = [x + 20, x + 100, x + 180, x + 250, x + 320]
+    for xp, h in zip(xs, headers):
+        draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
 
-    total_w = sum(col_widths)
-    avail_w = table_right - table_left
-    if total_w > avail_w:
-        scale = avail_w / total_w
-        col_widths = [max(58, int(w * scale)) for w in col_widths]
-        total_w = sum(col_widths)
-
-    table_bottom = table_top + header_h + row_h * 5
-    draw.rounded_rectangle((table_left, table_top, table_left + total_w, table_bottom), radius=8, fill=(250, 250, 250), outline=grid, width=1)
-    draw.rectangle((table_left, table_top, table_left + total_w, table_top + header_h), fill=(236, 236, 236), outline=grid, width=1)
-
-    cx = table_left
-    for i, (name, w) in enumerate(zip(col_names, col_widths)):
-        draw.text((cx + 6, table_top + 7), name, fill=gray, font=fonts["oi"])
-        if i > 0:
-            draw.line((cx, table_top, cx, table_bottom), fill=grid, width=1)
-        cx += w
-
-    for i in range(1, 6):
-        yy = table_top + header_h + (i - 1) * row_h
-        draw.line((table_left, yy, table_left + total_w, yy), fill=grid, width=1)
-
-    rows = list(item["strikes"][:5])
-    while len(rows) < 5:
-        rows.append({})
-
-    def val_color(v, default=black):
-        s = str(v)
-        if s.startswith('-') or '▼' in s:
-            return dark_red
-        if s.startswith('+') or '▲' in s:
-            return dark_green
-        return default
-
-    atm_strike = safe_float(item.get("atm_strike", 0), 0.0)
-
-    for ridx, row in enumerate(rows):
-        row_top = table_top + header_h + ridx * row_h
-        strike_val = safe_float(row.get("strike", 0), 0.0)
-        is_atm = atm_strike > 0 and strike_val > 0 and abs(strike_val - atm_strike) < 0.001
-        if is_atm:
-            draw.rectangle((table_left + 1, row_top + 1, table_left + total_w - 1, row_top + row_h - 1), fill=(255, 248, 220), outline=None)
-            draw.rounded_rectangle((table_left + 3, row_top + 3, table_left + total_w - 3, row_top + row_h - 3), radius=6, outline=(232, 180, 26), width=2)
-
-        y_text = row_top + 8
-        vals = [
-            str(row.get("strike", "")),
-            str(row.get("pe_oi", row.get("put_oi", ""))),
-            str(row.get("pe_chg", row.get("put_oich", ""))),
-            str(row.get("ce_oi", row.get("call_oi", ""))),
-            str(row.get("ce_chg", row.get("call_oich", ""))),
-        ]
-        fills = [black, black, val_color(vals[2]), black, val_color(vals[4])]
-        cx = table_left
-        for cidx, (val, fc, w) in enumerate(zip(vals, fills, col_widths)):
-            txt = _fit_text(draw, val, fonts["oi"], w - 8, suffix="")
-            x_off = 6 if cidx == 0 else 5
-            draw.text((cx + x_off, y_text), txt, fill=fc, font=fonts["oi"])
-            cx += w
+    yy = table_top + 28
+    for row in item["strikes"][:5]:
+        strike = str(row.get("strike", ""))
+        pe_oi = str(row.get("pe_oi", row.get("put_oi", "")))
+        pe_chg = str(row.get("pe_chg", row.get("put_oich", "")))
+        ce_oi = str(row.get("ce_oi", row.get("call_oi", "")))
+        ce_chg = str(row.get("ce_chg", row.get("call_oich", "")))
+        vals = [strike, pe_oi, pe_chg, ce_oi, ce_chg]
+        fills = [black, black, dark_green if "-" not in pe_chg else dark_red, black, dark_green if "-" not in ce_chg else dark_red]
+        for xp, val, fc in zip(xs, vals, fills):
+            draw.text((xp, yy), str(val), fill=fc, font=fonts["oi"])
+        yy += 28
 
 
 def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
@@ -3811,41 +3784,57 @@ def _cards_from_watch_candidates_live():
             ltp = ""
             day_pct = 0.0
 
+        oi_rows, bias = [], "NEUTRAL"
         try:
-            oi_rows = build_buy_oi_rows(sym, ltp)[:5] if cand.get("side") == "BUY" else build_sell_oi_rows(sym, ltp)[:5]
+            if safe_float(ltp, 0.0) > 0:
+                oi_rows, bias = get_oi_snapshot(sym, safe_float(ltp, 0.0))
         except Exception:
-            oi_rows = []
+            oi_rows, bias = [], "NEUTRAL"
 
         qty = cand.get("qty", "")
-        if not qty and cand.get("entry") not in ("", None) and cand.get("stoploss") not in ("", None):
-            try:
-                qty, _, _, _ = calculate_position(cand.get("entry"), cand.get("stoploss"))
-            except Exception:
+        if not qty:
+            entry_v = cand.get("entry", cand.get("buy_entry", cand.get("sell_entry", "")))
+            sl_v = cand.get("stoploss", cand.get("buy_stoploss", cand.get("sell_stoploss", "")))
+            if entry_v not in ("", None) and sl_v not in ("", None):
                 try:
-                    qty, _, _, _ = calc_position(safe_float(cand.get("entry", 0), 0.0), safe_float(cand.get("stoploss", 0), 0.0))
+                    qty, _, _, _ = calc_position(safe_float(entry_v, 0.0), safe_float(sl_v, 0.0))
                 except Exception:
                     qty = ""
+
+        side = cand.get("side", "")
+        if not side:
+            side = "SELL" if cand.get("strategy") in {"GAPUP_PLUS", "PIVOT_30M_WEEKLY_SELL"} else "WATCH"
+
+        entry_val = cand.get("entry", cand.get("buy_entry", cand.get("sell_entry", "")))
+        sl_val = cand.get("stoploss", cand.get("buy_stoploss", cand.get("sell_stoploss", "")))
+        tgt_val = cand.get("target", cand.get("buy_target", cand.get("sell_target", "")))
 
         cards.append({
             "symbol": _card_symbol_name(sym),
             "ltp": ltp,
             "day_pct": round(day_pct, 2),
-            "side": cand.get("side", "BUY"),
-            "strategy": cand.get("strategy", "15M INSIDE"),
-            "status": "BUY HOLD" if cand.get("side") == "BUY" else "SELL HOLD",
+            "side": side,
+            "strategy": cand.get("strategy", "WATCH"),
+            "status": "WATCH",
             "confidence": cand.get("confidence", ""),
-            "entry": cand.get("entry", ""),
-            "stoploss": cand.get("stoploss", ""),
+            "entry": entry_val,
+            "stoploss": sl_val,
             "qty": qty,
-            "target": cand.get("target", ""),
+            "target": tgt_val,
             "pl_text": cand.get("pl", ""),
             "pnl_value": safe_float(cand.get("pnl", cand.get("pl", 0)), 0.0),
             "exit_type": cand.get("result", ""),
-            "strikes": _rows_to_dashboard_strikes(oi_rows),
+            "pcr": calculate_pcr(oi_rows) if oi_rows else "",
+            "oi_bias": bias,
+            "strikes": [{
+                "strike": r.get("strike", ""),
+                "pe_oi": human_format(r.get("put_oi", 0)),
+                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
+                "ce_oi": human_format(r.get("call_oi", 0)),
+                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
+            } for r in oi_rows[:5]]
         })
     return cards
-
-
 
 def _rows_to_dashboard_strikes(oi_rows):
     out = []
@@ -3912,6 +3901,8 @@ def _cards_from_active_trades_live():
             "pl_text": f"{pnl_value:+.0f}",
             "pnl_value": pnl_value,
             "exit_type": "",
+            "pcr": trade.get("pcr", ""),
+            "oi_bias": trade.get("oi_bias", ""),
             "strikes": _rows_to_dashboard_strikes(oi_rows),
         })
     return cards
@@ -3978,7 +3969,7 @@ def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        cards = list(cards or _active_trade_cards_only())
+        cards = list(cards or _live_dashboard_cards())
         if not cards:
             log("No live dashboard cards to send")
             return
