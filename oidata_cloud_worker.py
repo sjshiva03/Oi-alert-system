@@ -1624,11 +1624,24 @@ def normalize_chain_fast(options_list):
 
         sym = str(x.get("symbol", "")).upper()
 
+        oi_val = safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0)
+        prev_oi_val = safe_float(
+            x.get("prev_oi")
+            or x.get("previous_oi")
+            or x.get("prevOi")
+            or x.get("previousOi")
+            or x.get("poi"),
+            0.0,
+        )
+        day_oi_change_val = oi_val - prev_oi_val if prev_oi_val else 0.0
+
         row = {
             "ltp": safe_float(x.get("ltp") or x.get("last_price") or x.get("lastPrice"), 0.0),
             "chg": safe_float(x.get("chg") or x.get("change") or x.get("ch"), 0.0),
             "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility"), 0.0),
-            "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0),
+            "oi": oi_val,
+            "prev_oi": prev_oi_val,
+            "day_oi_change": day_oi_change_val,
             "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange"), 0.0),
             "oichp": safe_float(x.get("oichp") or x.get("oi_change_pct") or x.get("oiChangePct"), 0.0),
             "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol"), 0.0),
@@ -1649,9 +1662,13 @@ def normalize_chain_fast(options_list):
             "call_oi": c.get("oi", 0.0),
             "call_oich": c.get("oi_change", 0.0),
             "call_oichp": safe_float(c.get("oichp") or c.get("oi_change_pct") or c.get("oiChangePct") or 0.0, 0.0),
+            "call_prev_oi": c.get("prev_oi", 0.0),
+            "call_day_oi_change": c.get("day_oi_change", 0.0),
             "put_oi": p.get("oi", 0.0),
             "put_oich": p.get("oi_change", 0.0),
             "put_oichp": safe_float(p.get("oichp") or p.get("oi_change_pct") or p.get("oiChangePct") or 0.0, 0.0),
+            "put_prev_oi": p.get("prev_oi", 0.0),
+            "put_day_oi_change": p.get("day_oi_change", 0.0),
         })
     return rows
 
@@ -1707,8 +1724,11 @@ def get_oi_snapshot(symbol, ltp):
     atm = min(strikes, key=lambda x: abs(x - ltp))
     atm_idx = strikes.index(atm)
 
-    start = max(0, atm_idx - 1)
-    end = min(len(parsed), start + 4)
+    start = max(0, atm_idx - 2)
+    end = start + 5
+    if end > len(parsed):
+        end = len(parsed)
+        start = max(0, end - 5)
     selected = parsed[start:end]
 
     ce_total = sum(r["call_oich"] for r in selected)
@@ -1961,7 +1981,7 @@ def scan_gapup_pattern(symbol):
     print("\n📊 GAPUP DEBUG")
     print(f"OPEN={o} HIGH={h} LOW={l}")
     print(f"PREV HIGH={prev_high}")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
 
     return {
         "symbol": symbol,
@@ -3815,8 +3835,8 @@ def _rows_to_dashboard_strikes(oi_rows):
             "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
             "ce_oi": human_format(r.get("call_oi", 0)),
             "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            "pe_day": _fmt_day_pct(r.get("put_oichp", 0)),
-            "ce_day": _fmt_day_pct(r.get("call_oichp", 0)),
+            "pe_day": human_format(r.get("put_day_oi_change", r.get("put_oichp", 0))),
+            "ce_day": human_format(r.get("call_day_oi_change", r.get("call_oichp", 0))),
         })
     return out
 
