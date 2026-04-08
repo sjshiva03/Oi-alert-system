@@ -43,7 +43,7 @@ FONT_DEBUG = (os.getenv("FONT_DEBUG", "true").strip().lower() == "true")
 TELEGRAM_SEND_MODE = (os.getenv("TELEGRAM_SEND_MODE", "photo").strip().lower() or "photo")
 TELEGRAM_IMAGE_FORMAT = (os.getenv("TELEGRAM_IMAGE_FORMAT", "png").strip().lower() or "png")
 TELEGRAM_JPEG_QUALITY = int(os.getenv("TELEGRAM_JPEG_QUALITY", "95"))
-DASHBOARD_PAGE_SIZE = int(os.getenv("DASHBOARD_PAGE_SIZE", "6"))
+DASHBOARD_PAGE_SIZE = int(os.getenv("DASHBOARD_PAGE_SIZE", "4"))
 AFTER_MARKET_PAGE_SIZE = int(os.getenv("AFTER_MARKET_PAGE_SIZE", "8"))
 TEXT_IMAGE_WIDTH = int(os.getenv("TEXT_IMAGE_WIDTH", "2000"))
 TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
@@ -1630,6 +1630,7 @@ def normalize_chain_fast(options_list):
             "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility"), 0.0),
             "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0),
             "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange"), 0.0),
+            "oi_change_pct": safe_float(x.get("oichp") or x.get("oi_change_pct") or x.get("oiChangePct") or x.get("oichange_pct"), 0.0),
             "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol"), 0.0),
         }
 
@@ -1647,8 +1648,10 @@ def normalize_chain_fast(options_list):
             "strike": int(strike),
             "call_oi": c.get("oi", 0.0),
             "call_oich": c.get("oi_change", 0.0),
+            "call_oichp": c.get("oi_change_pct", 0.0),
             "put_oi": p.get("oi", 0.0),
             "put_oich": p.get("oi_change", 0.0),
+            "put_oichp": p.get("oi_change_pct", 0.0),
         })
     return rows
 
@@ -1704,9 +1707,12 @@ def get_oi_snapshot(symbol, ltp):
     atm = min(strikes, key=lambda x: abs(x - ltp))
     atm_idx = strikes.index(atm)
 
-    start = max(0, atm_idx - 1)
-    end = min(len(parsed), start + 4)
+    start = max(0, atm_idx - 2)
+    end = min(len(parsed), start + 5)
     selected = parsed[start:end]
+    if len(selected) < 5:
+        start = max(0, end - 5)
+        selected = parsed[start:end]
 
     ce_total = sum(r["call_oich"] for r in selected)
     pe_total = sum(r["put_oich"] for r in selected)
@@ -1717,7 +1723,7 @@ def get_oi_snapshot(symbol, ltp):
     elif ce_total > pe_total:
         bias = "BEARISH"
 
-    return selected, bias
+    return selected[:5], bias
 
 def format_oi_snapshot(rows):
     if not rows:
@@ -1958,7 +1964,7 @@ def scan_gapup_pattern(symbol):
     print("\n📊 GAPUP DEBUG")
     print(f"OPEN={o} HIGH={h} LOW={l}")
     print(f"PREV HIGH={prev_high}")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
 
     return {
         "symbol": symbol,
@@ -1995,9 +2001,6 @@ def scan_15m_inside_pattern(symbol):
 
     if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
-
-    buy_entry = round(h1, 2)
-    sell_entry = round(l1, 2)
 
     print("\n📊 15M INSIDE DEBUG")
     print(f"CANDLE1 HIGH={h1} LOW={l1}")
@@ -2461,78 +2464,31 @@ def track_active_trade(symbol):
     trade["status"] = "BUY HOLD" if side == "BUY" else "SELL HOLD"
 
 # ================= SCAN SCHEDULERS =================
-def iter_symbol_batches(symbols, batch_size=None):
-    symbols = list(symbols or [])
-    batch_size = max(1, int(batch_size or SCAN_BATCH_SIZE))
-    total = math.ceil(len(symbols) / batch_size) if symbols else 0
-
-    for i in range(0, len(symbols), batch_size):
-        batch_no = (i // batch_size) + 1
-        yield symbols[i:i + batch_size], batch_no, total
-
 def scan_gapup_once():
     items = []
-    symbols = list(SYMBOLS)
-
-    for batch, batch_no, total_batches in iter_symbol_batches(symbols):
-        log(f"[LIVE GAP] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
-
-        for sym in batch:
-            try:
-                r = scan_gapup_pattern(sym)
-                if r:
-                    items.append(r)
-                    add_watch_candidate(sym, r)
-            except Exception as e:
-                log(f"GAP SCAN ERROR {sym}: {e}")
-
-            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
-
-        log(f"[LIVE GAP] Finished batch {batch_no}/{total_batches}")
-
-        if batch_no < total_batches:
-            log(f"[LIVE GAP] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
-            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
-
+    for sym in SYMBOLS:
+        try:
+            r = scan_gapup_pattern(sym)
+            if r:
+                items.append(r)
+                add_watch_candidate(sym, r)
+        except Exception as e:
+            log(f"GAP SCAN ERROR {sym}: {e}")
     pattern_summary["gapup"] = items
-    send_rich_summary_image(
-        convert_gapup_summary_for_dashboard(items),
-        title="STOCKS TO WATCH",
-        subtitle="GAP UP PLUS",
-        caption="Gap Up Plus"
-    )
+    send_rich_summary_image(convert_gapup_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="GAP UP PLUS", caption="Gap Up Plus")
 
 def scan_inside15_once():
     items = []
-    symbols = list(SYMBOLS)
-
-    for batch, batch_no, total_batches in iter_symbol_batches(symbols):
-        log(f"[LIVE 15M] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
-
-        for sym in batch:
-            try:
-                r = scan_15m_inside_pattern(sym)
-                if r:
-                    items.append(r)
-                    add_watch_candidate(sym, r)
-            except Exception as e:
-                log(f"15M SCAN ERROR {sym}: {e}")
-
-            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
-
-        log(f"[LIVE 15M] Finished batch {batch_no}/{total_batches}")
-
-        if batch_no < total_batches:
-            log(f"[LIVE 15M] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
-            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
-
+    for sym in SYMBOLS:
+        try:
+            r = scan_15m_inside_pattern(sym)
+            if r:
+                items.append(r)
+                add_watch_candidate(sym, r)
+        except Exception as e:
+            log(f"15M SCAN ERROR {sym}: {e}")
     pattern_summary["inside15"] = items
-    send_rich_summary_image(
-        convert_inside_summary_for_dashboard(items),
-        title="STOCKS TO WATCH",
-        subtitle="15 MIN INSIDE CANDLE",
-        caption="15 Min Inside"
-    )
+    send_rich_summary_image(convert_inside_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="15 MIN INSIDE CANDLE", caption="15 Min Inside")
 
 def pivot_scan_key():
     now = now_ist()
@@ -2555,35 +2511,16 @@ def scan_pivot_30m_once():
     pivot_scan_done_keys.add(key)
 
     items = []
-    symbols = list(SYMBOLS)
-
-    for batch, batch_no, total_batches in iter_symbol_batches(symbols):
-        log(f"[LIVE PIVOT] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
-
-        for sym in batch:
-            try:
-                r = scan_30m_pivot_sell(sym)
-                if r:
-                    items.append(r)
-                    add_watch_candidate(sym, r)
-            except Exception as e:
-                log(f"PIVOT SCAN ERROR {sym}: {e}")
-
-            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
-
-        log(f"[LIVE PIVOT] Finished batch {batch_no}/{total_batches}")
-
-        if batch_no < total_batches:
-            log(f"[LIVE PIVOT] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
-            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
-
+    for sym in SYMBOLS:
+        try:
+            r = scan_30m_pivot_sell(sym)
+            if r:
+                items.append(r)
+                add_watch_candidate(sym, r)
+        except Exception as e:
+            log(f"PIVOT SCAN ERROR {sym}: {e}")
     pattern_summary["pivot30"] = items
-    send_rich_summary_image(
-        convert_pivot_summary_for_dashboard(items),
-        title="STOCKS TO WATCH",
-        subtitle="30 MIN WEEKLY PIVOT SELL",
-        caption="30 Min Weekly Pivot Sell"
-    )
+    send_rich_summary_image(convert_pivot_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="30 MIN WEEKLY PIVOT SELL", caption="30 Min Weekly Pivot Sell")
 
 
 def scan_r2_breakout(symbol, df_5m, prev_week):
@@ -2655,34 +2592,25 @@ def run_live_day():
         if should_run_pivot_scan():
             scan_pivot_30m_once()
 
-        watch_syms = list(watch_candidates.keys())
-        for batch, batch_no, total_batches in iter_symbol_batches(watch_syms):
-            log(f"[ENTRY CHECK] batch {batch_no}/{total_batches} | symbols={len(batch)}")
+        for sym in list(watch_candidates.keys()):
+            if sym in closed_for_day or sym in active_trades:
+                continue
+            try:
+                try_entry_for_candidate(sym)
+            except Exception as e:
+                log(f"ENTRY ERROR {sym}: {e}")
+            time.sleep(1)
 
-            for sym in batch:
-                if sym in closed_for_day or sym in active_trades:
-                    continue
-                try:
-                    try_entry_for_candidate(sym)
-                except Exception as e:
-                    log(f"ENTRY ERROR {sym}: {e}")
-
-                time.sleep(max(1.5, SYMBOL_SCAN_SLEEP_SECONDS))
-
-            if batch_no < total_batches:
-                time.sleep(max(3, SCAN_BATCH_SLEEP_SECONDS // 2))
-
-        active_syms = list(active_trades.keys())
-        for sym in active_syms:
+        for sym in list(active_trades.keys()):
             try:
                 track_active_trade(sym)
             except Exception as e:
                 log(f"TRACK ERROR {sym}: {e}")
-            time.sleep(max(LTP_INTERVAL_PER_STOCK, 2))
+            time.sleep(LTP_INTERVAL_PER_STOCK)
 
         try:
             if _should_send_live_dashboard():
-                live_cards = _live_dashboard_cards()
+                live_cards = _active_trade_cards_only()
                 if live_cards:
                     send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
         except Exception as e:
@@ -3556,6 +3484,7 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     is_buy = item["side"] == "BUY"
     head_fill = green_head if is_buy else red_head
     day_fill = dark_green if item["day_pct"] >= 0 else dark_red
+    status_fill = dark_green if is_buy else dark_red
 
     draw_rounded_rect(draw, (x, y, x + card_w, y + card_h), 22, white, outline=border, width=2)
     draw_rounded_rect(draw, (x + 10, y + 10, x + card_w - 10, y + 55), 14, head_fill)
@@ -3570,44 +3499,67 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
     strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
     strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
-    draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
+    draw.text((x + 20, y + 76), strategy_line, fill=status_fill, font=fonts["strategy"])
 
     draw_rounded_rect(draw, (x + 14, y + 112, x + card_w - 14, y + 148), 10, SOFT_GRAY)
     draw.text((x + 20, y + 119), f"Entry: {item['entry']}   SL: {item['stoploss']}   Qty: {item['qty']}", fill=black, font=fonts["body"])
 
     draw_rounded_rect(draw, (x + 14, y + 154, x + card_w - 14, y + 190), 10, soft_green if is_buy else soft_red)
-    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red
+    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red if item["pnl_value"] < 0 else black
     draw.text((x + 20, y + 161), f"Target: {item['target']}   P/L: {item['pl_text']}", fill=pl_fill, font=fonts["body"])
 
-    table_top = y + 208
-    if item["exit_type"]:
-        exit_fill = dark_green if item["exit_type"] == "TARGET" else dark_red if item["exit_type"] == "STOPLOSS" else black
-        draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
-        draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
-        table_top = y + 248
+    draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
+    exit_text = item["exit_type"] if item["exit_type"] else item["status"]
+    exit_fill = dark_green if "TARGET" in str(exit_text).upper() else dark_red if "STOPLOSS" in str(exit_text).upper() else black
+    draw.text((x + 20, y + 203), f"Exit: {exit_text}", fill=exit_fill, font=fonts["body"])
 
-    headers = ["Strike", "PE", "Chg", "CE", "Chg"]
-    xs = [x + 20, x + 100, x + 180, x + 250, x + 320]
-    for xp, h in zip(xs, headers):
-        draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
+    table_top = y + 246
+    headers = ["Strike", "PE", "PE Chg", "CE", "CE Chg", "PE Day", "CE Day"]
+    col_lefts = [x + 18, x + 102, x + 176, x + 272, x + 348, x + 430, x + 500]
+    row_h = 34
 
-    yy = table_top + 28
-    for row in item["strikes"][:5]:
-        strike = str(row.get("strike", ""))
-        pe_oi = str(row.get("pe_oi", row.get("put_oi", "")))
-        pe_chg = str(row.get("pe_chg", row.get("put_oich", "")))
-        ce_oi = str(row.get("ce_oi", row.get("call_oi", "")))
-        ce_chg = str(row.get("ce_chg", row.get("call_oich", "")))
-        vals = [strike, pe_oi, pe_chg, ce_oi, ce_chg]
-        fills = [black, black, dark_green if "-" not in pe_chg else dark_red, black, dark_green if "-" not in ce_chg else dark_red]
-        for xp, val, fc in zip(xs, vals, fills):
-            draw.text((xp, yy), str(val), fill=fc, font=fonts["oi"])
-        yy += 28
+    draw_rounded_rect(draw, (x + 12, table_top - 8, x + card_w - 12, table_top + 26), 8, SOFT_GRAY)
+    for left, htxt in zip(col_lefts, headers):
+        draw.text((left, table_top), htxt, fill=gray, font=fonts["oi"])
+
+    yy = table_top + 34
+    strikes = list(item["strikes"] or [])[:5]
+    if not strikes:
+        draw.text((x + 20, yy), "No OI data", fill=gray, font=fonts["oi"])
+        return
+
+    for row in strikes:
+        draw_rounded_rect(draw, (x + 12, yy - 4, x + card_w - 12, yy + 26), 6, (248, 248, 248))
+        pe_chg_text = str(row.get("pe_chg", row.get("put_oich", "")))
+        ce_chg_text = str(row.get("ce_chg", row.get("call_oich", "")))
+        pe_day_text = str(row.get("pe_day_chg", row.get("put_oichp", "")))
+        ce_day_text = str(row.get("ce_day_chg", row.get("call_oichp", "")))
+        vals = [
+            str(row.get("strike", "")),
+            str(row.get("pe_oi", row.get("put_oi", ""))),
+            pe_chg_text,
+            str(row.get("ce_oi", row.get("call_oi", ""))),
+            ce_chg_text,
+            pe_day_text,
+            ce_day_text,
+        ]
+        fills = [
+            black,
+            black,
+            dark_green if "-" not in pe_chg_text else dark_red,
+            black,
+            dark_green if "-" not in ce_chg_text else dark_red,
+            dark_green if "-" not in pe_day_text else dark_red,
+            dark_green if "-" not in ce_day_text else dark_red,
+        ]
+        for left, val, fc in zip(col_lefts, vals, fills):
+            draw.text((left, yy), val, fill=fc, font=fonts["oi"])
+        yy += row_h
 
 
 def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
     fonts = _dashboard_fonts_final()
-    W, H = 1080, 1125
+    W, H = 1080, 1235
     img = Image.new("RGB", (W, H), BG_COLOR)
     draw = ImageDraw.Draw(img)
 
@@ -3818,13 +3770,7 @@ def _cards_from_watch_candidates_live():
             "pl_text": cand.get("pl", ""),
             "pnl_value": safe_float(cand.get("pnl", cand.get("pl", 0)), 0.0),
             "exit_type": cand.get("result", ""),
-            "strikes": [{
-                "strike": r.get("strike", ""),
-                "pe_oi": human_format(r.get("put_oi", 0)),
-                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
-                "ce_oi": human_format(r.get("call_oi", 0)),
-                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            } for r in oi_rows]
+            "strikes": _rows_to_dashboard_strikes(oi_rows)
         })
     return cards
 
@@ -3832,13 +3778,22 @@ def _cards_from_watch_candidates_live():
 
 def _rows_to_dashboard_strikes(oi_rows):
     out = []
-    for r in list(oi_rows or [])[:5]:
+    rows = list(oi_rows or [])[:5]
+    for r in rows:
+        pe_day = safe_float(r.get("put_oichp", r.get("pe_day_chg", r.get("put_day_chg", 0))), 0.0)
+        ce_day = safe_float(r.get("call_oichp", r.get("ce_day_chg", r.get("call_day_chg", 0))), 0.0)
         out.append({
             "strike": r.get("strike", ""),
             "pe_oi": human_format(r.get("put_oi", 0)),
             "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
             "ce_oi": human_format(r.get("call_oi", 0)),
             "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
+            "pe_day_chg": f"{pe_day:+.1f}%",
+            "ce_day_chg": f"{ce_day:+.1f}%",
+            "put_oich": safe_float(r.get('put_oich', 0), 0.0),
+            "call_oich": safe_float(r.get('call_oich', 0), 0.0),
+            "put_oichp": pe_day,
+            "call_oichp": ce_day,
         })
     return out
 
@@ -3946,13 +3901,7 @@ def _active_trade_cards_only():
             "pl_text": trade.get("pl_text", trade.get("pl", "")),
             "pnl_value": safe_float(trade.get("pnl_value", trade.get("pnl", 0)), 0.0),
             "exit_type": trade.get("result", ""),
-            "strikes": [{
-                "strike": r.get("strike", ""),
-                "pe_oi": human_format(r.get("put_oi", 0)),
-                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
-                "ce_oi": human_format(r.get("call_oi", 0)),
-                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            } for r in oi_rows[:5]]
+            "strikes": _rows_to_dashboard_strikes(oi_rows)
         })
     return cards
 
@@ -3961,24 +3910,12 @@ def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         return
     try:
-        cards = list(cards or _live_dashboard_cards())
-        log(f"LIVE DASHBOARD COUNTS | active={len(active_trades)} watch={len(watch_candidates)} cards={len(cards)}")
+        cards = list(cards or _active_trade_cards_only())
         if not cards:
             log("No live dashboard cards to send")
             return
-
-        pages = list(chunk_list(cards, max(1, DASHBOARD_PAGE_SIZE)))
-        total_pages = len(pages)
-
-        for idx, page_cards in enumerate(pages, 1):
-            img_bytes = build_live_dashboard_image(
-                cards=page_cards,
-                top_performers=_top_performers_line(page_cards),
-                dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
-            )
-            page_caption = caption if total_pages == 1 else f"{caption} ({idx}/{total_pages})"
-            send_telegram_image(img_bytes.name, img_bytes, caption=page_caption)
-            time.sleep(1.5)
+        img_bytes = build_live_dashboard_image(cards=cards, top_performers=_top_performers_line(cards), dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper())
+        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
     except Exception as e:
         log(f"Live dashboard image error: {e}")
 
