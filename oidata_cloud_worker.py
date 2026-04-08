@@ -1757,7 +1757,7 @@ def calc_position(entry, stoploss):
 # ================= RESULT ENGINE =================
 def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
     print("\n🟢 BUY DEBUG START")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
 
     for i, c in enumerate(candles_after_entry):
         high = float(c[2])
@@ -1998,6 +1998,9 @@ def scan_15m_inside_pattern(symbol):
 
     if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
+
+    buy_entry = round(h1, 2)
+    sell_entry = round(l1, 2)
 
     print("\n📊 15M INSIDE DEBUG")
     print(f"CANDLE1 HIGH={h1} LOW={l1}")
