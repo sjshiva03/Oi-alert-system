@@ -3948,12 +3948,30 @@ def main():
     )
 
     while True:
-        if is_market_open():
-            run_live_day()
-        else:
-            if AFTER_MARKET_RUN:
-                run_after_market_once()
+        now = now_ist()
+
+        # Holiday / weekend
+        if not is_market_day(now):
+            log("Holiday/Weekend. Sleeping until next market open.")
             sleep_until_next_market_open()
+            continue
+
+        # Pre-market: wait for today's open
+        if now.time() < dtime(9, 15):
+            log("Pre-market. Waiting for live session start.")
+            sleep_until_next_market_open()
+            continue
+
+        # Live market
+        if dtime(9, 15) <= now.time() <= dtime(15, 30):
+            run_live_day()
+            continue
+
+        # Post-market only
+        if AFTER_MARKET_RUN:
+            run_after_market_once()
+
+        sleep_until_next_market_open()
             
 
     
