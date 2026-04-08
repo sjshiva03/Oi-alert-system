@@ -1630,7 +1630,7 @@ def normalize_chain_fast(options_list):
             "iv": safe_float(x.get("iv") or x.get("implied_volatility") or x.get("impliedVolatility"), 0.0),
             "oi": safe_float(x.get("oi") or x.get("open_interest") or x.get("openInterest"), 0.0),
             "oi_change": safe_float(x.get("oich") or x.get("oi_change") or x.get("oiChange"), 0.0),
-            "oi_change_pct": safe_float(x.get("oichp") or x.get("oi_change_pct") or x.get("oiChangePct") or x.get("oichange_pct"), 0.0),
+            "oichp": safe_float(x.get("oichp") or x.get("oi_change_pct") or x.get("oiChangePct"), 0.0),
             "volume": safe_float(x.get("volume") or x.get("vol") or x.get("tradedVolume") or x.get("tot_vol"), 0.0),
         }
 
@@ -1648,10 +1648,10 @@ def normalize_chain_fast(options_list):
             "strike": int(strike),
             "call_oi": c.get("oi", 0.0),
             "call_oich": c.get("oi_change", 0.0),
-            "call_oichp": c.get("oi_change_pct", 0.0),
+            "call_oichp": safe_float(c.get("oichp") or c.get("oi_change_pct") or c.get("oiChangePct") or 0.0, 0.0),
             "put_oi": p.get("oi", 0.0),
             "put_oich": p.get("oi_change", 0.0),
-            "put_oichp": p.get("oi_change_pct", 0.0),
+            "put_oichp": safe_float(p.get("oichp") or p.get("oi_change_pct") or p.get("oiChangePct") or 0.0, 0.0),
         })
     return rows
 
@@ -1707,12 +1707,9 @@ def get_oi_snapshot(symbol, ltp):
     atm = min(strikes, key=lambda x: abs(x - ltp))
     atm_idx = strikes.index(atm)
 
-    start = max(0, atm_idx - 2)
-    end = min(len(parsed), start + 5)
+    start = max(0, atm_idx - 1)
+    end = min(len(parsed), start + 4)
     selected = parsed[start:end]
-    if len(selected) < 5:
-        start = max(0, end - 5)
-        selected = parsed[start:end]
 
     ce_total = sum(r["call_oich"] for r in selected)
     pe_total = sum(r["put_oich"] for r in selected)
@@ -1723,7 +1720,7 @@ def get_oi_snapshot(symbol, ltp):
     elif ce_total > pe_total:
         bias = "BEARISH"
 
-    return selected[:5], bias
+    return selected, bias
 
 def format_oi_snapshot(rows):
     if not rows:
@@ -1760,7 +1757,7 @@ def calc_position(entry, stoploss):
 # ================= RESULT ENGINE =================
 def evaluate_buy_result(candles_after_entry, entry, target, stoploss):
     print("\n🟢 BUY DEBUG START")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
 
     for i, c in enumerate(candles_after_entry):
         high = float(c[2])
@@ -2001,9 +1998,6 @@ def scan_15m_inside_pattern(symbol):
 
     if not (INSIDE15_FIRST_CANDLE_MIN_PCT <= range_pct <= INSIDE15_FIRST_CANDLE_MAX_PCT and inside):
         return None
-
-    buy_entry = round(h1, 2)
-    sell_entry = round(l1, 2)
 
     print("\n📊 15M INSIDE DEBUG")
     print(f"CANDLE1 HIGH={h1} LOW={l1}")
@@ -2459,8 +2453,15 @@ def track_active_trade(symbol):
         return
 
     snap = get_oi_snapshot(symbol, ltp)
-    oi_rows = snap.get("rows", []) if isinstance(snap, dict) else []
-    bias = str(snap.get("bias", "")) if isinstance(snap, dict) else ""
+    if isinstance(snap, dict):
+        oi_rows = list(snap.get("rows", []) or [])
+        bias = str(snap.get("bias", "NEUTRAL"))
+    elif isinstance(snap, tuple) and len(snap) >= 2:
+        oi_rows = list(snap[0] or [])
+        bias = str(snap[1] or "NEUTRAL")
+    else:
+        oi_rows = []
+        bias = "NEUTRAL"
 
     trade["oi_rows"] = oi_rows
     trade["oi_bias"] = bias
@@ -3487,7 +3488,6 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     is_buy = item["side"] == "BUY"
     head_fill = green_head if is_buy else red_head
     day_fill = dark_green if item["day_pct"] >= 0 else dark_red
-    status_fill = dark_green if is_buy else dark_red
 
     draw_rounded_rect(draw, (x, y, x + card_w, y + card_h), 22, white, outline=border, width=2)
     draw_rounded_rect(draw, (x + 10, y + 10, x + card_w - 10, y + 55), 14, head_fill)
@@ -3502,67 +3502,44 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
     strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
     strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
-    draw.text((x + 20, y + 76), strategy_line, fill=status_fill, font=fonts["strategy"])
+    draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
 
     draw_rounded_rect(draw, (x + 14, y + 112, x + card_w - 14, y + 148), 10, SOFT_GRAY)
     draw.text((x + 20, y + 119), f"Entry: {item['entry']}   SL: {item['stoploss']}   Qty: {item['qty']}", fill=black, font=fonts["body"])
 
     draw_rounded_rect(draw, (x + 14, y + 154, x + card_w - 14, y + 190), 10, soft_green if is_buy else soft_red)
-    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red if item["pnl_value"] < 0 else black
+    pl_fill = dark_green if item["pnl_value"] >= 0 else dark_red
     draw.text((x + 20, y + 161), f"Target: {item['target']}   P/L: {item['pl_text']}", fill=pl_fill, font=fonts["body"])
 
-    draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
-    exit_text = item["exit_type"] if item["exit_type"] else item["status"]
-    exit_fill = dark_green if "TARGET" in str(exit_text).upper() else dark_red if "STOPLOSS" in str(exit_text).upper() else black
-    draw.text((x + 20, y + 203), f"Exit: {exit_text}", fill=exit_fill, font=fonts["body"])
+    table_top = y + 208
+    if item["exit_type"]:
+        exit_fill = dark_green if item["exit_type"] == "TARGET" else dark_red if item["exit_type"] == "STOPLOSS" else black
+        draw_rounded_rect(draw, (x + 14, y + 196, x + card_w - 14, y + 232), 10, SOFT_GRAY)
+        draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
+        table_top = y + 248
 
-    table_top = y + 246
-    headers = ["Strike", "PE", "PE Chg", "CE", "CE Chg", "PE Day", "CE Day"]
-    col_lefts = [x + 18, x + 102, x + 176, x + 272, x + 348, x + 430, x + 500]
-    row_h = 34
+    headers = ["Strike", "PE", "Chg", "CE", "Chg"]
+    xs = [x + 20, x + 100, x + 180, x + 250, x + 320]
+    for xp, h in zip(xs, headers):
+        draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
 
-    draw_rounded_rect(draw, (x + 12, table_top - 8, x + card_w - 12, table_top + 26), 8, SOFT_GRAY)
-    for left, htxt in zip(col_lefts, headers):
-        draw.text((left, table_top), htxt, fill=gray, font=fonts["oi"])
-
-    yy = table_top + 34
-    strikes = list(item["strikes"] or [])[:5]
-    if not strikes:
-        draw.text((x + 20, yy), "No OI data", fill=gray, font=fonts["oi"])
-        return
-
-    for row in strikes:
-        draw_rounded_rect(draw, (x + 12, yy - 4, x + card_w - 12, yy + 26), 6, (248, 248, 248))
-        pe_chg_text = str(row.get("pe_chg", row.get("put_oich", "")))
-        ce_chg_text = str(row.get("ce_chg", row.get("call_oich", "")))
-        pe_day_text = str(row.get("pe_day_chg", row.get("put_oichp", "")))
-        ce_day_text = str(row.get("ce_day_chg", row.get("call_oichp", "")))
-        vals = [
-            str(row.get("strike", "")),
-            str(row.get("pe_oi", row.get("put_oi", ""))),
-            pe_chg_text,
-            str(row.get("ce_oi", row.get("call_oi", ""))),
-            ce_chg_text,
-            pe_day_text,
-            ce_day_text,
-        ]
-        fills = [
-            black,
-            black,
-            dark_green if "-" not in pe_chg_text else dark_red,
-            black,
-            dark_green if "-" not in ce_chg_text else dark_red,
-            dark_green if "-" not in pe_day_text else dark_red,
-            dark_green if "-" not in ce_day_text else dark_red,
-        ]
-        for left, val, fc in zip(col_lefts, vals, fills):
-            draw.text((left, yy), val, fill=fc, font=fonts["oi"])
-        yy += row_h
+    yy = table_top + 28
+    for row in item["strikes"][:5]:
+        strike = str(row.get("strike", ""))
+        pe_oi = str(row.get("pe_oi", row.get("put_oi", "")))
+        pe_chg = str(row.get("pe_chg", row.get("put_oich", "")))
+        ce_oi = str(row.get("ce_oi", row.get("call_oi", "")))
+        ce_chg = str(row.get("ce_chg", row.get("call_oich", "")))
+        vals = [strike, pe_oi, pe_chg, ce_oi, ce_chg]
+        fills = [black, black, dark_green if "-" not in pe_chg else dark_red, black, dark_green if "-" not in ce_chg else dark_red]
+        for xp, val, fc in zip(xs, vals, fills):
+            draw.text((xp, yy), str(val), fill=fc, font=fonts["oi"])
+        yy += 28
 
 
 def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
     fonts = _dashboard_fonts_final()
-    W, H = 1080, 1235
+    W, H = 1080, 1125
     img = Image.new("RGB", (W, H), BG_COLOR)
     draw = ImageDraw.Draw(img)
 
@@ -3744,27 +3721,29 @@ def _cards_from_watch_candidates_live():
         except Exception:
             ltp = ""
             day_pct = 0.0
-        oi_rows = []
+
         try:
-            if cand.get("side") == "BUY":
-                oi_rows = build_buy_oi_rows(sym)[:5]
-            elif cand.get("side") == "SELL":
-                oi_rows = build_sell_oi_rows(sym)[:5]
+            oi_rows = build_buy_oi_rows(sym, ltp)[:5] if cand.get("side") == "BUY" else build_sell_oi_rows(sym, ltp)[:5]
         except Exception:
             oi_rows = []
+
         qty = cand.get("qty", "")
         if not qty and cand.get("entry") not in ("", None) and cand.get("stoploss") not in ("", None):
             try:
                 qty, _, _, _ = calculate_position(cand.get("entry"), cand.get("stoploss"))
             except Exception:
-                qty = ""
+                try:
+                    qty, _, _, _ = calc_position(safe_float(cand.get("entry", 0), 0.0), safe_float(cand.get("stoploss", 0), 0.0))
+                except Exception:
+                    qty = ""
+
         cards.append({
             "symbol": _card_symbol_name(sym),
             "ltp": ltp,
             "day_pct": round(day_pct, 2),
             "side": cand.get("side", "BUY"),
             "strategy": cand.get("strategy", "15M INSIDE"),
-            "status": "HOLD",
+            "status": "BUY HOLD" if cand.get("side") == "BUY" else "SELL HOLD",
             "confidence": cand.get("confidence", ""),
             "entry": cand.get("entry", ""),
             "stoploss": cand.get("stoploss", ""),
@@ -3773,7 +3752,7 @@ def _cards_from_watch_candidates_live():
             "pl_text": cand.get("pl", ""),
             "pnl_value": safe_float(cand.get("pnl", cand.get("pl", 0)), 0.0),
             "exit_type": cand.get("result", ""),
-            "strikes": _rows_to_dashboard_strikes(oi_rows)
+            "strikes": _rows_to_dashboard_strikes(oi_rows),
         })
     return cards
 
@@ -3781,22 +3760,15 @@ def _cards_from_watch_candidates_live():
 
 def _rows_to_dashboard_strikes(oi_rows):
     out = []
-    rows = list(oi_rows or [])[:5]
-    for r in rows:
-        pe_day = safe_float(r.get("put_oichp", r.get("pe_day_chg", r.get("put_day_chg", 0))), 0.0)
-        ce_day = safe_float(r.get("call_oichp", r.get("ce_day_chg", r.get("call_day_chg", 0))), 0.0)
+    for r in list(oi_rows or [])[:5]:
         out.append({
             "strike": r.get("strike", ""),
             "pe_oi": human_format(r.get("put_oi", 0)),
             "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
             "ce_oi": human_format(r.get("call_oi", 0)),
             "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            "pe_day_chg": f"{pe_day:+.1f}%",
-            "ce_day_chg": f"{ce_day:+.1f}%",
-            "put_oich": safe_float(r.get('put_oich', 0), 0.0),
-            "call_oich": safe_float(r.get('call_oich', 0), 0.0),
-            "put_oichp": pe_day,
-            "call_oichp": ce_day,
+            "pe_day": _fmt_day_pct(r.get("put_oichp", 0)),
+            "ce_day": _fmt_day_pct(r.get("call_oichp", 0)),
         })
     return out
 
@@ -3904,7 +3876,13 @@ def _active_trade_cards_only():
             "pl_text": trade.get("pl_text", trade.get("pl", "")),
             "pnl_value": safe_float(trade.get("pnl_value", trade.get("pnl", 0)), 0.0),
             "exit_type": trade.get("result", ""),
-            "strikes": _rows_to_dashboard_strikes(oi_rows)
+            "strikes": [{
+                "strike": r.get("strike", ""),
+                "pe_oi": human_format(r.get("put_oi", 0)),
+                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
+                "ce_oi": human_format(r.get("call_oi", 0)),
+                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
+            } for r in oi_rows[:5]]
         })
     return cards
 
