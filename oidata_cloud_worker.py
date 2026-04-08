@@ -49,6 +49,10 @@ TEXT_IMAGE_WIDTH = int(os.getenv("TEXT_IMAGE_WIDTH", "2000"))
 TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
 
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
+GAPUP_WATCHLIST_RAW = (os.getenv("GAPUP_WATCHLIST") or "").strip()
+INSIDE15_WATCHLIST_RAW = (os.getenv("INSIDE15_WATCHLIST") or "").strip()
+PIVOT_WATCHLIST_RAW = (os.getenv("PIVOT_WATCHLIST") or "").strip()
+R2_WATCHLIST_RAW = (os.getenv("R2_WATCHLIST") or "").strip()
 
 AFTER_MARKET_RUN = (os.getenv("AFTER_MARKET_RUN", "true").strip().lower() == "true")
 
@@ -101,9 +105,6 @@ _HISTORY_CACHE = {}
 if not CLIENT_ID or not ACCESS_TOKEN:
     raise Exception("Missing CLIENT_ID or ACCESS_TOKEN")
 
-if not WATCHLIST_RAW:
-    raise Exception("Missing WATCHLIST. Example: WATCHLIST=RELIANCE,TCS,HDFCBANK,ICICIBANK,INFY,M&M")
-
 # ================= WATCHLIST =================
 def convert_symbol(sym: str) -> str:
     s = sym.strip().upper()
@@ -117,7 +118,32 @@ def convert_symbol(sym: str) -> str:
         return "NSE:NIFTYBANK-INDEX"
     return f"NSE:{s}-EQ"
 
-SYMBOLS = [convert_symbol(s) for s in WATCHLIST_RAW.split(",") if s.strip()]
+def parse_watchlist(raw: str):
+    return [convert_symbol(s) for s in str(raw or "").split(",") if s.strip()]
+
+
+def unique_symbols(*symbol_groups):
+    out = []
+    seen = set()
+    for group in symbol_groups:
+        for sym in (group or []):
+            if sym and sym not in seen:
+                out.append(sym)
+                seen.add(sym)
+    return out
+
+
+DEFAULT_SYMBOLS = parse_watchlist(WATCHLIST_RAW)
+GAPUP_SYMBOLS = parse_watchlist(GAPUP_WATCHLIST_RAW) or DEFAULT_SYMBOLS
+INSIDE15_SYMBOLS = parse_watchlist(INSIDE15_WATCHLIST_RAW) or DEFAULT_SYMBOLS
+PIVOT_SYMBOLS = parse_watchlist(PIVOT_WATCHLIST_RAW) or DEFAULT_SYMBOLS
+R2_SYMBOLS = parse_watchlist(R2_WATCHLIST_RAW) or DEFAULT_SYMBOLS
+SYMBOLS = unique_symbols(DEFAULT_SYMBOLS, GAPUP_SYMBOLS, INSIDE15_SYMBOLS, PIVOT_SYMBOLS, R2_SYMBOLS)
+
+if not SYMBOLS:
+    raise Exception(
+        "Missing watchlists. Set WATCHLIST or strategy-wise lists like GAPUP_WATCHLIST, INSIDE15_WATCHLIST, PIVOT_WATCHLIST, R2_WATCHLIST"
+    )
 
 # ================= GLOBAL STATE =================
 watch_candidates = {}
@@ -143,6 +169,7 @@ last_live_dashboard_sent = 0.0
 gapup_scan_done = False
 inside15_scan_done = False
 last_pivot_scan_ts = 0.0
+last_after_market_run_for_analysis = ""
 
 # ================= TELEGRAM SEND =================
 def send(msg: str):
@@ -1341,6 +1368,43 @@ def sleep_until_next_market_open():
             return
         time.sleep(min(60, max(1, int(rem))))
 
+def in_after_market_window(dt_obj=None):
+    dt_obj = dt_obj or now_ist()
+    t = dt_obj.time()
+
+    if is_market_day(dt_obj):
+        if t < dtime(9, 0):
+            return True
+        if t > dtime(15, 30):
+            return True
+        return False
+
+    return True
+
+def next_after_market_window_end_datetime(dt_obj=None):
+    dt_obj = dt_obj or now_ist()
+
+    if is_market_day(dt_obj) and dt_obj.time() < dtime(9, 0):
+        return dt_obj.replace(hour=9, minute=0, second=0, microsecond=0)
+
+    nxt = dt_obj.replace(hour=9, minute=0, second=0, microsecond=0)
+    if dt_obj.time() >= dtime(9, 0):
+        nxt = (nxt + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+    while not is_market_day(nxt):
+        nxt = (nxt + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+    return nxt
+
+def sleep_until_after_market_window_end():
+    nxt = next_after_market_window_end_datetime()
+    log(f"After-market window active. Sleeping until {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    while True:
+        rem = (nxt - now_ist()).total_seconds()
+        if rem <= 1:
+            return
+        time.sleep(min(60, max(1, int(rem))))
+
 def get_reference_symbol():
     for sym in SYMBOLS:
         if sym.endswith("-INDEX"):
@@ -2525,7 +2589,7 @@ def track_active_trade(symbol):
 # ================= SCAN SCHEDULERS =================
 def scan_gapup_once():
     items = []
-    for sym in SYMBOLS:
+    for sym in GAPUP_SYMBOLS:
         try:
             r = scan_gapup_pattern(sym)
             if r:
@@ -2538,7 +2602,7 @@ def scan_gapup_once():
 
 def scan_inside15_once():
     items = []
-    for sym in SYMBOLS:
+    for sym in INSIDE15_SYMBOLS:
         try:
             r = scan_15m_inside_pattern(sym)
             if r:
@@ -2570,7 +2634,7 @@ def scan_pivot_30m_once():
     pivot_scan_done_keys.add(key)
 
     items = []
-    for sym in SYMBOLS:
+    for sym in PIVOT_SYMBOLS:
         try:
             r = scan_30m_pivot_sell(sym)
             if r:
@@ -3348,7 +3412,7 @@ def run_after_market_once():
     pivot_items = []
     r2_items=[]
 
-    symbols = list(SYMBOLS)
+    symbols = unique_symbols(GAPUP_SYMBOLS, INSIDE15_SYMBOLS, PIVOT_SYMBOLS, R2_SYMBOLS)
     total = len(symbols)
     _HISTORY_CACHE.clear()
 
@@ -4017,6 +4081,8 @@ def send_after_market_category_images(items, category_name, per_image=AFTER_MARK
 
 # ================= MAIN =================
 def main():
+    global last_after_market_run_for_analysis
+
     profile = check_auth()
     send(
         f"🚀 BOT STARTED\n"
@@ -4030,9 +4096,20 @@ def main():
 
     while True:
         now = now_ist()
+        current_analysis_day = analysis_date_str()
+
+        if AFTER_MARKET_RUN and in_after_market_window(now):
+            if last_after_market_run_for_analysis != current_analysis_day:
+                log(f"After-market window active for analysis day {current_analysis_day}.")
+                run_after_market_once()
+                last_after_market_run_for_analysis = current_analysis_day
+            else:
+                log(f"After-market already sent for analysis day {current_analysis_day}.")
+            sleep_until_after_market_window_end()
+            continue
 
         if not is_market_day(now):
-            log("Holiday/Weekend. Sleeping until next market open.")
+            log("Holiday/Weekend outside after-market window. Sleeping until next market open.")
             sleep_until_next_market_open()
             continue
 
@@ -4046,7 +4123,11 @@ def main():
             continue
 
         if AFTER_MARKET_RUN:
+            log(f"Post-close after-market window active for analysis day {current_analysis_day}.")
             run_after_market_once()
+            last_after_market_run_for_analysis = current_analysis_day
+            sleep_until_after_market_window_end()
+            continue
 
         sleep_until_next_market_open()
 
