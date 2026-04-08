@@ -2625,10 +2625,9 @@ def run_live_day():
     inside_summary_sent = False
     eod_sent = False
     last_live_dashboard_sent = 0.0
-gapup_scan_done = False
-inside15_scan_done = False
-last_pivot_scan_ts = 0.0
-
+    gapup_scan_done = False
+    inside15_scan_done = False
+    last_pivot_scan_ts = 0.0
     while True:
         if not is_market_open():
             return
