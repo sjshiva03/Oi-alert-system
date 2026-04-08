@@ -1906,7 +1906,7 @@ def evaluate_buy_result_detailed(candles_after_setup, entry, target, stoploss):
 
 def evaluate_sell_result(candles_after_entry, entry, target, stoploss):
     print("\n🔴 SELL DEBUG START")
-    print(f"ENTRY={entry} TARGET={target} STOPLOSS={stoploss}")
+    print(f"ENTRY={entry} TARGET={target} STOPLOSS={sl}")
 
     for i, c in enumerate(candles_after_entry):
         high = float(c[2])
@@ -3478,6 +3478,7 @@ def _normalize_live_card_source(item):
 def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     white = (255, 255, 255)
     border = (200, 200, 200)
+    grid = (210, 210, 210)
     green_head = (50, 180, 120)
     red_head = (220, 70, 70)
     dark_green = (0, 120, 0)
@@ -3521,23 +3522,67 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
         table_top = y + 248
 
-    headers = ["Strike", "PE", "Chg", "CE", "Chg"]
-    xs = [x + 20, x + 100, x + 180, x + 250, x + 320]
-    for xp, h in zip(xs, headers):
-        draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
+    # bordered table
+    table_left = x + 14
+    table_right = x + card_w - 14
+    row_h = 28
+    header_h = 28
+    col_names = ["Strike", "PE", "PE Chg", "CE", "CE Chg", "PE Day", "CE Day"]
+    col_widths = [68, 56, 76, 56, 76, 70, 70]
+    # shrink slightly if needed
+    total_w = sum(col_widths)
+    avail_w = table_right - table_left
+    if total_w > avail_w:
+        scale = avail_w / total_w
+        col_widths = [max(42, int(w * scale)) for w in col_widths]
+        total_w = sum(col_widths)
+    table_bottom = table_top + header_h + row_h * 5
+    draw.rounded_rectangle((table_left, table_top, table_left + total_w, table_bottom), radius=8, fill=(250,250,250), outline=grid, width=1)
 
-    yy = table_top + 28
-    for row in item["strikes"][:5]:
-        strike = str(row.get("strike", ""))
-        pe_oi = str(row.get("pe_oi", row.get("put_oi", "")))
-        pe_chg = str(row.get("pe_chg", row.get("put_oich", "")))
-        ce_oi = str(row.get("ce_oi", row.get("call_oi", "")))
-        ce_chg = str(row.get("ce_chg", row.get("call_oich", "")))
-        vals = [strike, pe_oi, pe_chg, ce_oi, ce_chg]
-        fills = [black, black, dark_green if "-" not in pe_chg else dark_red, black, dark_green if "-" not in ce_chg else dark_red]
-        for xp, val, fc in zip(xs, vals, fills):
-            draw.text((xp, yy), str(val), fill=fc, font=fonts["oi"])
-        yy += 28
+    # header background
+    draw.rectangle((table_left, table_top, table_left + total_w, table_top + header_h), fill=(240, 240, 240), outline=grid, width=1)
+
+    cx = table_left
+    for i, (name, w) in enumerate(zip(col_names, col_widths)):
+        draw.text((cx + 4, table_top + 6), name, fill=gray, font=fonts["oi"])
+        if i > 0:
+            draw.line((cx, table_top, cx, table_bottom), fill=grid, width=1)
+        cx += w
+
+    # horizontal lines
+    for i in range(1, 6):
+        yy = table_top + header_h + (i - 1) * row_h
+        draw.line((table_left, yy, table_left + total_w, yy), fill=grid, width=1)
+
+    rows = list(item["strikes"][:5])
+    while len(rows) < 5:
+        rows.append({})
+
+    def val_color(v, default=black):
+        s = str(v)
+        if s.startswith('-') or '↓' in s:
+            return dark_red
+        if s.startswith('+') or '↑' in s:
+            return dark_green
+        return default
+
+    for ridx, row in enumerate(rows):
+        y_text = table_top + header_h + ridx * row_h + 6
+        vals = [
+            str(row.get("strike", "")),
+            str(row.get("pe_oi", row.get("put_oi", ""))),
+            str(row.get("pe_chg", row.get("put_oich", ""))),
+            str(row.get("ce_oi", row.get("call_oi", ""))),
+            str(row.get("ce_chg", row.get("call_oich", ""))),
+            str(row.get("pe_day", row.get("put_oichp", ""))),
+            str(row.get("ce_day", row.get("call_oichp", ""))),
+        ]
+        fills = [black, black, val_color(vals[2]), black, val_color(vals[4]), val_color(vals[5]), val_color(vals[6])]
+        cx = table_left
+        for val, fc, w in zip(vals, fills, col_widths):
+            txt = _fit_text(draw, val, fonts["oi"], w - 6, suffix="")
+            draw.text((cx + 4, y_text), txt, fill=fc, font=fonts["oi"])
+            cx += w
 
 
 def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
