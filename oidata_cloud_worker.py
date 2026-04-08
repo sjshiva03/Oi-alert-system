@@ -156,12 +156,6 @@ def send(msg: str):
 
 # ================= HELPERS =================
 
-def iter_symbol_batches(symbols, batch_size=None):
-    symbols = list(symbols or [])
-    batch_size = max(1, int(batch_size or SCAN_BATCH_SIZE))
-    for i in range(0, len(symbols), batch_size):
-        yield symbols[i:i + batch_size], (i // batch_size) + 1, math.ceil(len(symbols) / batch_size)
-
 # =========================
 # FORMAT HELPERS (ADD HERE)
 # =========================
@@ -2464,6 +2458,15 @@ def track_active_trade(symbol):
     trade["status"] = "BUY HOLD" if side == "BUY" else "SELL HOLD"
 
 # ================= SCAN SCHEDULERS =================
+def iter_symbol_batches(symbols, batch_size=None):
+    symbols = list(symbols or [])
+    batch_size = max(1, int(batch_size or SCAN_BATCH_SIZE))
+    total = math.ceil(len(symbols) / batch_size) if symbols else 0
+
+    for i in range(0, len(symbols), batch_size):
+        batch_no = (i // batch_size) + 1
+        yield symbols[i:i + batch_size], batch_no, total
+
 def scan_gapup_once():
     items = []
     symbols = list(SYMBOLS)
@@ -2471,7 +2474,7 @@ def scan_gapup_once():
     for batch, batch_no, total_batches in iter_symbol_batches(symbols):
         log(f"[LIVE GAP] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
 
-        for idx, sym in enumerate(batch, 1):
+        for sym in batch:
             try:
                 r = scan_gapup_pattern(sym)
                 if r:
@@ -2503,7 +2506,7 @@ def scan_inside15_once():
     for batch, batch_no, total_batches in iter_symbol_batches(symbols):
         log(f"[LIVE 15M] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
 
-        for idx, sym in enumerate(batch, 1):
+        for sym in batch:
             try:
                 r = scan_15m_inside_pattern(sym)
                 if r:
@@ -2554,7 +2557,7 @@ def scan_pivot_30m_once():
     for batch, batch_no, total_batches in iter_symbol_batches(symbols):
         log(f"[LIVE PIVOT] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
 
-        for idx, sym in enumerate(batch, 1):
+        for sym in batch:
             try:
                 r = scan_30m_pivot_sell(sym)
                 if r:
@@ -2578,6 +2581,7 @@ def scan_pivot_30m_once():
         subtitle="30 MIN WEEKLY PIVOT SELL",
         caption="30 Min Weekly Pivot Sell"
     )
+
 
 def scan_r2_breakout(symbol, df_5m, prev_week):
     try:
@@ -2649,8 +2653,9 @@ def run_live_day():
             scan_pivot_30m_once()
 
         watch_syms = list(watch_candidates.keys())
-
         for batch, batch_no, total_batches in iter_symbol_batches(watch_syms):
+            log(f"[ENTRY CHECK] batch {batch_no}/{total_batches} | symbols={len(batch)}")
+
             for sym in batch:
                 if sym in closed_for_day or sym in active_trades:
                     continue
@@ -2658,18 +2663,19 @@ def run_live_day():
                     try_entry_for_candidate(sym)
                 except Exception as e:
                     log(f"ENTRY ERROR {sym}: {e}")
-        
+
                 time.sleep(max(1.5, SYMBOL_SCAN_SLEEP_SECONDS))
-        
+
             if batch_no < total_batches:
                 time.sleep(max(3, SCAN_BATCH_SLEEP_SECONDS // 2))
 
-        for sym in list(active_trades.keys()):
+        active_syms = list(active_trades.keys())
+        for sym in active_syms:
             try:
                 track_active_trade(sym)
             except Exception as e:
                 log(f"TRACK ERROR {sym}: {e}")
-            time.sleep(LTP_INTERVAL_PER_STOCK)
+            time.sleep(max(LTP_INTERVAL_PER_STOCK, 2))
 
         try:
             if _should_send_live_dashboard():
@@ -2677,7 +2683,7 @@ def run_live_day():
                 if live_cards:
                     send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
         except Exception as e:
-          log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
+            log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
 
         if not eod_sent and nowt >= dtime(15, 28):
             send_after_market_summary_image(caption="End of Day Report")
@@ -3957,12 +3963,19 @@ def send_live_dashboard_image(cards=None, caption="Live Dashboard"):
         if not cards:
             log("No live dashboard cards to send")
             return
-        img_bytes = build_live_dashboard_image(
-            cards=cards,
-            top_performers=_top_performers_line(cards),
-            dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
-        )
-        send_telegram_image(img_bytes.name, img_bytes, caption=caption)
+
+        pages = list(chunk_list(cards, max(1, DASHBOARD_PAGE_SIZE)))
+        total_pages = len(pages)
+
+        for idx, page_cards in enumerate(pages, 1):
+            img_bytes = build_live_dashboard_image(
+                cards=page_cards,
+                top_performers=_top_performers_line(page_cards),
+                dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper()
+            )
+            page_caption = caption if total_pages == 1 else f"{caption} ({idx}/{total_pages})"
+            send_telegram_image(img_bytes.name, img_bytes, caption=page_caption)
+            time.sleep(1.5)
     except Exception as e:
         log(f"Live dashboard image error: {e}")
 
