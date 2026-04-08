@@ -3476,6 +3476,20 @@ def _draw_header_final(draw, fonts, width, title_text, dt_text, top_text):
 def _normalize_live_card_source(item):
     item = dict(item or {})
     symbol = _card_symbol_name(item.get("symbol", ""))
+    strikes = list(item.get("strikes", item.get("oi_rows", [])) or [])
+    ltp_val = safe_float(item.get("ltp", 0), 0.0)
+    atm_strike = None
+    strike_nums = []
+    for row in strikes:
+        try:
+            strike_nums.append(safe_float(row.get("strike", 0), 0.0))
+        except Exception:
+            pass
+    valid_nums = [s for s in strike_nums if s > 0]
+    if valid_nums and ltp_val > 0:
+        atm_strike = min(valid_nums, key=lambda s: abs(s - ltp_val))
+    elif len(valid_nums) >= 3:
+        atm_strike = valid_nums[len(valid_nums) // 2]
     return {
         "symbol": symbol,
         "ltp": item.get("ltp", ""),
@@ -3491,7 +3505,8 @@ def _normalize_live_card_source(item):
         "pl_text": item.get("pl_text", item.get("pl", "")),
         "pnl_value": safe_float(item.get("pnl_value", item.get("pl", 0)), 0.0),
         "exit_type": str(item.get("exit_type", "")).upper(),
-        "strikes": list(item.get("strikes", item.get("oi_rows", [])) or []),
+        "strikes": strikes,
+        "atm_strike": atm_strike,
     }
 
 
@@ -3542,28 +3557,28 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
         table_top = y + 248
 
-    # bordered table - compact 5 column layout for better readability
+    # bordered table - wider columns, taller rows, ATM highlight
     table_left = x + 14
     table_right = x + card_w - 14
-    row_h = 28
-    header_h = 28
+    row_h = 34
+    header_h = 32
     col_names = ["Strike", "PE", "PE Chg", "CE", "CE Chg"]
-    col_widths = [72, 68, 92, 68, 92]
+    col_widths = [78, 80, 104, 80, 104]
 
     total_w = sum(col_widths)
     avail_w = table_right - table_left
     if total_w > avail_w:
         scale = avail_w / total_w
-        col_widths = [max(54, int(w * scale)) for w in col_widths]
+        col_widths = [max(58, int(w * scale)) for w in col_widths]
         total_w = sum(col_widths)
 
     table_bottom = table_top + header_h + row_h * 5
     draw.rounded_rectangle((table_left, table_top, table_left + total_w, table_bottom), radius=8, fill=(250, 250, 250), outline=grid, width=1)
-    draw.rectangle((table_left, table_top, table_left + total_w, table_top + header_h), fill=(240, 240, 240), outline=grid, width=1)
+    draw.rectangle((table_left, table_top, table_left + total_w, table_top + header_h), fill=(236, 236, 236), outline=grid, width=1)
 
     cx = table_left
     for i, (name, w) in enumerate(zip(col_names, col_widths)):
-        draw.text((cx + 4, table_top + 6), name, fill=gray, font=fonts["oi"])
+        draw.text((cx + 6, table_top + 7), name, fill=gray, font=fonts["oi"])
         if i > 0:
             draw.line((cx, table_top, cx, table_bottom), fill=grid, width=1)
         cx += w
@@ -3584,8 +3599,17 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
             return dark_green
         return default
 
+    atm_strike = safe_float(item.get("atm_strike", 0), 0.0)
+
     for ridx, row in enumerate(rows):
-        y_text = table_top + header_h + ridx * row_h + 6
+        row_top = table_top + header_h + ridx * row_h
+        strike_val = safe_float(row.get("strike", 0), 0.0)
+        is_atm = atm_strike > 0 and strike_val > 0 and abs(strike_val - atm_strike) < 0.001
+        if is_atm:
+            draw.rectangle((table_left + 1, row_top + 1, table_left + total_w - 1, row_top + row_h - 1), fill=(255, 248, 220), outline=None)
+            draw.rounded_rectangle((table_left + 3, row_top + 3, table_left + total_w - 3, row_top + row_h - 3), radius=6, outline=(232, 180, 26), width=2)
+
+        y_text = row_top + 8
         vals = [
             str(row.get("strike", "")),
             str(row.get("pe_oi", row.get("put_oi", ""))),
@@ -3595,9 +3619,10 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         ]
         fills = [black, black, val_color(vals[2]), black, val_color(vals[4])]
         cx = table_left
-        for val, fc, w in zip(vals, fills, col_widths):
-            txt = _fit_text(draw, val, fonts["oi"], w - 6, suffix="")
-            draw.text((cx + 4, y_text), txt, fill=fc, font=fonts["oi"])
+        for cidx, (val, fc, w) in enumerate(zip(vals, fills, col_widths)):
+            txt = _fit_text(draw, val, fonts["oi"], w - 8, suffix="")
+            x_off = 6 if cidx == 0 else 5
+            draw.text((cx + x_off, y_text), txt, fill=fc, font=fonts["oi"])
             cx += w
 
 
