@@ -156,6 +156,12 @@ def send(msg: str):
 
 # ================= HELPERS =================
 
+def iter_symbol_batches(symbols, batch_size=None):
+    symbols = list(symbols or [])
+    batch_size = max(1, int(batch_size or SCAN_BATCH_SIZE))
+    for i in range(0, len(symbols), batch_size):
+        yield symbols[i:i + batch_size], (i // batch_size) + 1, math.ceil(len(symbols) / batch_size)
+
 # =========================
 # FORMAT HELPERS (ADD HERE)
 # =========================
@@ -2460,29 +2466,67 @@ def track_active_trade(symbol):
 # ================= SCAN SCHEDULERS =================
 def scan_gapup_once():
     items = []
-    for sym in SYMBOLS:
-        try:
-            r = scan_gapup_pattern(sym)
-            if r:
-                items.append(r)
-                add_watch_candidate(sym, r)
-        except Exception as e:
-            log(f"GAP SCAN ERROR {sym}: {e}")
+    symbols = list(SYMBOLS)
+
+    for batch, batch_no, total_batches in iter_symbol_batches(symbols):
+        log(f"[LIVE GAP] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
+
+        for idx, sym in enumerate(batch, 1):
+            try:
+                r = scan_gapup_pattern(sym)
+                if r:
+                    items.append(r)
+                    add_watch_candidate(sym, r)
+            except Exception as e:
+                log(f"GAP SCAN ERROR {sym}: {e}")
+
+            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
+
+        log(f"[LIVE GAP] Finished batch {batch_no}/{total_batches}")
+
+        if batch_no < total_batches:
+            log(f"[LIVE GAP] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
+            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
+
     pattern_summary["gapup"] = items
-    send_rich_summary_image(convert_gapup_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="GAP UP PLUS", caption="Gap Up Plus")
+    send_rich_summary_image(
+        convert_gapup_summary_for_dashboard(items),
+        title="STOCKS TO WATCH",
+        subtitle="GAP UP PLUS",
+        caption="Gap Up Plus"
+    )
 
 def scan_inside15_once():
     items = []
-    for sym in SYMBOLS:
-        try:
-            r = scan_15m_inside_pattern(sym)
-            if r:
-                items.append(r)
-                add_watch_candidate(sym, r)
-        except Exception as e:
-            log(f"15M SCAN ERROR {sym}: {e}")
+    symbols = list(SYMBOLS)
+
+    for batch, batch_no, total_batches in iter_symbol_batches(symbols):
+        log(f"[LIVE 15M] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
+
+        for idx, sym in enumerate(batch, 1):
+            try:
+                r = scan_15m_inside_pattern(sym)
+                if r:
+                    items.append(r)
+                    add_watch_candidate(sym, r)
+            except Exception as e:
+                log(f"15M SCAN ERROR {sym}: {e}")
+
+            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
+
+        log(f"[LIVE 15M] Finished batch {batch_no}/{total_batches}")
+
+        if batch_no < total_batches:
+            log(f"[LIVE 15M] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
+            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
+
     pattern_summary["inside15"] = items
-    send_rich_summary_image(convert_inside_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="15 MIN INSIDE CANDLE", caption="15 Min Inside")
+    send_rich_summary_image(
+        convert_inside_summary_for_dashboard(items),
+        title="STOCKS TO WATCH",
+        subtitle="15 MIN INSIDE CANDLE",
+        caption="15 Min Inside"
+    )
 
 def pivot_scan_key():
     now = now_ist()
@@ -2505,17 +2549,35 @@ def scan_pivot_30m_once():
     pivot_scan_done_keys.add(key)
 
     items = []
-    for sym in SYMBOLS:
-        try:
-            r = scan_30m_pivot_sell(sym)
-            if r:
-                items.append(r)
-                add_watch_candidate(sym, r)
-        except Exception as e:
-            log(f"PIVOT SCAN ERROR {sym}: {e}")
-    pattern_summary["pivot30"] = items
-    send_rich_summary_image(convert_pivot_summary_for_dashboard(items), title="STOCKS TO WATCH", subtitle="30 MIN WEEKLY PIVOT SELL", caption="30 Min Weekly Pivot Sell")
+    symbols = list(SYMBOLS)
 
+    for batch, batch_no, total_batches in iter_symbol_batches(symbols):
+        log(f"[LIVE PIVOT] Starting batch {batch_no}/{total_batches} | symbols={len(batch)}")
+
+        for idx, sym in enumerate(batch, 1):
+            try:
+                r = scan_30m_pivot_sell(sym)
+                if r:
+                    items.append(r)
+                    add_watch_candidate(sym, r)
+            except Exception as e:
+                log(f"PIVOT SCAN ERROR {sym}: {e}")
+
+            time.sleep(SYMBOL_SCAN_SLEEP_SECONDS)
+
+        log(f"[LIVE PIVOT] Finished batch {batch_no}/{total_batches}")
+
+        if batch_no < total_batches:
+            log(f"[LIVE PIVOT] Sleeping {SCAN_BATCH_SLEEP_SECONDS}s before next batch...")
+            time.sleep(SCAN_BATCH_SLEEP_SECONDS)
+
+    pattern_summary["pivot30"] = items
+    send_rich_summary_image(
+        convert_pivot_summary_for_dashboard(items),
+        title="STOCKS TO WATCH",
+        subtitle="30 MIN WEEKLY PIVOT SELL",
+        caption="30 Min Weekly Pivot Sell"
+    )
 
 def scan_r2_breakout(symbol, df_5m, prev_week):
     try:
@@ -2586,14 +2648,21 @@ def run_live_day():
         if should_run_pivot_scan():
             scan_pivot_30m_once()
 
-        for sym in list(watch_candidates.keys()):
-            if sym in closed_for_day or sym in active_trades:
-                continue
-            try:
-                try_entry_for_candidate(sym)
-            except Exception as e:
-                log(f"ENTRY ERROR {sym}: {e}")
-            time.sleep(1)
+        watch_syms = list(watch_candidates.keys())
+
+        for batch, batch_no, total_batches in iter_symbol_batches(watch_syms):
+            for sym in batch:
+                if sym in closed_for_day or sym in active_trades:
+                    continue
+                try:
+                    try_entry_for_candidate(sym)
+                except Exception as e:
+                    log(f"ENTRY ERROR {sym}: {e}")
+        
+                time.sleep(max(1.5, SYMBOL_SCAN_SLEEP_SECONDS))
+        
+            if batch_no < total_batches:
+                time.sleep(max(3, SCAN_BATCH_SLEEP_SECONDS // 2))
 
         for sym in list(active_trades.keys()):
             try:
