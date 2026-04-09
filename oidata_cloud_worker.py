@@ -51,6 +51,8 @@ TEXT_IMAGE_FONT_SIZE = int(os.getenv("TEXT_IMAGE_FONT_SIZE", "36"))
 WATCHLIST_RAW = (os.getenv("WATCHLIST") or "").strip()
 GAPUP_WATCHLIST_RAW = (os.getenv("GAPUP_WATCHLIST") or "").strip()
 INSIDE15_WATCHLIST_RAW = (os.getenv("INSIDE15_WATCHLIST") or "").strip()
+BUY15MIN_WATCHLIST_RAW = (os.getenv("BUY15MIN_WATCHLIST") or "").strip()
+SELL15MIN_WATCHLIST_RAW = (os.getenv("SELL15MIN_WATCHLIST") or "").strip()
 PIVOT_WATCHLIST_RAW = (os.getenv("PIVOT_WATCHLIST") or "").strip()
 R2_WATCHLIST_RAW = (os.getenv("R2_WATCHLIST") or "").strip()
 
@@ -134,15 +136,19 @@ def unique_symbols(*symbol_groups):
 
 
 DEFAULT_SYMBOLS = parse_watchlist(WATCHLIST_RAW)
+BUY15MIN_SYMBOLS = parse_watchlist(BUY15MIN_WATCHLIST_RAW)
+SELL15MIN_SYMBOLS = parse_watchlist(SELL15MIN_WATCHLIST_RAW)
 GAPUP_SYMBOLS = parse_watchlist(GAPUP_WATCHLIST_RAW) or DEFAULT_SYMBOLS
-INSIDE15_SYMBOLS = parse_watchlist(INSIDE15_WATCHLIST_RAW) or DEFAULT_SYMBOLS
+INSIDE15_SYMBOLS = parse_watchlist(INSIDE15_WATCHLIST_RAW) or unique_symbols(BUY15MIN_SYMBOLS, SELL15MIN_SYMBOLS) or DEFAULT_SYMBOLS
+BUY15MIN_SYMBOLS_SET = set(BUY15MIN_SYMBOLS)
+SELL15MIN_SYMBOLS_SET = set(SELL15MIN_SYMBOLS)
 PIVOT_SYMBOLS = parse_watchlist(PIVOT_WATCHLIST_RAW) or DEFAULT_SYMBOLS
 R2_SYMBOLS = parse_watchlist(R2_WATCHLIST_RAW) or DEFAULT_SYMBOLS
-SYMBOLS = unique_symbols(DEFAULT_SYMBOLS, GAPUP_SYMBOLS, INSIDE15_SYMBOLS, PIVOT_SYMBOLS, R2_SYMBOLS)
+SYMBOLS = unique_symbols(DEFAULT_SYMBOLS, GAPUP_SYMBOLS, INSIDE15_SYMBOLS, BUY15MIN_SYMBOLS, SELL15MIN_SYMBOLS, PIVOT_SYMBOLS, R2_SYMBOLS)
 
 if not SYMBOLS:
     raise Exception(
-        "Missing watchlists. Set WATCHLIST or strategy-wise lists like GAPUP_WATCHLIST, INSIDE15_WATCHLIST, PIVOT_WATCHLIST, R2_WATCHLIST"
+        "Missing watchlists. Set WATCHLIST or strategy-wise lists like GAPUP_WATCHLIST, INSIDE15_WATCHLIST, BUY15MIN_WATCHLIST, SELL15MIN_WATCHLIST, PIVOT_WATCHLIST, R2_WATCHLIST"
     )
 
 # ================= GLOBAL STATE =================
@@ -463,11 +469,13 @@ def _simple_gapup_rows(items):
 def _simple_inside_rows(items):
     rows = []
     for i, item in enumerate(items or [], 1):
+        buy_entry = item.get("buy_entry", "")
+        sell_entry = item.get("sell_entry", "")
         rows.append([
             i,
             short_name(item.get("symbol", "")),
-            round(safe_float(item.get("buy_entry", 0), 0.0), 2),
-            round(safe_float(item.get("sell_entry", 0), 0.0), 2),
+            round(safe_float(buy_entry, 0.0), 2) if buy_entry not in (None, "") else "",
+            round(safe_float(sell_entry, 0.0), 2) if sell_entry not in (None, "") else "",
             f"{round(safe_float(item.get('range_pct', 0), 0.0), 2)}%"
         ])
     return rows
@@ -507,6 +515,54 @@ def send_simple_pattern_image(title, rows, columns, color, filename, caption):
         send_telegram_image(img_bytes.name, img_bytes, caption=caption)
     except Exception as e:
         log(f"{title} simple image error: {e}")
+
+def _inside15_side_allowed(symbol, side):
+    side = str(side or "").upper()
+    if side == "BUY":
+        return (not BUY15MIN_SYMBOLS_SET) or (symbol in BUY15MIN_SYMBOLS_SET)
+    if side == "SELL":
+        return (not SELL15MIN_SYMBOLS_SET) or (symbol in SELL15MIN_SYMBOLS_SET)
+    return True
+
+
+def _filter_inside15_payload(symbol, payload):
+    if not payload:
+        return None
+
+    filtered = dict(payload)
+    buy_allowed = _inside15_side_allowed(symbol, "BUY")
+    sell_allowed = _inside15_side_allowed(symbol, "SELL")
+
+    if not buy_allowed:
+        filtered["buy_entry"] = ""
+        filtered["buy_stoploss"] = ""
+        filtered["buy_target"] = ""
+
+    if not sell_allowed:
+        filtered["sell_entry"] = ""
+        filtered["sell_stoploss"] = ""
+        filtered["sell_target"] = ""
+
+    if filtered.get("buy_entry") not in (None, "") and filtered.get("sell_entry") in (None, ""):
+        filtered["side"] = "BUY"
+        filtered["entry"] = filtered.get("buy_entry", "")
+        filtered["stoploss"] = filtered.get("buy_stoploss", "")
+        filtered["target"] = filtered.get("buy_target", "")
+    elif filtered.get("sell_entry") not in (None, "") and filtered.get("buy_entry") in (None, ""):
+        filtered["side"] = "SELL"
+        filtered["entry"] = filtered.get("sell_entry", "")
+        filtered["stoploss"] = filtered.get("sell_stoploss", "")
+        filtered["target"] = filtered.get("sell_target", "")
+    else:
+        filtered["side"] = "WATCH"
+        filtered["entry"] = filtered.get("buy_entry", filtered.get("sell_entry", ""))
+        filtered["stoploss"] = filtered.get("buy_stoploss", filtered.get("sell_stoploss", ""))
+        filtered["target"] = filtered.get("buy_target", filtered.get("sell_target", ""))
+
+    if filtered.get("buy_entry") in (None, "") and filtered.get("sell_entry") in (None, ""):
+        return None
+
+    return filtered
 
 
 def build_rich_summary_image(items, title="SUMMARY", subtitle=""):
@@ -2492,7 +2548,10 @@ def try_entry_for_candidate(symbol):
         return
 
     if strategy == "INSIDE_15M":
-        if ltp >= c["buy_entry"]:
+        buy_entry = safe_float(c.get("buy_entry", ""), 0.0) if c.get("buy_entry", "") not in (None, "") else 0.0
+        sell_entry = safe_float(c.get("sell_entry", ""), 0.0) if c.get("sell_entry", "") not in (None, "") else 0.0
+
+        if buy_entry > 0 and ltp >= buy_entry:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if not _entry_ok("BUY", oi_rows, bias):
                 _blocked_message("BUY", "OI is against BUY" if bias != "BULLISH" else "signal is weak")
@@ -2502,9 +2561,9 @@ def try_entry_for_candidate(symbol):
                 "symbol": symbol,
                 "strategy": strategy,
                 "side": "BUY",
-                "entry": c["buy_entry"],
-                "target": c["buy_target"],
-                "stoploss": c["buy_stoploss"],
+                "entry": c.get("buy_entry"),
+                "target": c.get("buy_target"),
+                "stoploss": c.get("buy_stoploss"),
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
                 "last_oi_alert": 0,
@@ -2518,7 +2577,7 @@ def try_entry_for_candidate(symbol):
             del watch_candidates[symbol]
             return
 
-        if ltp <= c["sell_entry"]:
+        if sell_entry > 0 and ltp <= sell_entry:
             oi_rows, bias = get_oi_snapshot(symbol, ltp)
             if not _entry_ok("SELL", oi_rows, bias):
                 _blocked_message("SELL", "OI is against SELL" if bias != "BEARISH" else "signal is weak")
@@ -2528,9 +2587,9 @@ def try_entry_for_candidate(symbol):
                 "symbol": symbol,
                 "strategy": strategy,
                 "side": "SELL",
-                "entry": c["sell_entry"],
-                "target": c["sell_target"],
-                "stoploss": c["sell_stoploss"],
+                "entry": c.get("sell_entry"),
+                "target": c.get("sell_target"),
+                "stoploss": c.get("sell_stoploss"),
                 "entry_time": now_ist().strftime("%H:%M:%S"),
                 "last_oi_check": 0,
                 "last_oi_alert": 0,
@@ -2733,8 +2792,11 @@ def scan_inside15_once():
         try:
             r = scan_15m_inside_pattern(sym)
             if r:
-                items.append(r)
-                add_watch_candidate(sym, r)
+                filtered = _filter_inside15_payload(sym, r)
+                if not filtered:
+                    continue
+                items.append(filtered)
+                add_watch_candidate(sym, filtered)
         except Exception as e:
             log(f"15M SCAN ERROR {sym}: {e}")
     pattern_summary["inside15"] = items
