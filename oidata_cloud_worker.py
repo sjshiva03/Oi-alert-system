@@ -1,12 +1,35 @@
 import os
 import time
 import math
+import random
 import requests
 from datetime import datetime, timedelta, timezone, time as dtime
 from fyers_apiv3 import fyersModel
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 from bs4 import BeautifulSoup
+
+# ================= LOCAL .ENV SUPPORT =================
+def _load_local_env(env_path=None):
+    env_path = env_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception as e:
+        print(f'[ENV] local .env load skipped: {e}', flush=True)
+
+_load_local_env()
+
 # =========================
 # COLORS (ADD THIS BLOCK)
 # =========================
@@ -81,6 +104,8 @@ ALERT_GAP_SECONDS = int(os.getenv("ALERT_GAP_SECONDS", "300"))
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS", "300"))
 ONLY_STRONG_SIGNALS = (os.getenv("ONLY_STRONG_SIGNALS", "true").strip().lower() == "true")
+FORCE_SAMPLE_MODE = (os.getenv("FORCE_SAMPLE_MODE", "false").strip().lower() == "true")
+AUTO_SEND_SAMPLE_TO_TELEGRAM = (os.getenv("AUTO_SEND_SAMPLE_TO_TELEGRAM", "false").strip().lower() == "true")
 
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
@@ -198,6 +223,59 @@ def send(msg: str):
 # =========================
 # FORMAT HELPERS (ADD HERE)
 # =========================
+
+def _fmt_dt(v):
+    try:
+        if hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d %H:%M")
+        return str(v)
+    except:
+        return str(v)
+
+def send_inside15_after_market_debug(symbol, result, c1=None, c2=None, ltp=None, extra=""):
+    if not AFTER_MARKET_INSIDE15_DEBUG:
+        return
+
+    lines = []
+    lines.append(f"🔎 AFTER MARKET DEBUG - 15M INSIDE")
+    lines.append(f"Symbol: {short_name(symbol)}")
+    lines.append(f"Result: {result.get('result', 'N/A') if isinstance(result, dict) else 'N/A'}")
+    lines.append(f"Side: {result.get('side', 'N/A') if isinstance(result, dict) else 'N/A'}")
+    lines.append(f"Entry: {result.get('entry', '') if isinstance(result, dict) else ''}")
+    lines.append(f"SL: {result.get('stoploss', '') if isinstance(result, dict) else ''}")
+    lines.append(f"Target: {result.get('target', '') if isinstance(result, dict) else ''}")
+    lines.append(f"LTP/Close: {ltp if ltp not in (None, '') else ''}")
+    lines.append("")
+
+    lines.append("CANDLE 1")
+    if c1:
+        lines.append(f"Time: {_fmt_dt(c1.get('time'))}")
+        lines.append(f"O: {c1.get('open')}")
+        lines.append(f"H: {c1.get('high')}")
+        lines.append(f"L: {c1.get('low')}")
+        lines.append(f"C: {c1.get('close')}")
+        lines.append(f"Range%: {c1.get('range_pct', '')}")
+    else:
+        lines.append("No candle 1 data")
+
+    lines.append("")
+    lines.append("CANDLE 2")
+    if c2:
+        lines.append(f"Time: {_fmt_dt(c2.get('time'))}")
+        lines.append(f"O: {c2.get('open')}")
+        lines.append(f"H: {c2.get('high')}")
+        lines.append(f"L: {c2.get('low')}")
+        lines.append(f"C: {c2.get('close')}")
+        lines.append(f"Inside?: {c2.get('inside_ok', '')}")
+    else:
+        lines.append("No candle 2 data")
+
+    if extra:
+        lines.append("")
+        lines.append("EXTRA")
+        lines.append(str(extra))
+
+    send("\n".join(lines))
 
 def _fmt_ltp(val):
     try:
@@ -896,126 +974,28 @@ def make_dashboard_image(items, title="STOCKS TO WATCH", subtitle="LIVE + OI + R
         draw.text((x + 200, y + 186), f"P/L: {data.get('pl', '-')}", fill=_status_fill(data.get('pl', '')), font=fonts["value_bold"])
         draw.text((x + 438, y + 186), f"{int(LEVERAGE)}X" if LEVERAGE == int(LEVERAGE) else f"{LEVERAGE}X", fill=gold, font=fonts["value_bold"])
 
-        draw_rounded_rect(draw, (x + 20, y + 232, x + card_w - 20, y + 398), 16, (248, 250, 252), outline=border, width=2)
+        draw.text((x + 28, y + 244), "Strike", fill=muted, font=fonts["tiny"])
+        draw.text((x + 140, y + 244), "PE OI", fill=muted, font=fonts["tiny"])
+        draw.text((x + 250, y + 244), "PE Chg", fill=muted, font=fonts["tiny"])
+        draw.text((x + 420, y + 244), "|", fill=muted, font=fonts["tiny"])
+        draw.text((x + 460, y + 244), "CE OI", fill=muted, font=fonts["tiny"])
+        draw.text((x + 575, y + 244), "CE Chg", fill=muted, font=fonts["tiny"])
 
-        table_left = x + 32
-        table_right = x + card_w - 32
-        table_top = y + 244
-        row_h = 28
-        header_h = 30
-        grid = border
-        gray = muted
-        black = text_dark
-        dark_green = profit
-        dark_red = loss
-
-        col_names = ["Strike", "PE OI", "PE Chg", "CE OI", "CE Chg"]
-        col_widths = [92, 118, 126, 118, 126]
-
-        total_w = sum(col_widths)
-        avail_w = table_right - table_left
-        if total_w > avail_w:
-            scale = avail_w / total_w
-            col_widths = [max(72, int(w * scale)) for w in col_widths]
-            total_w = sum(col_widths)
-
-        table_bottom = table_top + header_h + row_h * 5
-        draw.rounded_rectangle(
-            (table_left, table_top, table_left + total_w, table_bottom),
-            radius=8,
-            fill=(250, 250, 250),
-            outline=grid,
-            width=1,
-        )
-        draw.rectangle(
-            (table_left, table_top, table_left + total_w, table_top + header_h),
-            fill=(236, 236, 236),
-            outline=grid,
-            width=1,
-        )
-
-        cx = table_left
-        for i, (name, w) in enumerate(zip(col_names, col_widths)):
-            draw.text((cx + 6, table_top + 7), name, fill=gray, font=fonts["tiny"])
-            if i > 0:
-                draw.line((cx, table_top, cx, table_bottom), fill=grid, width=1)
-            cx += w
-
-        for i in range(1, 6):
-            yy = table_top + header_h + (i - 1) * row_h
-            draw.line((table_left, yy, table_left + total_w, yy), fill=grid, width=1)
-
-        display_rows = list(rows[:5]) if rows else []
-        atm_strike = 0.0
-        if rows:
-            try:
-                strike_vals = [safe_float(r.get("strike", 0), 0.0) for r in rows if safe_float(r.get("strike", 0), 0.0) > 0]
-                if strike_vals:
-                    atm_strike = min(strike_vals, key=lambda s: abs(s - safe_float(norm["ltp"], 0.0)))
-            except Exception:
-                atm_strike = 0.0
-
-        while len(display_rows) < 5:
-            display_rows.append({})
-
-        def val_color(v, default=black):
-            try:
-                num = safe_float(v, 0.0)
-                if num < 0:
-                    return dark_red
-                if num > 0:
-                    return dark_green
-            except Exception:
-                s = str(v)
-                if s.startswith('-') or '▼' in s:
-                    return dark_red
-                if s.startswith('+') or '▲' in s:
-                    return dark_green
-            return default
-
-        for ridx, row in enumerate(display_rows):
-            row_top = table_top + header_h + ridx * row_h
-            strike_val = safe_float(row.get("strike", 0), 0.0)
-            is_atm = atm_strike > 0 and strike_val > 0 and abs(strike_val - atm_strike) < 0.001
-            if is_atm:
-                draw.rectangle(
-                    (table_left + 1, row_top + 1, table_left + total_w - 1, row_top + row_h - 1),
-                    fill=(255, 248, 220),
-                    outline=None,
-                )
-                draw.rounded_rectangle(
-                    (table_left + 3, row_top + 3, table_left + total_w - 3, row_top + row_h - 3),
-                    radius=6,
-                    outline=gold,
-                    width=2,
-                )
-
-            y_text = row_top + 7
-            if row:
-                vals = [
-                    str(row.get("strike", "")),
-                    human_format(row.get("put_oi", 0)),
-                    f"{human_format(row.get('put_oich', 0))}{arrow(row.get('put_oich', 0))}",
-                    human_format(row.get("call_oi", 0)),
-                    f"{human_format(row.get('call_oich', 0))}{arrow(row.get('call_oich', 0))}",
-                ]
-                fills = [
-                    black,
-                    black,
-                    val_color(row.get("put_oich", 0)),
-                    black,
-                    val_color(row.get("call_oich", 0)),
-                ]
-            else:
-                vals = ["", "", "", "", ""]
-                fills = [gray, gray, gray, gray, gray]
-
-            cx = table_left
-            for cidx, (val, fc, w) in enumerate(zip(vals, fills, col_widths)):
-                txt = _fit_text(draw, val, fonts["tiny"], w - 8, suffix="") if val else ""
-                x_off = 6 if cidx == 0 else 5
-                draw.text((cx + x_off, y_text), txt, fill=fc, font=fonts["tiny"])
-                cx += w
+        yy = y + 282
+        if not rows:
+            draw.text((x + 28, yy), "No OI data", fill=muted, font=fonts["tiny"])
+        else:
+            for r in rows[:5]:
+                pe_oi = human_format(r.get("put_oi", 0))
+                pe_chg = f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}"
+                ce_oi = human_format(r.get("call_oi", 0))
+                ce_chg = f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}"
+                draw.text((x + 28, yy), str(r.get("strike", "")), fill=text_dark, font=fonts["tiny"])
+                draw.text((x + 140, yy), pe_oi, fill=text_dark, font=fonts["tiny"])
+                draw.text((x + 250, yy), pe_chg, fill=profit if r.get('put_oich', 0) > 0 else loss if r.get('put_oich', 0) < 0 else muted, font=fonts["tiny"])
+                draw.text((x + 460, yy), ce_oi, fill=text_dark, font=fonts["tiny"])
+                draw.text((x + 575, yy), ce_chg, fill=profit if r.get('call_oich', 0) > 0 else loss if r.get('call_oich', 0) < 0 else muted, font=fonts["tiny"])
+                yy += 28
 
     return _save_image_to_bytes(img, f"ultimate_dashboard_p{page_no}")
 
@@ -2596,12 +2576,15 @@ def try_entry_for_candidate(symbol):
     if symbol not in watch_candidates:
         return
 
-    q = fetch_quotes(symbol)
-    ltp = q.get("ltp", 0.0)
-    if ltp <= 0:
-        return
-
     c = watch_candidates[symbol]
+    ltp = safe_float(c.get("ltp", 0.0), 0.0)
+    if ltp <= 0:
+        q = fetch_quotes(symbol)
+        ltp = q.get("ltp", 0.0)
+        if ltp <= 0:
+            return
+        c["ltp"] = ltp
+
     strategy = c["strategy"]
 
     def _entry_ok(side, oi_rows, bias):
@@ -2861,12 +2844,11 @@ def track_active_trade(symbol):
         log(f"{short_name(symbol)} closed -> {reason} @ {exit_px}")
         return
 
-    snap = get_oi_snapshot(symbol, ltp)
-    oi_rows = snap.get("rows", []) if isinstance(snap, dict) else []
-    bias = str(snap.get("bias", "")) if isinstance(snap, dict) else ""
+    oi_rows, bias = get_oi_snapshot(symbol, ltp) if ltp > 0 else ([], "NEUTRAL")
 
     trade["oi_rows"] = oi_rows
     trade["oi_bias"] = bias
+    trade["pcr"] = calculate_pcr(oi_rows) if oi_rows else trade.get("pcr", "")
     trade["status"] = "BUY HOLD" if side == "BUY" else "SELL HOLD"
 
 # ================= SCAN SCHEDULERS =================
@@ -3030,45 +3012,39 @@ def scan_r2_live_once():
 
 # ================= LIVE LOOP =================
 def run_live_day():
-    global last_live_dashboard_sent
-    gap_summary_sent = False
-    inside_summary_sent = False
+    global last_live_dashboard_sent, gapup_scan_done, inside15_scan_done, last_pivot_scan_ts
     eod_sent = False
     last_live_dashboard_sent = 0.0
-    gapup_scan_done = False
-    inside15_scan_done = False
-    last_pivot_scan_ts = 0.0
+
     while True:
         if not is_market_open():
             return
 
         nowt = now_ist().time()
+        now_ts = now_epoch()
 
-        if not gap_summary_sent and nowt >= dtime(9, 20):
+        if (not gapup_scan_done) and nowt >= dtime(9, 20):
             scan_gapup_once()
-            gap_summary_sent = True
-            try:
-                send_live_dashboard_image(caption="Live Dashboard")
-            except Exception as e:
-                log(f"LIVE DASHBOARD ERROR after gap scan: {e}")
+            gapup_scan_done = True
 
-        if not inside_summary_sent and nowt >= dtime(9, 45):
+        if (not inside15_scan_done) and nowt >= dtime(9, 45):
             scan_inside15_once()
-            inside_summary_sent = True
+            inside15_scan_done = True
+
+        if (last_pivot_scan_ts == 0.0) or (now_ts - last_pivot_scan_ts >= 1800):
             try:
-                send_live_dashboard_image(caption="Live Dashboard")
+                scan_pivot_30m_once()
+                scan_r2_live_once()
             except Exception as e:
-                log(f"LIVE DASHBOARD ERROR after inside scan: {e}")
-
-        if should_run_pivot_scan():
-            scan_pivot_30m_once()
-
-        scan_r2_live_once()
+                log(f"PIVOT/R2 SCAN ERROR: {e}")
+            last_pivot_scan_ts = now_ts
 
         for sym in list(watch_candidates.keys()):
             if sym in closed_for_day or sym in active_trades:
                 continue
             try:
+                force_oi = _should_send_live_dashboard()
+                refresh_watch_candidate_snapshot(sym, force_oi=force_oi)
                 try_entry_for_candidate(sym)
             except Exception as e:
                 log(f"ENTRY ERROR {sym}: {e}")
@@ -3079,25 +3055,34 @@ def run_live_day():
                 track_active_trade(sym)
             except Exception as e:
                 log(f"TRACK ERROR {sym}: {e}")
-            time.sleep(LTP_INTERVAL_PER_STOCK)
+            time.sleep(max(2, LTP_INTERVAL_PER_STOCK))
 
         try:
             if _should_send_live_dashboard():
-                live_cards = _active_trade_cards_only()
+                # refresh watchlist OI snapshots slowly before sending dashboard
+                for sym in list(watch_candidates.keys()):
+                    if sym in closed_for_day or sym in active_trades:
+                        continue
+                    try:
+                        refresh_watch_candidate_snapshot(sym, force_oi=True)
+                    except Exception as e:
+                        log(f"DASH SNAPSHOT ERROR {sym}: {e}")
+                    time.sleep(2)
+                live_cards = _live_dashboard_cards()
                 if live_cards:
                     send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
         except Exception as e:
             log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
 
-        if not eod_sent and nowt >= dtime(15, 28):
+        if (not eod_sent) and nowt >= dtime(15, 28):
             send_after_market_summary_image(caption="End of Day Report")
             nxt = next_market_open_datetime()
             send(f"🌙 Market Closed\nNext open {nxt.strftime('%Y-%m-%d %H:%M:%S IST')}")
             eod_sent = True
 
-        time.sleep(POLL_SECONDS)
+        time.sleep(max(1, POLL_SECONDS))
 
-# ================= AFTER MARKET SUMMARY =================
+# ================= AFTER MARKET SUMMARY =================# ================= AFTER MARKET SUMMARY =================
 def evaluate_gapup_after_market(symbol):
     prev_day = get_previous_daily(symbol)
     day_5m = get_analysis_day_candles(symbol, 5, 7)
@@ -3952,11 +3937,16 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     gray = (110, 110, 110)
     soft_green = (225, 245, 225)
     soft_red = (250, 230, 230)
+    grid = (205, 205, 205)
+    atm_fill = (255, 248, 220)
+    atm_border = (232, 180, 26)
 
     item = _normalize_live_card_source(item)
     is_buy = item["side"] == "BUY"
     head_fill = green_head if is_buy else red_head
     day_fill = dark_green if item["day_pct"] >= 0 else dark_red
+    strategy_bg = soft_green if is_buy else soft_red
+    strategy_fill = dark_green if is_buy else dark_red
 
     draw_rounded_rect(draw, (x, y, x + card_w, y + card_h), 22, white, outline=border, width=2)
     draw_rounded_rect(draw, (x + 10, y + 10, x + card_w - 10, y + 55), 14, head_fill)
@@ -3967,11 +3957,11 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
     draw_rounded_rect(draw, (x + card_w - 108, y + 14, x + card_w - 18, y + 44), 15, white)
     draw.text((x + card_w - 98, y + 18), _fmt_day_pct(item["day_pct"]), fill=day_fill, font=fonts["pill"])
 
-    draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, soft_green if is_buy else soft_red)
     conf_txt = f" • {item['confidence']}%" if item["confidence"] not in ("", None) else ""
     strategy_line = f"{item['strategy']} • {item['side']} • {item['status']}{conf_txt}"
     strategy_line = _fit_text(draw, strategy_line, fonts["strategy"], card_w - 40)
-    draw.text((x + 20, y + 76), strategy_line, fill=dark_green if is_buy else dark_red, font=fonts["strategy"])
+    draw_rounded_rect(draw, (x + 14, y + 68, x + card_w - 14, y + 106), 10, strategy_bg)
+    draw.text((x + 20, y + 76), strategy_line, fill=strategy_fill, font=fonts["strategy"])
 
     draw_rounded_rect(draw, (x + 14, y + 112, x + card_w - 14, y + 148), 10, SOFT_GRAY)
     draw.text((x + 20, y + 119), f"Entry: {item['entry']}   SL: {item['stoploss']}   Qty: {item['qty']}", fill=black, font=fonts["body"])
@@ -3987,23 +3977,74 @@ def _draw_live_card_final(draw, fonts, x, y, card_w, card_h, item):
         draw.text((x + 20, y + 203), f"Exit: {item['exit_type']}", fill=exit_fill, font=fonts["body"])
         table_top = y + 248
 
-    headers = ["Strike", "PE", "Chg", "CE", "Chg"]
-    xs = [x + 20, x + 100, x + 180, x + 250, x + 320]
-    for xp, h in zip(xs, headers):
-        draw.text((xp, table_top), h, fill=gray, font=fonts["oi"])
+    table_left = x + 14
+    table_right = x + card_w - 14
+    row_h = 34
+    header_h = 32
+    col_names = ["Strike", "PE", "PE Chg", "CE", "CE Chg"]
+    col_widths = [78, 80, 104, 80, 104]
 
-    yy = table_top + 28
-    for row in item["strikes"][:5]:
-        strike = str(row.get("strike", ""))
-        pe_oi = str(row.get("pe_oi", row.get("put_oi", "")))
-        pe_chg = str(row.get("pe_chg", row.get("put_oich", "")))
-        ce_oi = str(row.get("ce_oi", row.get("call_oi", "")))
-        ce_chg = str(row.get("ce_chg", row.get("call_oich", "")))
-        vals = [strike, pe_oi, pe_chg, ce_oi, ce_chg]
-        fills = [black, black, dark_green if "-" not in pe_chg else dark_red, black, dark_green if "-" not in ce_chg else dark_red]
-        for xp, val, fc in zip(xs, vals, fills):
-            draw.text((xp, yy), str(val), fill=fc, font=fonts["oi"])
-        yy += 28
+    total_w = sum(col_widths)
+    avail_w = table_right - table_left
+    if total_w > avail_w:
+        scale = avail_w / total_w
+        col_widths = [max(58, int(w * scale)) for w in col_widths]
+        total_w = sum(col_widths)
+
+    table_bottom = table_top + header_h + row_h * 5
+    draw.rounded_rectangle((table_left, table_top, table_left + total_w, table_bottom), radius=8, fill=(250, 250, 250), outline=grid, width=1)
+    draw.rectangle((table_left, table_top, table_left + total_w, table_top + header_h), fill=(236, 236, 236), outline=grid, width=1)
+
+    cx = table_left
+    for i, (name, w) in enumerate(zip(col_names, col_widths)):
+        draw.text((cx + 6, table_top + 7), name, fill=gray, font=fonts["oi"])
+        if i > 0:
+            draw.line((cx, table_top, cx, table_bottom), fill=grid, width=1)
+        cx += w
+
+    for i in range(1, 6):
+        yy = table_top + header_h + (i - 1) * row_h
+        draw.line((table_left, yy, table_left + total_w, yy), fill=grid, width=1)
+
+    rows = list(item["strikes"][:5])
+    while len(rows) < 5:
+        rows.append({})
+
+    def val_color(v, default=black):
+        s = str(v)
+        if s.startswith('-') or '▼' in s or '↓' in s:
+            return dark_red
+        if s.startswith('+') or '▲' in s or '↑' in s:
+            return dark_green
+        return default
+
+    ltp_val = safe_float(item.get("ltp", 0), 0.0)
+    strike_vals = [safe_float(r.get("strike", 0), 0.0) for r in rows if safe_float(r.get("strike", 0), 0.0) > 0]
+    atm_strike = min(strike_vals, key=lambda s: abs(s - ltp_val)) if ltp_val > 0 and strike_vals else 0.0
+
+    for ridx, row in enumerate(rows):
+        row_top = table_top + header_h + ridx * row_h
+        strike_val = safe_float(row.get("strike", 0), 0.0)
+        is_atm = atm_strike > 0 and strike_val > 0 and abs(strike_val - atm_strike) < 0.001
+        if is_atm:
+            draw.rectangle((table_left + 1, row_top + 1, table_left + total_w - 1, row_top + row_h - 1), fill=atm_fill, outline=None)
+            draw.rounded_rectangle((table_left + 3, row_top + 3, table_left + total_w - 3, row_top + row_h - 3), radius=6, outline=atm_border, width=2)
+
+        y_text = row_top + 8
+        vals = [
+            str(row.get("strike", "")),
+            str(row.get("pe_oi", row.get("put_oi", ""))),
+            str(row.get("pe_chg", row.get("put_oich", ""))),
+            str(row.get("ce_oi", row.get("call_oi", ""))),
+            str(row.get("ce_chg", row.get("call_oich", ""))),
+        ]
+        fills = [black, black, val_color(vals[2]), black, val_color(vals[4])]
+        cx = table_left
+        for cidx, (val, fc, w) in enumerate(zip(vals, fills, col_widths)):
+            txt = _fit_text(draw, val, fonts["oi"], w - 8, suffix="")
+            x_off = 6 if cidx == 0 else 5
+            draw.text((cx + x_off, y_text), txt, fill=fc, font=fonts["oi"])
+            cx += w
 
 
 def build_live_dashboard_image(cards, top_performers=None, dt_text=None):
@@ -4182,21 +4223,10 @@ def build_after_market_dashboard_image(cards, top_performers=None, dt_text=None)
 def _cards_from_watch_candidates_live():
     cards = []
     for sym, cand in watch_candidates.items():
-        try:
-            q = fetch_quotes(sym)
-            ltp = q.get("ltp", "")
-            prev_close = q.get("prev_close", 0.0)
-            day_pct = ((safe_float(ltp, 0.0) - safe_float(prev_close, 0.0)) / safe_float(prev_close, 1.0) * 100.0) if safe_float(prev_close, 0.0) else 0.0
-        except Exception:
-            ltp = ""
-            day_pct = 0.0
-
-        oi_rows, bias = [], "NEUTRAL"
-        try:
-            if safe_float(ltp, 0.0) > 0:
-                oi_rows, bias = get_oi_snapshot(sym, safe_float(ltp, 0.0))
-        except Exception:
-            oi_rows, bias = [], "NEUTRAL"
+        ltp = cand.get("ltp", "")
+        day_pct = round(safe_float(cand.get("day_pct", 0.0), 0.0), 2)
+        oi_rows = list(cand.get("oi_rows", []) or [])
+        bias = cand.get("oi_bias", "NEUTRAL")
 
         qty = cand.get("qty", "")
         if not qty:
@@ -4219,10 +4249,10 @@ def _cards_from_watch_candidates_live():
         cards.append({
             "symbol": _card_symbol_name(sym),
             "ltp": ltp,
-            "day_pct": round(day_pct, 2),
+            "day_pct": day_pct,
             "side": side,
             "strategy": cand.get("strategy", "WATCH"),
-            "status": "WATCH",
+            "status": cand.get("status", "WATCH"),
             "confidence": cand.get("confidence", ""),
             "entry": entry_val,
             "stoploss": sl_val,
@@ -4231,15 +4261,9 @@ def _cards_from_watch_candidates_live():
             "pl_text": cand.get("pl", ""),
             "pnl_value": safe_float(cand.get("pnl", cand.get("pl", 0)), 0.0),
             "exit_type": cand.get("result", ""),
-            "pcr": calculate_pcr(oi_rows) if oi_rows else "",
+            "pcr": cand.get("pcr", calculate_pcr(oi_rows) if oi_rows else ""),
             "oi_bias": bias,
-            "strikes": [{
-                "strike": r.get("strike", ""),
-                "pe_oi": human_format(r.get("put_oi", 0)),
-                "pe_chg": f"{human_format(r.get('put_oich', 0))}{arrow(r.get('put_oich', 0))}",
-                "ce_oi": human_format(r.get("call_oi", 0)),
-                "ce_chg": f"{human_format(r.get('call_oich', 0))}{arrow(r.get('call_oich', 0))}",
-            } for r in oi_rows[:5]]
+            "strikes": _rows_to_dashboard_strikes(oi_rows),
         })
     return cards
 
@@ -4255,27 +4279,38 @@ def _rows_to_dashboard_strikes(oi_rows):
         })
     return out
 
+def refresh_watch_candidate_snapshot(sym, force_oi=False):
+    cand = watch_candidates.get(sym)
+    if not cand:
+        return None
+
+    q = fetch_quotes(sym)
+    ltp = safe_float(q.get("ltp", 0.0), 0.0)
+    prev_close = safe_float(q.get("prev_close", 0.0), 0.0)
+    cand["ltp"] = round(ltp, 2) if ltp > 0 else cand.get("ltp", "")
+    cand["prev_close"] = round(prev_close, 2) if prev_close > 0 else cand.get("prev_close", 0.0)
+    cand["day_pct"] = round(((ltp - prev_close) / prev_close * 100.0), 2) if ltp > 0 and prev_close > 0 else cand.get("day_pct", 0.0)
+
+    now_ts = now_epoch()
+    last_oi_ts = safe_float(cand.get("last_oi_check", 0), 0.0)
+    need_oi = force_oi or not cand.get("oi_rows") or (ltp > 0 and (now_ts - last_oi_ts >= max(OI_INTERVAL_SECONDS, 60)))
+    if need_oi and ltp > 0:
+        try:
+            oi_rows, bias = get_oi_snapshot(sym, ltp)
+            cand["oi_rows"] = oi_rows
+            cand["oi_bias"] = bias
+            cand["pcr"] = calculate_pcr(oi_rows) if oi_rows else ""
+            cand["last_oi_check"] = now_ts
+        except Exception:
+            cand.setdefault("oi_rows", [])
+            cand.setdefault("oi_bias", "NEUTRAL")
+    return cand
+
 
 def _cards_from_active_trades_live():
     cards = []
     for sym, trade in active_trades.items():
-        try:
-            q = fetch_quotes(sym)
-            ltp = q.get("ltp", "")
-            prev_close = q.get("prev_close", 0.0)
-            day_pct = ((safe_float(ltp, 0.0) - safe_float(prev_close, 0.0)) / safe_float(prev_close, 1.0) * 100.0) if safe_float(prev_close, 0.0) else 0.0
-        except Exception:
-            ltp = ""
-            day_pct = 0.0
-
-        oi_rows, bias = [], "NEUTRAL"
-        try:
-            if safe_float(ltp, 0.0) > 0:
-                oi_rows, bias = get_oi_snapshot(sym, safe_float(ltp, 0.0))
-        except Exception:
-            oi_rows, bias = [], "NEUTRAL"
-
-        status = hold_status(trade.get("side", ""), bias)
+        oi_rows = list(trade.get("oi_rows", []) or [])
         qty = trade.get("qty", "")
         if not qty and trade.get("entry") not in ("", None) and trade.get("stoploss") not in ("", None):
             try:
@@ -4283,37 +4318,26 @@ def _cards_from_active_trades_live():
             except Exception:
                 qty = ""
 
-        pnl_value = 0.0
-        try:
-            entry = safe_float(trade.get("entry", 0.0), 0.0)
-            if trade.get("side") == "BUY":
-                pnl_value = (safe_float(ltp, 0.0) - entry) * safe_float(qty, 0.0)
-            else:
-                pnl_value = (entry - safe_float(ltp, 0.0)) * safe_float(qty, 0.0)
-        except Exception:
-            pnl_value = 0.0
-
         cards.append({
             "symbol": _card_symbol_name(sym),
-            "ltp": ltp,
-            "day_pct": round(day_pct, 2),
+            "ltp": trade.get("ltp", ""),
+            "day_pct": round(safe_float(trade.get("day_pct", 0), 0.0), 2),
             "side": trade.get("side", "BUY"),
             "strategy": trade.get("strategy", "LIVE"),
-            "status": _clean_status_text(status),
+            "status": _clean_status_text(trade.get("status", hold_status(trade.get("side", ""), trade.get("oi_bias", "NEUTRAL")))),
             "confidence": trade.get("confidence", ""),
             "entry": trade.get("entry", ""),
             "stoploss": trade.get("stoploss", ""),
             "qty": qty,
             "target": trade.get("target", ""),
-            "pl_text": f"{pnl_value:+.0f}",
-            "pnl_value": pnl_value,
-            "exit_type": "",
-            "pcr": trade.get("pcr", ""),
+            "pl_text": trade.get("pl_text", trade.get("pl", "")),
+            "pnl_value": safe_float(trade.get("pnl_value", trade.get("pnl", 0)), 0.0),
+            "exit_type": trade.get("exit_type", trade.get("result", "")),
+            "pcr": trade.get("pcr", calculate_pcr(oi_rows) if oi_rows else ""),
             "oi_bias": trade.get("oi_bias", ""),
             "strikes": _rows_to_dashboard_strikes(oi_rows),
         })
     return cards
-
 
 def _live_dashboard_cards():
     cards = []
@@ -4428,8 +4452,95 @@ def send_after_market_category_images(items, category_name, per_image=AFTER_MARK
 
 
 # ================= MAIN =================
+def _sample_oi_rows(base):
+    rows = []
+    for i in range(-2, 3):
+        strike = base + (i * 10)
+        put_oi = random.randint(5000, 250000)
+        call_oi = random.randint(5000, 250000)
+        put_oich = random.randint(-50000, 50000)
+        call_oich = random.randint(-50000, 50000)
+        rows.append({
+            "strike": strike,
+            "put_oi": put_oi,
+            "put_oich": put_oich,
+            "call_oi": call_oi,
+            "call_oich": call_oich,
+        })
+    return rows
+
+
+def build_sample_live_cards():
+    names = ["NIFTY50", "AXISBANK", "APOLLOHOSP", "RELIANCE"]
+    cards = []
+    for name in names:
+        ltp = round(random.uniform(150, 2500), 2)
+        base = int(ltp // 10) * 10
+        rows = _sample_oi_rows(base)
+        side = random.choice(["BUY", "SELL"])
+        entry = round(ltp * (0.997 if side == "BUY" else 1.003), 2)
+        stoploss = round(ltp * (0.99 if side == "BUY" else 1.01), 2)
+        target = round(ltp * (1.015 if side == "BUY" else 0.985), 2)
+        pnl = random.randint(-1800, 2400)
+        cards.append({
+            "symbol": name,
+            "ltp": ltp,
+            "day_pct": round(random.uniform(-2.5, 3.2), 2),
+            "side": side,
+            "strategy": random.choice(["Gapup Plus", "15 Min Inside", "R2 Breakout", "Pivot Sell"]),
+            "status": random.choice(["WATCH", "BUY HOLD", "SELL HOLD"]),
+            "confidence": random.choice(["", "88", "91", "95"]),
+            "entry": entry,
+            "stoploss": stoploss,
+            "qty": random.randint(10, 150),
+            "target": target,
+            "pl_text": f"{pnl:+.0f}",
+            "pnl_value": float(pnl),
+            "exit_type": "",
+            "strikes": _rows_to_dashboard_strikes(rows),
+        })
+    return cards
+
+
+def build_sample_after_market_cards():
+    cards = []
+    for item in build_sample_live_cards():
+        result = random.choice(["TARGET", "STOPLOSS", "DAY END"])
+        item = dict(item)
+        item["status"] = result
+        item["exit_type"] = result
+        item["close_price"] = _fmt_ltp(item["ltp"])
+        cards.append(item)
+    return cards + cards[:2]
+
+
+def run_sample_mode():
+    live_cards = build_sample_live_cards()
+    after_cards = build_sample_after_market_cards()
+    live_img = build_live_dashboard_image(live_cards, dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper())
+    after_img = build_after_market_dashboard_image(after_cards, dt_text=now_ist().strftime("%d-%b-%Y %I:%M %p").upper())
+    live_path = os.path.join(BASE_DIR, "LIVE_SAMPLE.png")
+    after_path = os.path.join(BASE_DIR, "AFTER_MARKET_SAMPLE.png")
+    with open(live_path, "wb") as f:
+        f.write(live_img.getvalue())
+    with open(after_path, "wb") as f:
+        f.write(after_img.getvalue())
+    print(f"Saved samples: {live_path} | {after_path}", flush=True)
+    if AUTO_SEND_SAMPLE_TO_TELEGRAM and TELEGRAM_TOKEN and CHAT_ID:
+        send_telegram_image(os.path.basename(live_path), open(live_path, "rb"), caption="Live Dashboard Sample")
+        send_telegram_image(os.path.basename(after_path), open(after_path, "rb"), caption="After Market Sample")
+
+
 def main():
-    global last_after_market_run_for_analysis
+    global last_after_market_run_for_analysis, gapup_scan_done, inside15_scan_done, last_pivot_scan_ts
+
+    if FORCE_SAMPLE_MODE:
+        run_sample_mode()
+        return
+
+    gapup_scan_done = False
+    inside15_scan_done = False
+    last_pivot_scan_ts = 0.0
 
     profile = check_auth()
     send(
