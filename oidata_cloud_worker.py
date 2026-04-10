@@ -2639,6 +2639,11 @@ def try_entry_for_candidate(symbol):
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
             send_entry_alert(symbol, trade, oi_rows, bias)
+            try:
+                send_live_dashboard_image(cards=_live_dashboard_cards(), caption="Live Dashboard")
+                _mark_live_dashboard_sent()
+            except Exception as e:
+                log(f"LIVE DASHBOARD ERROR after entry {short_name(symbol)}: {e}")
             del watch_candidates[symbol]
         return
 
@@ -2669,6 +2674,11 @@ def try_entry_for_candidate(symbol):
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "BUY"})
             send_entry_alert(symbol, trade, oi_rows, bias)
+            try:
+                send_live_dashboard_image(cards=_live_dashboard_cards(), caption="Live Dashboard")
+                _mark_live_dashboard_sent()
+            except Exception as e:
+                log(f"LIVE DASHBOARD ERROR after entry {short_name(symbol)}: {e}")
             del watch_candidates[symbol]
             return
 
@@ -2695,6 +2705,11 @@ def try_entry_for_candidate(symbol):
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
             send_entry_alert(symbol, trade, oi_rows, bias)
+            try:
+                send_live_dashboard_image(cards=_live_dashboard_cards(), caption="Live Dashboard")
+                _mark_live_dashboard_sent()
+            except Exception as e:
+                log(f"LIVE DASHBOARD ERROR after entry {short_name(symbol)}: {e}")
             del watch_candidates[symbol]
             return
 
@@ -2725,6 +2740,11 @@ def try_entry_for_candidate(symbol):
             active_trades[symbol] = trade
             eod_stats["entries"].append({"symbol": short_name(symbol), "strategy": strategy, "side": "SELL"})
             send_entry_alert(symbol, trade, oi_rows, bias)
+            try:
+                send_live_dashboard_image(cards=_live_dashboard_cards(), caption="Live Dashboard")
+                _mark_live_dashboard_sent()
+            except Exception as e:
+                log(f"LIVE DASHBOARD ERROR after entry {short_name(symbol)}: {e}")
             del watch_candidates[symbol]
 
 # ================= LIVE TRADE TRACKING =================
@@ -3036,6 +3056,7 @@ def run_live_day():
 
         nowt = now_ist().time()
         now_ts = now_epoch()
+        dashboard_due = _dashboard_due(now_ts)
 
         if (not gapup_scan_done) and nowt >= dtime(9, 20):
             scan_gapup_once()
@@ -3057,8 +3078,7 @@ def run_live_day():
             if sym in closed_for_day or sym in active_trades:
                 continue
             try:
-                force_oi = _should_send_live_dashboard()
-                refresh_watch_candidate_snapshot(sym, force_oi=force_oi)
+                refresh_watch_candidate_snapshot(sym, force_oi=dashboard_due)
                 try_entry_for_candidate(sym)
             except Exception as e:
                 log(f"ENTRY ERROR {sym}: {e}")
@@ -3072,7 +3092,7 @@ def run_live_day():
             time.sleep(max(2, LTP_INTERVAL_PER_STOCK))
 
         try:
-            if _should_send_live_dashboard():
+            if dashboard_due:
                 # refresh watchlist OI snapshots slowly before sending dashboard
                 for sym in list(watch_candidates.keys()):
                     if sym in closed_for_day or sym in active_trades:
@@ -3085,6 +3105,7 @@ def run_live_day():
                 live_cards = _live_dashboard_cards()
                 if live_cards:
                     send_live_dashboard_image(cards=live_cards, caption="Live Dashboard")
+                    _mark_live_dashboard_sent(now_epoch())
         except Exception as e:
             log(f"LIVE DASHBOARD REFRESH ERROR: {e}")
 
@@ -4371,11 +4392,19 @@ def _live_dashboard_cards():
     return cards
 
 
-def _should_send_live_dashboard():
+def _dashboard_due(now_ts=None):
+    now_ts = now_epoch() if now_ts is None else now_ts
+    return (now_ts - last_live_dashboard_sent) >= LIVE_DASHBOARD_INTERVAL_SECONDS
+
+
+def _mark_live_dashboard_sent(now_ts=None):
     global last_live_dashboard_sent
-    now_ts = now_epoch()
-    if now_ts - last_live_dashboard_sent >= LIVE_DASHBOARD_INTERVAL_SECONDS:
-        last_live_dashboard_sent = now_ts
+    last_live_dashboard_sent = now_epoch() if now_ts is None else now_ts
+
+
+def _should_send_live_dashboard():
+    if _dashboard_due():
+        _mark_live_dashboard_sent()
         return True
     return False
 
