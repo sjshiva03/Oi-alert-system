@@ -106,6 +106,9 @@ LIVE_DASHBOARD_INTERVAL_SECONDS = int(os.getenv("LIVE_DASHBOARD_INTERVAL_SECONDS
 ONLY_STRONG_SIGNALS = (os.getenv("ONLY_STRONG_SIGNALS", "true").strip().lower() == "true")
 FORCE_SAMPLE_MODE = (os.getenv("FORCE_SAMPLE_MODE", "false").strip().lower() == "true")
 AUTO_SEND_SAMPLE_TO_TELEGRAM = (os.getenv("AUTO_SEND_SAMPLE_TO_TELEGRAM", "false").strip().lower() == "true")
+AFTER_MARKET_INSIDE15_DEBUG = (os.getenv("AFTER_MARKET_INSIDE15_DEBUG", "false").strip().lower() == "true")
+USE_MANUAL_HOLIDAYS = (os.getenv("USE_MANUAL_HOLIDAYS", "false").strip().lower() == "true")
+FORCE_TODAY_LIVE = (os.getenv("FORCE_TODAY_LIVE", "false").strip().lower() == "true")
 
 # Pivot filter
 PIVOT_LTP_FILTER_PCT = float(os.getenv("PIVOT_LTP_FILTER_PCT", "3.0")) / 100.0
@@ -1601,7 +1604,18 @@ def dedupe_candles_by_ts(candles):
     return out
 
 def is_market_day(dt_obj):
-    return dt_obj.weekday() < 5 and dt_obj.strftime("%Y-%m-%d") not in MANUAL_HOLIDAYS
+    day_str = dt_obj.strftime("%Y-%m-%d")
+    if FORCE_TODAY_LIVE and day_str == now_ist().strftime("%Y-%m-%d"):
+        return dt_obj.weekday() < 5
+    if dt_obj.weekday() >= 5:
+        return False
+    if not USE_MANUAL_HOLIDAYS:
+        return True
+    try:
+        holiday_set = {str(x).strip() for x in MANUAL_HOLIDAYS if str(x).strip()}
+    except Exception:
+        holiday_set = set()
+    return day_str not in holiday_set
 
 def is_market_open():
     now = now_ist()
@@ -4550,7 +4564,8 @@ def main():
         f"Analysis day={analysis_date_str()}\n"
         f"Manual prev working day={manual_previous_working_date_str() or 'AUTO'}\n"
         f"WATCHLIST={WATCHLIST_RAW}\n"
-        f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X"
+        f"Risk={RISK_AMOUNT} | Leverage={LEVERAGE}X\n"
+        f"USE_MANUAL_HOLIDAYS={USE_MANUAL_HOLIDAYS} | FORCE_TODAY_LIVE={FORCE_TODAY_LIVE}"
     )
 
     while True:
@@ -4568,7 +4583,7 @@ def main():
             continue
 
         if not is_market_day(now):
-            log("Holiday/Weekend outside after-market window. Sleeping until next market open.")
+            log(f"Holiday/Weekend outside after-market window. date={now.strftime('%Y-%m-%d')} weekday={now.weekday()} holidays={sorted([str(x).strip() for x in MANUAL_HOLIDAYS])} use_manual={USE_MANUAL_HOLIDAYS}")
             sleep_until_next_market_open()
             continue
 
