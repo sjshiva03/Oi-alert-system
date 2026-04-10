@@ -319,23 +319,43 @@ def send_telegram_photo(image_bytes: bytes, caption: str) -> None:
 # Dashboard image
 # =========================
 def _load_font(size: int, bold: bool = False):
-    candidates = []
+    import os
+    from PIL import ImageFont
+
+    base_dir = os.path.dirname(__file__)
+    fonts_dir = os.path.join(base_dir, "fonts")
+
+    # ✅ Priority 1: YOUR GitHub fonts
     if bold:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        custom_paths = [
+            os.path.join(fonts_dir, "DejaVuSans-Bold.ttf"),
         ]
     else:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        custom_paths = [
+            os.path.join(fonts_dir, "DejaVuSans.ttf"),
         ]
-    for p in candidates:
-        if os.path.exists(p):
-            try:
+
+    for p in custom_paths:
+        try:
+            if os.path.exists(p):
+                print(f"✅ Using custom font: {p}")
                 return ImageFont.truetype(p, size)
-            except Exception:
-                pass
+        except Exception as e:
+            print(f"Font load failed: {p} -> {e}")
+
+    # ⚠️ fallback (Railway system fonts)
+    fallback = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+    for p in fallback:
+        try:
+            if os.path.exists(p):
+                return ImageFont.truetype(p, size)
+        except:
+            pass
+
     return ImageFont.load_default()
 
 
