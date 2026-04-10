@@ -1,9 +1,9 @@
-
 import os
 import io
 import json
 import time
-from datetime import datetime, timedelta, timezone, date
+from math import floor
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -19,8 +19,8 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 ENTRY_ZONE_PERCENT = float(os.getenv("ENTRY_ZONE_PERCENT", "2.0"))
 RATE_LIMIT_SLEEP = float(os.getenv("RATE_LIMIT_SLEEP", "1.2"))
 ONLY_MARKET_HOURS = os.getenv("ONLY_MARKET_HOURS", "true").strip().lower() == "true"
-MARKET_START = (9, 15)
-MARKET_END = (15, 30)
+MARKET_START = tuple(int(x) for x in os.getenv("MARKET_START", "9,5").split(","))
+MARKET_END = tuple(int(x) for x in os.getenv("MARKET_END", "15,30").split(","))
 STRIKECOUNT = int(os.getenv("STRIKECOUNT", "6"))
 OI_CONFIRMATION_REQUIRED = os.getenv("OI_CONFIRMATION_REQUIRED", "false").strip().lower() == "true"
 TELEGRAM_SEND_MODE = os.getenv("TELEGRAM_SEND_MODE", "photo").strip().lower() or "photo"
@@ -32,6 +32,11 @@ ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", str(6 * 60 * 60
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 FYERS_RETRY_COUNT = int(os.getenv("FYERS_RETRY_COUNT", "3"))
 MANUAL_HOLIDAYS_RAW = (os.getenv("MANUAL_HOLIDAYS") or "").strip()
+MULTI_CARD_SIZE = int(os.getenv("MULTI_CARD_SIZE", "6"))
+SEND_MULTI_CARD_SUMMARY = os.getenv("SEND_MULTI_CARD_SUMMARY", "true").strip().lower() == "true"
+TRACK_SL_TARGET = os.getenv("TRACK_SL_TARGET", "true").strip().lower() == "true"
+SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.0")) / 100.0
+USE_STRONGER_DOJI = os.getenv("USE_STRONGER_DOJI", "true").strip().lower() == "true"
 
 CLIENT_ID = (os.getenv("FYERS_CLIENT_ID") or "").strip()
 ACCESS_TOKEN = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
@@ -39,6 +44,7 @@ TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
 MANUAL_HOLIDAYS = {x.strip() for x in MANUAL_HOLIDAYS_RAW.split(",") if x.strip()}
+
 
 # =========================
 # Utilities
@@ -56,19 +62,6 @@ def short_symbol(symbol: str) -> str:
     for suf in ["-EQ", "-BE", "-BZ", "-BL", "-SM", "-INDEX"]:
         s = s.replace(suf, "")
     return s.strip()
-
-
-def in_market_hours() -> bool:
-    if not ONLY_MARKET_HOURS:
-        return True
-    n = now_ist()
-    if n.weekday() >= 5:
-        return False
-    if n.strftime("%Y-%m-%d") in MANUAL_HOLIDAYS:
-        return False
-    start = n.replace(hour=MARKET_START[0], minute=MARKET_START[1], second=0, microsecond=0)
-    end = n.replace(hour=MARKET_END[0], minute=MARKET_END[1], second=0, microsecond=0)
-    return start <= n <= end
 
 
 def fmt_ist(ts: Any, fmt: str = "%d-%m-%Y %H:%M IST") -> str:
@@ -108,6 +101,54 @@ def ensure_float(x: Any, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return default
+
+
+def market_window_for_day(day: datetime) -> Tuple[datetime, datetime]:
+    start = day.replace(hour=MARKET_START[0], minute=MARKET_START[1], second=0, microsecond=0)
+    end = day.replace(hour=MARKET_END[0], minute=MARKET_END[1], second=0, microsecond=0)
+    return start, end
+
+
+def is_trading_day(day: datetime) -> bool:
+    return day.weekday() < 5 and day.strftime("%Y-%m-%d") not in MANUAL_HOLIDAYS
+
+
+def in_market_hours() -> bool:
+    if not ONLY_MARKET_HOURS:
+        return True
+    n = now_ist()
+    if not is_trading_day(n):
+        return False
+    start, end = market_window_for_day(n)
+    return start <= n <= end
+
+
+def next_market_start(after: Optional[datetime] = None) -> datetime:
+    n = after or now_ist()
+    check = n
+    while True:
+        if is_trading_day(check):
+            start, end = market_window_for_day(check)
+            if check <= start:
+                return start
+            if start <= check <= end:
+                return check
+        check = (check + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def wait_until_market_start() -> None:
+    if not ONLY_MARKET_HOURS:
+        return
+    while True:
+        n = now_ist()
+        if in_market_hours():
+            return
+        nxt = next_market_start(n)
+        seconds = max(1, int((nxt - n).total_seconds()))
+        mins = max(1, floor(seconds / 60))
+        log(f"Waiting for next market session @ {nxt.strftime('%d-%m-%Y %H:%M IST')} ({mins} min)")
+        time.sleep(min(seconds, 300))
+
 
 # =========================
 # Fyers
@@ -262,8 +303,9 @@ def derive_oi_bias(rows: List[Dict[str, Any]], underlying_ltp: Optional[float]) 
         return "Bearish Weak"
     return "Neutral"
 
+
 # =========================
-# HA entry logic
+# Entry logic
 # =========================
 def to_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
     ha = df.copy().reset_index(drop=True)
@@ -278,6 +320,8 @@ def to_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def is_doji(row: pd.Series, max_body_ratio: float = 0.20) -> bool:
+    if not USE_STRONGER_DOJI:
+        max_body_ratio = 0.35
     rng = float(row["ha_high"] - row["ha_low"])
     if rng <= 0:
         return False
@@ -327,6 +371,7 @@ def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_
 
     return None, None, debug
 
+
 # =========================
 # Telegram
 # =========================
@@ -356,36 +401,24 @@ def send_telegram_photo(image_bytes: bytes, caption: str) -> None:
         log(f"Telegram photo error: {e}")
         send_telegram_text(caption)
 
+
 # =========================
 # Dashboard image
 # =========================
 def _load_font(size: int, bold: bool = False):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     fonts_dir = os.path.join(base_dir, "fonts")
-    custom_paths = []
-    if bold:
-        custom_paths = [os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")]
-    else:
-        custom_paths = [os.path.join(fonts_dir, "DejaVuSans.ttf")]
-
+    custom_paths = [os.path.join(fonts_dir, "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")]
     for p in custom_paths:
         try:
             if os.path.exists(p):
                 return ImageFont.truetype(p, size)
         except Exception as e:
             log(f"Custom font load failed {p}: {e}")
-
-    fallback = []
-    if bold:
-        fallback += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        fallback += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
+    fallback = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
     for p in fallback:
         try:
             if os.path.exists(p):
@@ -400,12 +433,31 @@ def draw_cell(draw: ImageDraw.ImageDraw, x1: int, y1: int, x2: int, y2: int, tex
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    if align == "left":
-        tx = x1 + 12
-    else:
-        tx = x1 + (x2 - x1 - tw) / 2
+    tx = x1 + 12 if align == "left" else x1 + (x2 - x1 - tw) / 2
     ty = y1 + (y2 - y1 - th) / 2 - 1
     draw.text((tx, ty), text, font=font, fill=text_fill)
+
+
+def calculate_confidence(setup: Dict[str, Any], d_price: float, entry_price: float, oi_bias: str) -> int:
+    score = 50
+    diff_pct = abs(entry_price - d_price) / d_price * 100 if d_price else 100
+    if diff_pct <= 0.25:
+        score += 15
+    elif diff_pct <= 0.50:
+        score += 10
+    elif diff_pct <= 1.00:
+        score += 6
+    if str(setup.get("touched_d_source", "")).lower().startswith("fib"):
+        score += 5
+    p = str(setup.get("pattern", "")).lower()
+    b = oi_bias.lower()
+    if p == "bullish" and "bullish" in b:
+        score += 20 if b == "bullish" else 12
+    elif p == "bearish" and "bearish" in b:
+        score += 20 if b == "bearish" else 12
+    elif b == "neutral":
+        score += 4
+    return max(0, min(95, score))
 
 
 def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time: datetime, oisnap: Dict[str, Any], startup_preview: bool = False) -> bytes:
@@ -417,7 +469,6 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
     red = (198, 58, 58)
     blue = (48, 97, 184)
     white = (255, 255, 255)
-    soft = (255, 255, 255)
     border = (210, 210, 210)
     table_head_fill = (236, 240, 247)
 
@@ -430,26 +481,26 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
     f_stamp = _load_font(18, False)
     f_footer = _load_font(16, False)
 
-    # Header
     draw.rounded_rectangle((28, 22, IMAGE_WIDTH - 28, 105), radius=24, fill=white, outline=border, width=2)
     draw.text((58, 45), "N PATTERN ENTRY ALERT", font=f_title, fill=blue)
     stamp = now_ist().strftime("%d-%m-%Y %H:%M IST")
     stamp_bbox = draw.textbbox((0, 0), stamp, font=f_stamp)
     draw.text((IMAGE_WIDTH - 55 - (stamp_bbox[2] - stamp_bbox[0]), 48), stamp, font=f_stamp, fill=black)
 
-    # Info panel, 5 left + 5 right
     box_top = 132
     box_bottom = 400
-    draw.rounded_rectangle((28, box_top, IMAGE_WIDTH - 28, box_bottom), radius=24, fill=soft, outline=border, width=2)
+    draw.rounded_rectangle((28, box_top, IMAGE_WIDTH - 28, box_bottom), radius=24, fill=white, outline=border, width=2)
 
     touched_d = ensure_float(setup.get("touched_d_price") or setup.get("fib_d"))
     active_d = ensure_float(setup.get("active_d"))
     ltp_alert = ensure_float(setup.get("ltp_at_alert") or setup.get("ltp"))
     pattern = str(setup.get("pattern", ""))
-    target_px = entry_price * 1.02 if pattern.lower() == "bullish" else entry_price * 0.98
+    target_px = ensure_float(setup.get("target_price") or (entry_price * (1.02 if pattern.lower() == "bullish" else 0.98)))
+    sl_px = ensure_float(setup.get("sl_price") or active_d)
     entry_time_str = entry_time.astimezone(IST).strftime("%d-%m-%Y %H:%M")
     oi_bias = str(oisnap.get("bias", "NA"))
     d_source = str(setup.get("touched_d_source") or "")
+    confidence = calculate_confidence(setup, touched_d, entry_price, oi_bias)
 
     left_items = [
         ("Stock", short_symbol(setup.get("symbol", "")), black),
@@ -463,7 +514,7 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
         ("Target (+2%)", f"{target_px:.2f}", green),
         ("Entry Time", entry_time_str, black),
         ("OI Bias", oi_bias, green if "Bullish" in oi_bias else red if "Bearish" in oi_bias else black),
-        ("LTP", f"{ltp_alert:.2f}" if ltp_alert else "-", black),
+        ("Confidence", f"{confidence}%", blue),
     ]
 
     y0 = box_top + 26
@@ -479,7 +530,6 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
         draw.text((right_label_x, y), f"{lab}:", font=f_label, fill=black)
         draw.text((right_value_x, y), val, font=f_value, fill=col)
 
-    # OI section
     oi_top = 432
     oi_bottom = IMAGE_HEIGHT - 38
     draw.rounded_rectangle((28, oi_top, IMAGE_WIDTH - 28, oi_bottom), radius=24, fill=white, outline=border, width=2)
@@ -488,7 +538,6 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
     rows = oisnap.get("rows", [])[:11]
     tx1 = 52
     ty1 = oi_top + 62
-    table_width = IMAGE_WIDTH - 104
     row_h = 62
     headers = ["Strike", "CE", "CE OI Chg", "PE", "PE OI Chg", "CE Vol", "PE Vol"]
     widths = [170, 170, 240, 170, 240, 180, 180]
@@ -496,11 +545,9 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
     for w in widths:
         xs.append(xs[-1] + w)
 
-    # Header row
     for j, h in enumerate(headers):
         draw_cell(draw, xs[j], ty1, xs[j+1], ty1 + row_h, h, f_table_h, fill=table_head_fill, outline=border, text_fill=blue)
 
-    # Data rows
     base_y = ty1 + row_h
     for idx, r in enumerate(rows):
         y1 = base_y + idx * row_h
@@ -532,8 +579,68 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
     img.save(bio, format="PNG")
     return bio.getvalue()
 
+
+def build_multi_card_image(cards: List[Dict[str, Any]]) -> bytes:
+    width = IMAGE_WIDTH
+    height = max(980, 280 + ((len(cards[:MULTI_CARD_SIZE]) + 2) // 3) * 330)
+    img = Image.new("RGB", (width, height), (245, 245, 245))
+    draw = ImageDraw.Draw(img)
+    white = (255, 255, 255)
+    border = (210, 210, 210)
+    black = (18, 18, 18)
+    green = (28, 148, 82)
+    red = (198, 58, 58)
+    blue = (48, 97, 184)
+
+    f_title = _load_font(34, True)
+    f_card_title = _load_font(24, True)
+    f_label = _load_font(18, True)
+    f_value = _load_font(18, False)
+
+    draw.rounded_rectangle((24, 18, width - 24, 96), radius=24, fill=white, outline=border, width=2)
+    draw.text((50, 42), "N PATTERN LIVE ENTRIES", font=f_title, fill=blue)
+    stamp = now_ist().strftime("%d-%m-%Y %H:%M IST")
+    sb = draw.textbbox((0, 0), stamp, font=f_value)
+    draw.text((width - 50 - (sb[2]-sb[0]), 45), stamp, font=f_value, fill=black)
+
+    cards = cards[:MULTI_CARD_SIZE]
+    left = 28
+    top = 122
+    gap_x = 24
+    gap_y = 24
+    card_w = int((width - left * 2 - gap_x * 2) / 3)
+    card_h = 300
+
+    for idx, c in enumerate(cards):
+        row = idx // 3
+        col = idx % 3
+        x1 = left + col * (card_w + gap_x)
+        y1 = top + row * (card_h + gap_y)
+        x2 = x1 + card_w
+        y2 = y1 + card_h
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=20, fill=white, outline=border, width=2)
+        draw.text((x1 + 20, y1 + 18), short_symbol(c.get("symbol", "")), font=f_card_title, fill=black)
+        draw.text((x1 + 20, y1 + 55), str(c.get("pattern", "")), font=f_value, fill=blue)
+        y = y1 + 92
+        items = [
+            ("Entry", f"{ensure_float(c.get('entry_price')):.2f}", green),
+            ("SL", f"{ensure_float(c.get('sl_price')):.2f}", red),
+            ("Target", f"{ensure_float(c.get('target_price')):.2f}", green),
+            ("OI", str(c.get('oi_bias', 'NA')), green if 'Bullish' in str(c.get('oi_bias','')) else red if 'Bearish' in str(c.get('oi_bias','')) else black),
+            ("Conf", f"{int(c.get('confidence_score', 0))}%", blue),
+        ]
+        for lab, val, color in items:
+            draw.text((x1 + 20, y), f"{lab}:", font=f_label, fill=black)
+            draw.text((x1 + 150, y), val, font=f_value, fill=color)
+            y += 36
+
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    return bio.getvalue()
+
+
 # =========================
-# State and setup loading
+# Setup state
 # =========================
 def load_setups() -> List[Dict[str, Any]]:
     data: List[Dict[str, Any]] = []
@@ -542,10 +649,30 @@ def load_setups() -> List[Dict[str, Any]]:
             r = requests.get(GITHUB_JSON_URL, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             data = r.json()
+            # merge lightweight github data with local runtime state
+            local_map = {}
+            if os.path.exists(JSON_FILE):
+                try:
+                    with open(JSON_FILE, "r", encoding="utf-8") as f:
+                        local_items = json.load(f)
+                    for item in local_items:
+                        key = f"{item.get('symbol')}|{item.get('pattern')}|{item.get('fib_d')}|{item.get('trend_d')}"
+                        local_map[key] = item
+                except Exception:
+                    pass
+            merged = []
+            for item in data:
+                key = f"{item.get('symbol')}|{item.get('pattern')}|{item.get('fib_d')}|{item.get('trend_d')}"
+                if key in local_map:
+                    merged_item = dict(local_map[key])
+                    merged_item.update(item)
+                    merged.append(merged_item)
+                else:
+                    merged.append(item)
             with open(JSON_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            log(f"Loaded {len(data)} setups from GitHub JSON")
-            return data
+                json.dump(merged, f, indent=2, ensure_ascii=False)
+            log(f"Loaded {len(merged)} setups from GitHub JSON")
+            return merged
         except Exception as e:
             log(f"GitHub JSON refresh failed: {e}; falling back to local file")
 
@@ -562,9 +689,7 @@ def save_setups(items: List[Dict[str, Any]]) -> None:
     with open(JSON_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2, ensure_ascii=False)
 
-# =========================
-# Startup sample
-# =========================
+
 def maybe_send_startup_sample() -> None:
     if not SHOW_STARTUP_SAMPLE:
         return
@@ -586,8 +711,8 @@ def maybe_send_startup_sample() -> None:
                 {"strike": 550, "ce_ltp": 14.2, "ce_oich": -1200, "pe_ltp": 4.1, "pe_oich": 1800, "ce_vol": 4200, "pe_vol": 6300},
                 {"strike": 555, "ce_ltp": 10.8, "ce_oich": -900,  "pe_ltp": 5.6, "pe_oich": 2200, "ce_vol": 5100, "pe_vol": 7400},
                 {"strike": 560, "ce_ltp": 7.4,  "ce_oich": -450,  "pe_ltp": 7.9, "pe_oich": 2600, "ce_vol": 6800, "pe_vol": 8900},
-                {"strike": 565, "ce_ltp": 4.8,  "ce_oich": 200,   "pe_ltp": 11.7,"pe_oich": 1500, "ce_vol": 3500, "pe_vol": 5600},
-                {"strike": 570, "ce_ltp": 3.1,  "ce_oich": 600,   "pe_ltp": 16.4,"pe_oich": 900,  "ce_vol": 2100, "pe_vol": 3900},
+                {"strike": 565, "ce_ltp": 4.8,  "ce_oich": 200,   "pe_ltp": 11.7, "pe_oich": 1500, "ce_vol": 3500, "pe_vol": 5600},
+                {"strike": 570, "ce_ltp": 3.1,  "ce_oich": 600,   "pe_ltp": 16.4, "pe_oich": 900,  "ce_vol": 2100, "pe_vol": 3900},
             ],
         }
         entry_time = now_ist()
@@ -602,6 +727,7 @@ def maybe_send_startup_sample() -> None:
         log("Startup preview sent once")
     except Exception as e:
         log(f"Startup sample failed: {e}")
+
 
 # =========================
 # Main monitor
@@ -645,52 +771,64 @@ def in_cooldown(setup: Dict[str, Any]) -> bool:
         return False
 
 
-def process_setup(setup: Dict[str, Any]) -> Dict[str, Any]:
+def compute_sl_target(setup: Dict[str, Any], entry_price: float) -> Tuple[float, float]:
+    active_d = ensure_float(setup.get("active_d") or setup.get("touched_d_price") or setup.get("fib_d"))
+    pattern = str(setup.get("pattern", "Bullish")).lower()
+    if pattern == "bullish":
+        sl = active_d * (1.0 - SL_BUFFER_PCT)
+        target = entry_price * 1.02
+    else:
+        sl = active_d * (1.0 + SL_BUFFER_PCT)
+        target = entry_price * 0.98
+    return round(sl, 2), round(target, 2)
+
+
+def process_setup(setup: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     symbol = str(setup.get("symbol") or "")
     if not symbol:
-        return setup
+        return setup, None
 
     setup["last_checked_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    if setup.get("entry_found") and TRACK_SL_TARGET:
+        return setup, None
     if setup.get("alert_sent") and in_cooldown(setup):
         setup["last_debug_reason"] = "Cooldown active"
-        return setup
+        return setup, None
 
     ltp = get_ltp(symbol)
     if ltp is None:
         setup["last_debug_reason"] = "LTP missing"
         log(f"LTP missing for {symbol}")
-        return setup
+        return setup, None
 
     d_price, source = detect_touch(setup, ltp)
     if d_price is None:
         setup["last_debug_reason"] = f"No D touch | LTP={ltp}"
-        log(f"{symbol}: no D touch | LTP={ltp}")
-        return setup
+        return setup, None
 
     log(f"{symbol}: touched {source} D @ {d_price} | LTP={ltp}")
 
     oisnap = fetch_option_chain_snapshot(symbol)
     bias = str(oisnap.get("bias", "NA"))
-    log(f"{symbol}: OI bias={bias}")
     if not oi_allows_entry(str(setup.get("pattern", "")), bias):
-        log(f"{symbol}: OI rejected entry")
         setup["oi_bias"] = bias
         setup["last_debug_reason"] = "OI rejected entry"
-        return setup
+        return setup, None
 
     df = fetch_history(symbol, resolution=str(setup.get("entry_tf") or "15"), days=5)
     if df is None or df.empty:
-        log(f"{symbol}: lower timeframe history unavailable")
         setup["last_debug_reason"] = "Lower timeframe history unavailable"
-        return setup
+        return setup, None
 
     entry_price, entry_time, debug = check_entry_after_touch(df, d_price, str(setup.get("pattern", "Bullish")), ENTRY_ZONE_PERCENT)
     setup["oi_bias"] = bias
     setup["last_debug_reason"] = debug.get("reason", "")
 
     if not entry_price or not entry_time:
-        log(f"{symbol}: no entry found")
-        return setup
+        return setup, None
+
+    sl_price, target_price = compute_sl_target(setup, float(entry_price))
+    confidence = calculate_confidence(setup, d_price, float(entry_price), bias)
 
     setup["alert_sent"] = True
     setup["entry_found"] = True
@@ -703,48 +841,132 @@ def process_setup(setup: Dict[str, Any]) -> Dict[str, Any]:
     setup["touched_d_price"] = round(float(d_price), 2)
     setup["last_alert_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
     setup["cooldown_seconds"] = ALERT_COOLDOWN_SECONDS
+    setup["sl_price"] = sl_price
+    setup["target_price"] = target_price
+    setup["confidence_score"] = confidence
+    setup["sl_alert_sent"] = False
+    setup["target_alert_sent"] = False
 
-    caption = (
-        f"🔥 N PATTERN ENTRY\n"
-        f"Stock: {short_symbol(symbol)}\n"
-        f"Pattern: {setup.get('pattern', '')}\n"
-        f"D: {source} ({d_price:.2f})\n"
-        f"Entry: {entry_price:.2f}\n"
-        f"Time: {entry_time.astimezone(IST).strftime('%d-%m-%Y %H:%M IST')}\n"
-        f"OI Bias: {bias}"
-    )
+    entry_card = {
+        "symbol": symbol,
+        "pattern": setup.get("pattern", ""),
+        "entry_price": setup["entry_price"],
+        "sl_price": sl_price,
+        "target_price": target_price,
+        "oi_bias": bias,
+        "confidence_score": confidence,
+    }
+    return setup, entry_card
 
-    if TELEGRAM_SEND_MODE == "text":
-        send_telegram_text(caption)
-    else:
-        image_bytes = build_dashboard_image(setup, float(entry_price), entry_time, oisnap)
-        send_telegram_photo(image_bytes, caption)
 
-    log(f"{symbol}: alert sent")
+def track_open_trade(setup: Dict[str, Any]) -> Dict[str, Any]:
+    if not TRACK_SL_TARGET:
+        return setup
+    if not setup.get("entry_found"):
+        return setup
+    if setup.get("target_alert_sent") or setup.get("sl_alert_sent"):
+        return setup
+
+    symbol = str(setup.get("symbol") or "")
+    pattern = str(setup.get("pattern") or "Bullish")
+    entry_price = ensure_float(setup.get("entry_price"))
+    target_price = ensure_float(setup.get("target_price"))
+    sl_price = ensure_float(setup.get("sl_price"))
+    if not symbol or not entry_price or not target_price or not sl_price:
+        return setup
+
+    ltp = get_ltp(symbol)
+    if ltp is None:
+        return setup
+
+    bullish = pattern.lower() == "bullish"
+    target_hit = ltp >= target_price if bullish else ltp <= target_price
+    sl_hit = ltp <= sl_price if bullish else ltp >= sl_price
+
+    if target_hit:
+        msg = (
+            f"✅ TARGET HIT\n"
+            f"Stock: {short_symbol(symbol)}\n"
+            f"Pattern: {pattern}\n"
+            f"Entry: {entry_price:.2f}\n"
+            f"Target: {target_price:.2f}\n"
+            f"LTP: {ltp:.2f}"
+        )
+        send_telegram_text(msg)
+        setup["target_alert_sent"] = True
+        setup["status"] = "target_hit"
+        setup["exit_price"] = round(float(ltp), 2)
+        setup["exit_time"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+        log(f"{symbol}: target alert sent")
+    elif sl_hit:
+        msg = (
+            f"❌ STOPLOSS HIT\n"
+            f"Stock: {short_symbol(symbol)}\n"
+            f"Pattern: {pattern}\n"
+            f"Entry: {entry_price:.2f}\n"
+            f"SL: {sl_price:.2f}\n"
+            f"LTP: {ltp:.2f}"
+        )
+        send_telegram_text(msg)
+        setup["sl_alert_sent"] = True
+        setup["status"] = "sl_hit"
+        setup["exit_price"] = round(float(ltp), 2)
+        setup["exit_time"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+        log(f"{symbol}: stoploss alert sent")
+
     return setup
 
 
+def maybe_send_entry_alerts(entry_cards: List[Dict[str, Any]]) -> None:
+    if not entry_cards:
+        return
+    if SEND_MULTI_CARD_SUMMARY and len(entry_cards) > 1 and TELEGRAM_SEND_MODE != "text":
+        image_bytes = build_multi_card_image(entry_cards)
+        caption = f"🔥 N PATTERN LIVE ENTRIES | Count: {len(entry_cards[:MULTI_CARD_SIZE])}"
+        send_telegram_photo(image_bytes, caption)
+        return
+
+    for c in entry_cards:
+        caption = (
+            f"🔥 N PATTERN ENTRY\n"
+            f"Stock: {short_symbol(c['symbol'])}\n"
+            f"Pattern: {c['pattern']}\n"
+            f"Entry: {c['entry_price']:.2f}\n"
+            f"SL: {c['sl_price']:.2f}\n"
+            f"Target: {c['target_price']:.2f}\n"
+            f"OI Bias: {c['oi_bias']}\n"
+            f"Confidence: {int(c['confidence_score'])}%"
+        )
+        send_telegram_text(caption)
+
+
 def main() -> None:
-    log("N Pattern Railway live monitor with OI + dashboard image started")
+    log("N Pattern Railway live monitor upgraded started")
     maybe_send_startup_sample()
+    wait_until_market_start()
     while True:
         try:
             if not in_market_hours():
-                log("Outside market hours / holiday; sleeping")
-                time.sleep(max(POLL_SECONDS, 60))
+                wait_until_market_start()
                 continue
 
             setups = load_setups()
             if not setups:
-                log("No setups found; sleeping")
+                log("No setups found")
                 time.sleep(max(POLL_SECONDS, 60))
                 continue
 
             updated = []
+            entry_cards: List[Dict[str, Any]] = []
             for setup in setups:
-                updated.append(process_setup(setup))
+                setup, card = process_setup(setup)
+                setup = track_open_trade(setup)
+                updated.append(setup)
+                if card:
+                    entry_cards.append(card)
                 time.sleep(RATE_LIMIT_SLEEP)
 
+            maybe_send_entry_alerts(entry_cards)
             save_setups(updated)
         except Exception as e:
             log(f"Main loop error: {e}")
