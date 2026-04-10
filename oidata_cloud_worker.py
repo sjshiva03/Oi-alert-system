@@ -319,44 +319,58 @@ def send_telegram_photo(image_bytes: bytes, caption: str) -> None:
 # Dashboard image
 # =========================
 def _load_font(size: int, bold: bool = False):
-    import os
-    from PIL import ImageFont
-
-    base_dir = os.path.dirname(__file__)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     fonts_dir = os.path.join(base_dir, "fonts")
-
-    # ✅ Priority 1: YOUR GitHub fonts
+    candidates = []
     if bold:
-        custom_paths = [
+        candidates += [
             os.path.join(fonts_dir, "DejaVuSans-Bold.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
         ]
     else:
-        custom_paths = [
+        candidates += [
             os.path.join(fonts_dir, "DejaVuSans.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         ]
-
-    for p in custom_paths:
-        try:
-            if os.path.exists(p):
-                print(f"✅ Using custom font: {p}")
+    for p in candidates:
+        if os.path.exists(p):
+            try:
                 return ImageFont.truetype(p, size)
-        except Exception as e:
-            print(f"Font load failed: {p} -> {e}")
-
-    # ⚠️ fallback (Railway system fonts)
-    fallback = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-
-    for p in fallback:
-        try:
-            if os.path.exists(p):
-                return ImageFont.truetype(p, size)
-        except:
-            pass
-
+            except Exception:
+                pass
     return ImageFont.load_default()
+
+
+def compact_indian(n: Any) -> str:
+    try:
+        x = float(n)
+    except Exception:
+        return str(n)
+    ax = abs(x)
+    sign = "-" if x < 0 else ""
+    if ax >= 10000000:
+        return f"{sign}{ax/10000000:.2f}Cr"
+    if ax >= 100000:
+        return f"{sign}{ax/100000:.2f}L"
+    if ax >= 1000:
+        return f"{sign}{ax/1000:.1f}K"
+    if float(x).is_integer():
+        return f"{int(x)}"
+    return f"{x:.2f}"
+
+
+def oi_change_text(n: Any) -> Tuple[str, Tuple[int, int, int]]:
+    try:
+        x = float(n)
+    except Exception:
+        return str(n), (0, 0, 0)
+    if x > 0:
+        return f"▲ {compact_indian(x)}", (20, 140, 70)
+    if x < 0:
+        return f"▼ {compact_indian(abs(x))}", (190, 40, 40)
+    return f"• {compact_indian(0)}", (90, 90, 90)
 
 
 
@@ -366,70 +380,107 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
 
     black = (0, 0, 0)
     green = (20, 140, 70)
-    red = (190, 40, 40)
     blue = (40, 90, 180)
     white = (255, 255, 255)
-    soft = (255, 255, 255)
     border = (210, 210, 210)
+    light_fill = (252, 252, 252)
+    header_fill = (238, 243, 252)
 
-    f_title = _load_font(46, True)
-    f_h = _load_font(30, True)
-    f_b = _load_font(24, False)
-    f_s = _load_font(20, False)
+    f_title = _load_font(30, True)
+    f_time = _load_font(16, False)
+    f_label = _load_font(18, True)
+    f_value = _load_font(18, False)
+    f_section = _load_font(20, True)
+    f_th = _load_font(18, True)
+    f_td = _load_font(17, False)
 
-    draw.rounded_rectangle((30, 25, IMAGE_WIDTH - 30, 120), radius=22, fill=white, outline=border, width=2)
-    draw.text((55, 42), "N PATTERN ENTRY ALERT", font=f_title, fill=blue)
-    draw.text((IMAGE_WIDTH - 360, 56), now_ist().strftime("%d-%m-%Y %H:%M IST"), font=f_s, fill=black)
+    draw.rounded_rectangle((30, 25, IMAGE_WIDTH - 30, 105), radius=20, fill=white, outline=border, width=2)
+    draw.text((55, 44), "N PATTERN ENTRY ALERT", font=f_title, fill=blue)
+    time_text = now_ist().strftime("%d-%m-%Y %H:%M IST")
+    tb = draw.textbbox((0, 0), time_text, font=f_time)
+    draw.text((IMAGE_WIDTH - 55 - (tb[2]-tb[0]), 52), time_text, font=f_time, fill=black)
 
-    draw.rounded_rectangle((30, 145, IMAGE_WIDTH - 30, 420), radius=22, fill=soft, outline=border, width=2)
-    y = 170
+    info_top, info_bottom = 130, 425
+    draw.rounded_rectangle((30, info_top, IMAGE_WIDTH - 30, info_bottom), radius=20, fill=white, outline=border, width=2)
+
     lines = [
-        ("Stock", short_symbol(setup["symbol"])),
-        ("Pattern", str(setup.get("pattern", ""))),
-        ("D Source", str(setup.get("touched_d_source") or "")),
-        ("Touched D", f"{float(setup.get('touched_d_price') or setup.get('fib_d') or 0):.2f}"),
-        ("Active D / Stop Basis", f"{float(setup.get('active_d') or 0):.2f}"),
-        ("Entry", f"{entry_price:.2f}"),
-        ("Target (+2%)", f"{entry_price * 1.02:.2f}" if str(setup.get("pattern", "")).lower() == "bullish" else f"{entry_price * 0.98:.2f}"),
-        ("Entry Time", entry_time.astimezone(IST).strftime("%d-%m-%Y %H:%M")),
-        ("OI Bias", str(oisnap.get("bias", "NA"))),
+        ("Stock", short_symbol(setup["symbol"]), black),
+        ("Pattern", str(setup.get("pattern", "")), black),
+        ("D Source", str(setup.get("touched_d_source") or ""), black),
+        ("Touched D", f"{float(setup.get('touched_d_price') or setup.get('fib_d') or 0):.2f}", black),
+        ("Active D / Stop Basis", f"{float(setup.get('active_d') or 0):.2f}", black),
+        ("Entry", f"{entry_price:.2f}", green),
+        ("Target (+2%)", f"{entry_price * 1.02:.2f}" if str(setup.get("pattern", "")).lower() == "bullish" else f"{entry_price * 0.98:.2f}", green),
+        ("Entry Time", entry_time.astimezone(IST).strftime("%d-%m-%Y %H:%M"), black),
+        ("OI Bias", str(oisnap.get("bias", "NA")), green if "bullish" in str(oisnap.get("bias", "")).lower() else black),
     ]
-    for label, value in lines:
-        draw.text((60, y), f"{label}: ", font=f_h, fill=black)
-        draw.text((420, y), value, font=f_h, fill=green if label in {"Entry", "Target (+2%)", "OI Bias"} else black)
-        y += 32
+    label_x = 55
+    value_x = 410
+    row_h = 31
+    y = 155
+    for label, value, fill in lines:
+        draw.text((label_x, y), f"{label}:", font=f_label, fill=black)
+        draw.text((value_x, y), value, font=f_value, fill=fill)
+        y += row_h
 
-    draw.rounded_rectangle((30, 450, IMAGE_WIDTH - 30, IMAGE_HEIGHT - 30), radius=22, fill=white, outline=border, width=2)
-    draw.text((55, 470), "OI SNAPSHOT", font=f_h, fill=black)
+    table_top = 455
+    draw.rounded_rectangle((30, table_top, IMAGE_WIDTH - 30, IMAGE_HEIGHT - 30), radius=20, fill=white, outline=border, width=2)
+    draw.text((55, table_top + 18), "OI SNAPSHOT", font=f_section, fill=black)
 
-    x_cols = [60, 250, 430, 620, 830, 1020, 1210]
-    headers = ["Strike", "CE", "CE OI Chg", "PE", "PE OI Chg", "CE Vol", "PE Vol"]
-    for x, h in zip(x_cols, headers):
-        draw.text((x, 520), h, font=f_b, fill=blue)
+    left = 50
+    top = table_top + 58
+    cols = [
+        ("Strike", 140),
+        ("CE", 140),
+        ("CE OI Chg", 190),
+        ("PE", 140),
+        ("PE OI Chg", 190),
+        ("CE Vol", 150),
+        ("PE Vol", 150),
+    ]
+    table_width = sum(w for _, w in cols)
+    row_height = 56
+    header_height = 44
 
-    row_y = 565
-    for r in oisnap.get("rows", [])[:5]:
-        strike = f"{float(r.get('strike', 0)):.0f}"
-        ce_ltp = f"{float(r.get('ce_ltp', 0)):.2f}"
-        ce_oich = f"{float(r.get('ce_oich', 0)):.0f}"
-        pe_ltp = f"{float(r.get('pe_ltp', 0)):.2f}"
-        pe_oich = f"{float(r.get('pe_oich', 0)):.0f}"
-        ce_vol = f"{float(r.get('ce_vol', 0)):.0f}"
-        pe_vol = f"{float(r.get('pe_vol', 0)):.0f}"
-        vals = [strike, ce_ltp, ce_oich, pe_ltp, pe_oich, ce_vol, pe_vol]
-        for i, (x, v) in enumerate(zip(x_cols, vals)):
-            fill = black
-            if i == 2:
-                fill = green if float(r.get("ce_oich", 0)) >= 0 else red
-            if i == 4:
-                fill = green if float(r.get("pe_oich", 0)) >= 0 else red
-            draw.text((x, row_y), v, font=f_b, fill=fill)
-        row_y += 50
+    draw.rounded_rectangle((left, top, left + table_width, top + header_height), radius=12, fill=header_fill, outline=border, width=1)
+    x = left
+    for header, width in cols:
+        draw.line((x, top, x, top + header_height + row_height * 5), fill=border, width=1)
+        hb = draw.textbbox((0, 0), header, font=f_th)
+        hx = x + (width - (hb[2]-hb[0])) / 2
+        hy = top + (header_height - (hb[3]-hb[1])) / 2 - 1
+        draw.text((hx, hy), header, font=f_th, fill=blue)
+        x += width
+    draw.line((left + table_width, top, left + table_width, top + header_height + row_height * 5), fill=border, width=1)
+
+    rows = oisnap.get("rows", [])[:5]
+    row_y = top + header_height
+    for idx, r in enumerate(rows):
+        fill_bg = light_fill if idx % 2 == 0 else white
+        draw.rectangle((left, row_y, left + table_width, row_y + row_height), fill=fill_bg, outline=border, width=1)
+        ce_chg_text, ce_chg_color = oi_change_text(r.get("ce_oich", 0))
+        pe_chg_text, pe_chg_color = oi_change_text(r.get("pe_oich", 0))
+        values = [
+            (f"{float(r.get('strike', 0)):.0f}", black),
+            (f"{float(r.get('ce_ltp', 0)):.2f}", black),
+            (ce_chg_text, ce_chg_color),
+            (f"{float(r.get('pe_ltp', 0)):.2f}", black),
+            (pe_chg_text, pe_chg_color),
+            (compact_indian(r.get('ce_vol', 0)), black),
+            (compact_indian(r.get('pe_vol', 0)), black),
+        ]
+        x = left
+        for (text_val, fill), (_, width) in zip(values, cols):
+            tb = draw.textbbox((0, 0), text_val, font=f_td)
+            tx = x + (width - (tb[2]-tb[0])) / 2
+            ty = row_y + (row_height - (tb[3]-tb[1])) / 2 - 1
+            draw.text((tx, ty), text_val, font=f_td, fill=fill)
+            x += width
+        row_y += row_height
 
     bio = io.BytesIO()
     img.save(bio, format="PNG")
     return bio.getvalue()
-
 
 def build_sample_setup() -> Dict[str, Any]:
     return {
