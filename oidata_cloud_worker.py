@@ -605,7 +605,7 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
 
     f_title = _load_font(50, True)
     f_header = _load_font(30, True)
-    f_label = _load_font(30, True)
+    f_label = _load_font(26, True)
     f_value = _load_font(30, False)
     f_table_h = _load_font(30, True)
     f_table_b = _load_font(30, False)
