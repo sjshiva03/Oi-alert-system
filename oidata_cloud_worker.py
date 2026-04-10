@@ -604,13 +604,13 @@ def build_dashboard_image(setup: Dict[str, Any], entry_price: float, entry_time:
     table_head_fill = (236, 240, 247)
 
     f_title = _load_font(50, True)
-    f_header = _load_font(25, True)
-    f_label = _load_font(23, True)
-    f_value = _load_font(22, False)
-    f_table_h = _load_font(24, True)
-    f_table_b = _load_font(22, False)
-    f_stamp = _load_font(20, False)
-    f_footer = _load_font(18, False)
+    f_header = _load_font(30, True)
+    f_label = _load_font(30, True)
+    f_value = _load_font(30, False)
+    f_table_h = _load_font(30, True)
+    f_table_b = _load_font(30, False)
+    f_stamp = _load_font(30, False)
+    f_footer = _load_font(30, False)
 
     # Header
     draw.rounded_rectangle((28, 22, IMAGE_WIDTH - 28, 105), radius=24, fill=white, outline=border, width=2)
