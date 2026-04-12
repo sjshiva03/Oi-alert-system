@@ -35,6 +35,11 @@ REAL_STARTUP_SAMPLE_SENT_FILE = os.getenv("REAL_STARTUP_SAMPLE_SENT_FILE", ".rea
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RATE_LIMIT_SLEEP = float(os.getenv("RATE_LIMIT_SLEEP", "0.8"))
+HA_BODY_PERCENT = float(os.getenv("HA_BODY_PERCENT", "30"))
+ENTRY_DISTANCE_PERCENT = float(os.getenv("ENTRY_DISTANCE_PERCENT", "0.5"))
+ENTRY_BUFFER_PERCENT = float(os.getenv("ENTRY_BUFFER_PERCENT", "0.1"))
+REQUIRE_OI_CONFIRM = os.getenv("REQUIRE_OI_CONFIRM", "true").strip().lower() == "true"
+STRONG_ZONE_REQUIRED = os.getenv("STRONG_ZONE_REQUIRED", "false").strip().lower() == "true"
 IMAGE_WIDTH = int(os.getenv("IMAGE_WIDTH", "1300"))
 IMAGE_HEIGHT = int(os.getenv("IMAGE_HEIGHT", "1100"))
 
@@ -348,19 +353,66 @@ def to_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
     return ha
 
 
-def is_doji(row: pd.Series, max_body_ratio: float = 0.30) -> bool:
+def is_doji(row: pd.Series, max_body_ratio: Optional[float] = None) -> bool:
     rng = float(row["ha_high"] - row["ha_low"])
     if rng <= 0:
         return False
     body = abs(float(row["ha_close"] - row["ha_open"]))
-    return (body / rng) <= max_body_ratio
+    ratio_limit = (HA_BODY_PERCENT / 100.0) if max_body_ratio is None else max_body_ratio
+    return (body / rng) <= ratio_limit
 
+
+
+def distance_percent(price_a: float, price_b: float) -> float:
+    if price_b == 0:
+        return 999.0
+    return abs(price_a - price_b) / abs(price_b) * 100.0
+
+
+def oi_filter_allows(pattern: str, oi_bias: str) -> bool:
+    if not REQUIRE_OI_CONFIRM:
+        return True
+    p = str(pattern or "").strip().lower()
+    b = str(oi_bias or "").strip().lower()
+    if p == "bullish":
+        return "bullish" in b
+    if p == "bearish":
+        return "bearish" in b
+    return True
+
+
+def entry_filter_allows(setup: Dict[str, Any], ltp: float, d_price: float, oi_bias: str) -> Tuple[bool, str]:
+    dist_pct = distance_percent(ltp, d_price)
+    if dist_pct > ENTRY_DISTANCE_PERCENT:
+        return False, f"Distance too far ({dist_pct:.2f}% > {ENTRY_DISTANCE_PERCENT:.2f}%)"
+
+    if STRONG_ZONE_REQUIRED:
+        strong_zone_count = int(ensure_float(setup.get("strong_zone_count"), 0))
+        if strong_zone_count < 2:
+            return False, "Strong zone required"
+
+    if not oi_filter_allows(str(setup.get("pattern", "")), oi_bias):
+        return False, f"OI mismatch ({oi_bias})"
+
+    return True, "OK"
+
+
+def is_open_low_pct(open_p: float, low_p: float) -> bool:
+    if low_p == 0:
+        return False
+    diff_pct = abs(open_p - low_p) / abs(low_p) * 100.0
+    return diff_pct <= ENTRY_BUFFER_PERCENT
+
+def is_open_high_pct(open_p: float, high_p: float) -> bool:
+    if high_p == 0:
+        return False
+    diff_pct = abs(open_p - high_p) / abs(high_p) * 100.0
+    return diff_pct <= ENTRY_BUFFER_PERCENT
 
 def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_entry_percent: float = 2.0) -> Tuple[Optional[float], Optional[str], str]:
     if df is None or df.empty or len(df) < 2:
         return None, None, "No candles"
     ha = to_heikin_ashi(df)
-    allowed = abs(d_price) * (max_entry_percent / 100.0)
 
     for i in range(len(ha) - 1):
         first = ha.iloc[i]
@@ -371,20 +423,22 @@ def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_
         else:
             nearest_scan_price = max(float(first["ha_open"]), float(first["ha_close"]), float(first["ha_high"]))
 
-        if abs(nearest_scan_price - d_price) > allowed:
-            return None, None, f"Moved beyond {max_entry_percent}% from D"
+        if abs(nearest_scan_price - d_price) > abs(d_price) * (ENTRY_DISTANCE_PERCENT / 100.0):
+            return None, None, f"Moved beyond {ENTRY_DISTANCE_PERCENT:.2f}% from D"
 
+        # Keep body/doji condition
         if not is_doji(first):
             continue
 
+        # Add open=low / open=high percentage condition
         if pattern.lower() == "bullish":
-            confirm_ok = abs(float(second["ha_open"]) - float(second["ha_low"])) <= max(0.2, d_price * 0.0005)
+            confirm_ok = is_open_low_pct(float(second["ha_open"]), float(second["ha_low"]))
             if confirm_ok:
-                return float(second["ha_high"]), str(second["datetime"]), "Bullish doji + open=low confirmed"
+                return float(second["ha_high"]), str(second["datetime"]), f"Bullish doji + open=low within {ENTRY_BUFFER_PERCENT:.2f}%"
         else:
-            confirm_ok = abs(float(second["ha_open"]) - float(second["ha_high"])) <= max(0.2, d_price * 0.0005)
+            confirm_ok = is_open_high_pct(float(second["ha_open"]), float(second["ha_high"]))
             if confirm_ok:
-                return float(second["ha_low"]), str(second["datetime"]), "Bearish doji + open=high confirmed"
+                return float(second["ha_low"]), str(second["datetime"]), f"Bearish doji + open=high within {ENTRY_BUFFER_PERCENT:.2f}%"
 
     return None, None, "No valid entry"
 
@@ -760,6 +814,13 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
 
     oi_rows, oi_bias = get_option_chain_5_strikes(setup, instrument_key, ltp)
     setup["oi_bias"] = oi_bias
+
+    allowed_entry, filter_reason = entry_filter_allows(setup, float(ltp), float(d_price), oi_bias)
+    if not allowed_entry:
+        setup["status"] = "touched"
+        setup["last_debug_reason"] = filter_reason
+        return setup
+
     setup["entry_found"] = True
     setup["alert_sent"] = True
     setup["entry_price"] = round(float(entry_price), 2)
@@ -788,7 +849,8 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
         f"SL: {ensure_float(setup.get('sl_price')):.2f}\n"
         f"Target: {ensure_float(setup.get('target_price')):.2f}\n"
         f"OI Bias: {oi_bias}\n"
-        f"Confidence: {int(setup.get('confidence_score', 0))}%"
+        f"Confidence: {int(setup.get('confidence_score', 0))}%\n"
+        f"HA Body%: {HA_BODY_PERCENT:.0f} | Dist%: {ENTRY_DISTANCE_PERCENT:.2f}"
     )
     image_bytes = build_stock_alert_image(setup, ltp, float(entry_price), entry_time, oi_rows, oi_bias)
     send_telegram_photo(image_bytes, caption)
@@ -933,6 +995,7 @@ def main() -> None:
     except Exception as e:
         print("FONT DEBUG ERROR:", e)
     send_real_startup_sample_once()
+    log(f"Smart filters | HA_BODY_PERCENT={HA_BODY_PERCENT} | ENTRY_DISTANCE_PERCENT={ENTRY_DISTANCE_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT} | REQUIRE_OI_CONFIRM={REQUIRE_OI_CONFIRM} | STRONG_ZONE_REQUIRED={STRONG_ZONE_REQUIRED}")
     load_instrument_master()
 
     sent_zone_keys: set = set()
