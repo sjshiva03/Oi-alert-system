@@ -44,6 +44,8 @@ MULTI_CARD_SIZE = int(os.getenv("MULTI_CARD_SIZE", "6"))
 TRACK_SL_TARGET = os.getenv("TRACK_SL_TARGET", "true").strip().lower() == "true"
 SL_BUFFER_PCT = float(os.getenv("SL_BUFFER_PCT", "0.0")) / 100.0
 MARKET_WAIT_LOG_INTERVAL_SECONDS = int(os.getenv("MARKET_WAIT_LOG_INTERVAL_SECONDS", "900"))
+SEND_JSON_READ_SAMPLE = os.getenv("SEND_JSON_READ_SAMPLE", "true").strip().lower() == "true"
+JSON_READ_SAMPLE_SENT_FILE = os.getenv("JSON_READ_SAMPLE_SENT_FILE", ".json_read_sample_sent")
 
 CLIENT_ID = (os.getenv("FYERS_CLIENT_ID") or "").strip()
 ACCESS_TOKEN = (os.getenv("FYERS_ACCESS_TOKEN") or "").strip()
@@ -808,21 +810,103 @@ def save_setups(items: List[Dict[str, Any]]) -> None:
         json.dump(items, f, indent=2, ensure_ascii=False)
 
 
+def _state_key(item: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    pattern_id = str(item.get("pattern_id") or "").strip()
+    if pattern_id:
+        return ("pattern_id", pattern_id, "", "")
+    return (
+        str(item.get("symbol", "") or ""),
+        str(item.get("pattern", "") or ""),
+        str(item.get("a_time", "") or ""),
+        str(item.get("c_time", "") or ""),
+    )
+
+
 def merge_state(old_items: List[Dict[str, Any]], new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    state_by_key = {}
+    state_by_key: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     for item in old_items:
-        key = (str(item.get("symbol","")), str(item.get("pattern","")), str(item.get("a_time","")), str(item.get("c_time","")))
-        state_by_key[key] = item
-    merged = []
+        state_by_key[_state_key(item)] = item
+
+    preserve_fields = [
+        "alert_sent", "entry_found", "entry_price", "entry_time", "status",
+        "ltp_at_alert", "oi_bias", "touched_d_source", "touched_d_price",
+        "last_alert_at", "cooldown_seconds", "last_checked_at", "last_debug_reason",
+        "sl_price", "target_price", "confidence_score", "target_hit", "sl_hit",
+        "pattern_id", "a_price", "b_price", "c_price", "a_time", "b_time", "c_time",
+        "active_d", "which_extension_active", "ext_path", "d_hit", "entry_reason",
+        "target_status", "pattern_active", "final_ext_value", "projection", "ac_ratio",
+    ]
+    completed_statuses = {"target_hit", "sl_hit", "completed_without_entry"}
+
+    merged: List[Dict[str, Any]] = []
     for item in new_items:
-        key = (str(item.get("symbol","")), str(item.get("pattern","")), str(item.get("a_time","")), str(item.get("c_time","")))
+        key = _state_key(item)
         prev = state_by_key.get(key, {})
         combined = dict(item)
-        for k in ["alert_sent","entry_found","entry_price","entry_time","status","ltp_at_alert","oi_bias","touched_d_source","touched_d_price","last_alert_at","cooldown_seconds","last_checked_at","last_debug_reason","sl_price","target_price","confidence_score","target_hit","sl_hit"]:
-            if k in prev and (combined.get(k) in [None, "", False] or k in {"last_checked_at","last_debug_reason"}):
-                combined[k] = prev.get(k)
+
+        # Always preserve previous completed trade state and live runtime values when available.
+        prev_status = str(prev.get("status") or "").strip().lower()
+        if prev_status in completed_statuses:
+            combined.update(prev)
+            merged.append(combined)
+            continue
+
+        for k in preserve_fields:
+            if k not in prev:
+                continue
+            new_val = combined.get(k)
+            old_val = prev.get(k)
+
+            # runtime/live values should survive GitHub refreshes unless the new export explicitly has a real value
+            if k in {"last_checked_at", "last_debug_reason", "last_alert_at", "oi_bias", "ltp_at_alert", "confidence_score"}:
+                if not new_val:
+                    combined[k] = old_val
+                continue
+
+            if k in {"alert_sent", "entry_found", "target_hit", "sl_hit"}:
+                if not bool(new_val) and bool(old_val):
+                    combined[k] = old_val
+                continue
+
+            if k in {"entry_price", "entry_time", "sl_price", "target_price", "touched_d_price", "touched_d_source"}:
+                if new_val in [None, "", 0, 0.0, False] and old_val not in [None, "", 0, 0.0, False]:
+                    combined[k] = old_val
+                continue
+
+            if k == "status":
+                if str(new_val or "").strip().lower() in {"", "waiting"} and str(old_val or "").strip():
+                    combined[k] = old_val
+                continue
+
+            if new_val in [None, "", False] and old_val not in [None, "", False]:
+                combined[k] = old_val
+
         merged.append(combined)
     return merged
+
+def send_json_read_sample(setups: List[Dict[str, Any]]) -> None:
+    if not SEND_JSON_READ_SAMPLE:
+        return
+    if os.path.exists(JSON_READ_SAMPLE_SENT_FILE):
+        return
+    if not setups:
+        return
+    try:
+        lines = [f"JSON READ TEST | Total setups: {len(setups)}"]
+        for i, s in enumerate(setups[:5], start=1):
+            lines.append(
+                f"{i}. {short_symbol(str(s.get('symbol') or ''))} | "
+                f"status={str(s.get('status') or 'waiting')} | "
+                f"active_d={ensure_float(s.get('active_d')):.2f} | "
+                f"entry_found={bool(s.get('entry_found'))} | "
+                f"alert_sent={bool(s.get('alert_sent'))}"
+            )
+        send_telegram_text("\n".join(lines))
+        with open(JSON_READ_SAMPLE_SENT_FILE, 'w', encoding='utf-8') as f:
+            f.write(now_ist().strftime('%Y-%m-%d %H:%M:%S'))
+        log('JSON read sample sent once')
+    except Exception as e:
+        log(f'JSON read sample failed: {e}')
 
 # =========================
 # Startup sample
@@ -868,9 +952,41 @@ def maybe_send_startup_sample() -> None:
 # =========================
 # Main monitor
 # =========================
+def is_completed_without_entry(setup: Dict[str, Any]) -> bool:
+    status = str(setup.get("status") or "").strip().lower()
+    target_status = str(setup.get("target_status") or "").strip().lower()
+    pattern_active = str(setup.get("pattern_active") or "").strip().lower()
+    return (
+        status == "completed_without_entry"
+        or "completed without entry" in target_status
+        or (status == "touched" and pattern_active == "no" and not setup.get("entry_found"))
+    )
+
+
+def should_process_setup(setup: Dict[str, Any]) -> bool:
+    status = str(setup.get("status") or "waiting").strip().lower()
+    if status in {"target_hit", "sl_hit", "completed_without_entry"}:
+        return False
+    if is_completed_without_entry(setup):
+        setup["status"] = "completed_without_entry"
+        return False
+    # Entry already exists: handled only by trade tracker
+    if bool(setup.get("entry_found")) or status in {"entry_found", "open"}:
+        return False
+    return True
+
+
 def detect_touch(setup: Dict[str, Any], ltp: float) -> Tuple[Optional[float], str]:
+    active_d = ensure_float(setup.get("active_d"))
     fib_d = ensure_float(setup.get("fib_d"))
     trend_d = ensure_float(setup.get("trend_d"))
+
+    if active_d:
+        allowed_active = abs(active_d) * (ENTRY_ZONE_PERCENT / 100.0)
+        if abs(ltp - active_d) <= allowed_active:
+            label = str(setup.get("which_extension_active") or "Active D")
+            return active_d, label
+
     allowed_fib = abs(fib_d) * (ENTRY_ZONE_PERCENT / 100.0) if fib_d else 0
     allowed_trend = abs(trend_d) * (ENTRY_ZONE_PERCENT / 100.0) if trend_d else 0
 
@@ -913,6 +1029,9 @@ def process_setup(setup: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[
         return setup, None
 
     setup["last_checked_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    if not should_process_setup(setup):
+        setup["last_debug_reason"] = setup.get("last_debug_reason") or f"Skipped due to status={setup.get('status','')}"
+        return setup, None
     if setup.get("alert_sent") and in_cooldown(setup):
         setup["last_debug_reason"] = "Cooldown active"
         return setup, None
@@ -951,6 +1070,10 @@ def process_setup(setup: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[
     setup["last_debug_reason"] = debug.get("reason", "")
 
     if not entry_price or not entry_time:
+        setup["status"] = "touched"
+        setup["touched_d_source"] = source
+        setup["touched_d_price"] = round(float(d_price), 2)
+        setup["last_debug_reason"] = debug.get("reason", "No entry found after touch")
         log(f"{symbol}: no entry found")
         return setup, None
 
@@ -1018,6 +1141,10 @@ def track_open_positions(setups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     updated = []
     for setup in setups:
         try:
+            if is_completed_without_entry(setup):
+                setup["status"] = "completed_without_entry"
+                updated.append(setup)
+                continue
             if not setup.get("entry_found") or str(setup.get("status","")) not in {"entry_found","open"}:
                 updated.append(setup)
                 continue
@@ -1083,10 +1210,15 @@ def main() -> None:
                     local_items = []
             incoming = load_setups()
             setups = merge_state(local_items, incoming) if incoming else local_items
+            for s in setups:
+                if is_completed_without_entry(s):
+                    s["status"] = "completed_without_entry"
             if not setups:
                 log("No setups found; sleeping")
                 time.sleep(max(POLL_SECONDS, 60))
                 continue
+
+            send_json_read_sample(setups)
 
             symbols = [str(x.get("symbol") or "") for x in setups if str(x.get("symbol") or "")]
             if USE_WEBSOCKET and symbols != last_symbols:
@@ -1096,7 +1228,10 @@ def main() -> None:
             updated: List[Dict[str, Any]] = []
             new_alerts: List[Dict[str, Any]] = []
             for setup in setups:
-                updated_setup, alert_item = process_setup(setup)
+                if should_process_setup(setup):
+                    updated_setup, alert_item = process_setup(setup)
+                else:
+                    updated_setup, alert_item = setup, None
                 updated.append(updated_setup)
                 if alert_item:
                     new_alerts.append(alert_item)
