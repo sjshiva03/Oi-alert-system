@@ -97,6 +97,25 @@ def compact_num(v: Any) -> str:
     return f"{sign}{n:.0f}"
 
 
+def get_current_d_from_levels(setup: Dict[str, Any]) -> Tuple[float, str]:
+    d_levels = setup.get("d_levels") or []
+    current_idx = int(ensure_float(setup.get("current_d_index"), 0))
+    if isinstance(d_levels, list) and d_levels:
+        if current_idx < 0:
+            current_idx = 0
+        if current_idx >= len(d_levels):
+            current_idx = len(d_levels) - 1
+        item = d_levels[current_idx] or {}
+        value = ensure_float(item.get("value"), 0.0)
+        label = str(item.get("level") or setup.get("which_extension_active") or "Active D")
+        if value > 0:
+            return value, label
+    active_d = ensure_float(setup.get("active_d"), 0.0)
+    if active_d > 0:
+        return active_d, str(setup.get("which_extension_active") or "Active D")
+    return 0.0, ""
+
+
 def in_market_hours() -> bool:
     if not ONLY_MARKET_HOURS:
         return True
@@ -585,7 +604,8 @@ def in_cooldown(setup: Dict[str, Any]) -> bool:
 
 def confidence_score(setup: Dict[str, Any], ltp: float, bias: str) -> int:
     score = 50
-    d_price = ensure_float(setup.get("touched_d_price") or setup.get("active_d") or setup.get("fib_d"))
+    current_d_value, _ = get_current_d_from_levels(setup)
+    d_price = ensure_float(setup.get("touched_d_price") or current_d_value or setup.get("current_fib_d") or setup.get("fib_d"))
     if d_price > 0:
         diff_pct = abs(ltp - d_price) / d_price * 100.0
         if diff_pct <= 0.25:
@@ -764,21 +784,25 @@ def build_stock_alert_image(setup: Dict[str, Any], ltp: float, entry_price: floa
 
 
 def detect_touch(setup: Dict[str, Any], ltp: float) -> Tuple[Optional[float], str]:
-    active_d = ensure_float(setup.get("active_d"))
-    fib_d = ensure_float(setup.get("fib_d"))
+    current_d_value, current_d_label = get_current_d_from_levels(setup)
+    fib_d = ensure_float(setup.get("current_fib_d") or setup.get("fib_d"))
     trend_d = ensure_float(setup.get("trend_d"))
-    if active_d:
-        allowed = abs(active_d) * (ENTRY_ZONE_PERCENT / 100.0)
-        if abs(ltp - active_d) <= allowed:
-            return active_d, str(setup.get("which_extension_active") or "Active D")
+
+    if current_d_value > 0:
+        allowed = abs(current_d_value) * (ENTRY_ZONE_PERCENT / 100.0)
+        if abs(ltp - current_d_value) <= allowed:
+            return current_d_value, current_d_label or "Active D"
+
     if fib_d:
         allowed = abs(fib_d) * (ENTRY_ZONE_PERCENT / 100.0)
         if abs(ltp - fib_d) <= allowed:
             return fib_d, "Fib"
+
     if trend_d:
         allowed = abs(trend_d) * (ENTRY_ZONE_PERCENT / 100.0)
         if abs(ltp - trend_d) <= allowed:
             return trend_d, "Trend"
+
     return None, ""
 
 
@@ -796,6 +820,7 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
 
     setup["touched_d_source"] = source
     setup["touched_d_price"] = round(float(d_price), 2)
+    setup["active_d"] = round(float(d_price), 2)
 
     instrument_key = symbol_to_instrument_key(str(setup.get("symbol") or ""))
     if not instrument_key:
@@ -831,10 +856,10 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
     setup["status"] = "entry_found"
 
     if str(setup.get("pattern", "")).lower() == "bullish":
-        setup["sl_price"] = round(ensure_float(setup.get("active_d") or d_price), 2)
+        setup["sl_price"] = round(float(d_price), 2)
         setup["target_price"] = round(float(entry_price) * 1.02, 2)
     else:
-        setup["sl_price"] = round(ensure_float(setup.get("active_d") or d_price), 2)
+        setup["sl_price"] = round(float(d_price), 2)
         setup["target_price"] = round(float(entry_price) * 0.98, 2)
 
     setup["target_hit"] = False
