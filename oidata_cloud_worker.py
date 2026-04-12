@@ -774,12 +774,50 @@ def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]
         updated.append(s)
     return updated
 
+def send_startup_sample():
+    setup = {
+        "symbol": "NSE:HDFCLIFE-EQ",
+        "pattern": "Bullish",
+        "status": "entry_found",
+        "touched_d_source": "Fib",
+        "touched_d_price": 558.40,
+        "active_d": 552.10,
+        "sl_price": 552.10,
+        "target_price": 571.46,
+        "confidence_score": 82
+    }
+
+    ltp = 560.25
+    entry_price = 560.25
+    entry_time = now_ist().strftime("%Y-%m-%d %H:%M")
+
+    # Dummy OI (sample)
+    oi_rows = [
+        {"strike":550,"ce_ltp":14.2,"ce_oi":4200,"ce_chg":-1200,"pe_ltp":4.1,"pe_oi":6300,"pe_chg":1800},
+        {"strike":555,"ce_ltp":10.8,"ce_oi":5100,"ce_chg":-900,"pe_ltp":5.6,"pe_oi":7400,"pe_chg":2200},
+        {"strike":560,"ce_ltp":7.4,"ce_oi":6800,"ce_chg":-450,"pe_ltp":7.9,"pe_oi":8900,"pe_chg":2600},
+        {"strike":565,"ce_ltp":4.8,"ce_oi":3500,"ce_chg":200,"pe_ltp":11.7,"pe_oi":5600,"pe_chg":1500},
+        {"strike":570,"ce_ltp":3.1,"ce_oi":2100,"ce_chg":600,"pe_ltp":16.4,"pe_oi":3900,"pe_chg":900},
+    ]
+
+    oi_bias = "Bullish"
+
+    img = build_stock_alert_image(
+        setup, ltp, entry_price, entry_time, oi_rows, oi_bias
+    )
+
+    caption = f"🔥 TEST ALERT\n{short_symbol(setup['symbol'])}\nEntry: {entry_price}"
+
+    send_telegram_photo(img, caption)
+
 
 def main() -> None:
     if not UPSTOX_ACCESS_TOKEN:
         raise RuntimeError("Missing UPSTOX_ACCESS_TOKEN")
     log("N Pattern Upstox Final V4 Auto Expiry started")
     load_instrument_master()
+    log("N Pattern Upstox Final V4 Auto Expiry started")
+    send_startup_sample()   # 👈 ADD THIS LINE  
 
     sent_zone_keys: set = set()
 
