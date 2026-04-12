@@ -120,23 +120,38 @@ def wait_until_market_start() -> None:
 
 
 def _load_font(size: int, bold: bool = False):
-    paths = []
-    if bold:
-        paths += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        paths += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
-    for p in paths:
+    from PIL import ImageFont
+    import os
+
+    font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    fallback_name = "LiberationSans-Bold.ttf" if bold else "LiberationSans-Regular.ttf"
+
+    base_paths = [
+        os.getcwd(),
+        os.path.dirname(os.path.abspath(__file__)),
+    ]
+
+    candidates = []
+    for base in base_paths:
+        candidates.append(os.path.join(base, "fonts", font_name))
+        candidates.append(os.path.join(base, "fonts", fallback_name))
+        candidates.append(os.path.join(base, font_name))
+        candidates.append(os.path.join(base, fallback_name))
+
+    candidates += [
+        f"/usr/share/fonts/truetype/dejavu/{font_name}",
+        f"/usr/share/fonts/truetype/liberation2/{fallback_name}",
+    ]
+
+    for path in candidates:
         try:
-            if os.path.exists(p):
-                return ImageFont.truetype(p, size)
-        except Exception:
-            pass
+            if os.path.exists(path):
+                print(f"[FONT LOADED] {path}")
+                return ImageFont.truetype(path, size)
+        except Exception as e:
+            print(f"[FONT SKIP] {path} | {e}")
+
+    print("[FONT ERROR] Using default font")
     return ImageFont.load_default()
 
 
@@ -535,79 +550,133 @@ def confidence_score(setup: Dict[str, Any], ltp: float, bias: str) -> int:
 
 
 def build_stock_alert_image(setup: Dict[str, Any], ltp: float, entry_price: float, entry_time: str, oi_rows: List[Dict[str, Any]], oi_bias: str) -> bytes:
-    img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (245, 245, 245))
+    img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (242, 245, 249))
     draw = ImageDraw.Draw(img)
-    black = (20, 20, 20)
-    green = (28, 148, 82)
-    red = (198, 58, 58)
-    blue = (48, 97, 184)
+
+    black = (18, 18, 18)
+    dark = (44, 62, 80)
+    blue = (41, 98, 255)
+    blue_soft = (232, 240, 255)
+    green = (22, 163, 74)
+    green_soft = (230, 244, 234)
+    red = (220, 38, 38)
+    red_soft = (254, 242, 242)
+    orange = (234, 88, 12)
+    orange_soft = (255, 237, 213)
     white = (255, 255, 255)
-    border = (210, 210, 210)
-    head_fill = (236, 240, 247)
+    border = (220, 226, 232)
+    head_fill = (240, 244, 248)
+    gray = (99, 115, 129)
 
-    f_title = _load_font(40, True)
-    f_head = _load_font(24, True)
-    f_body = _load_font(24, False)
-    f_tbl_h = _load_font(20, True)
-    f_tbl_b = _load_font(19, False)
+    f_title = _load_font(54, True)
+    f_sub = _load_font(26, False)
+    f_head = _load_font(28, True)
+    f_body = _load_font(28, False)
+    f_small = _load_font(22, False)
+    f_tbl_h = _load_font(24, True)
+    f_tbl_b = _load_font(23, False)
 
-    draw.rounded_rectangle((24, 18, IMAGE_WIDTH - 24, 92), radius=22, fill=white, outline=border, width=2)
-    draw.text((48, 36), "N PATTERN ENTRY ALERT", font=f_title, fill=blue)
+    # Background panels
+    draw.rounded_rectangle((24, 18, IMAGE_WIDTH - 24, 110), radius=26, fill=white, outline=border, width=2)
+    draw.rounded_rectangle((24, 128, IMAGE_WIDTH - 24, 520), radius=26, fill=white, outline=border, width=2)
+    draw.rounded_rectangle((24, 540, IMAGE_WIDTH - 24, IMAGE_HEIGHT - 24), radius=26, fill=white, outline=border, width=2)
+
+    # Header
+    draw.text((46, 30), "N PATTERN ENTRY ALERT", font=f_title, fill=blue)
     stamp = now_ist().strftime("%d-%m-%Y %H:%M IST")
-    sb = draw.textbbox((0, 0), stamp, font=f_body)
-    draw.text((IMAGE_WIDTH - 48 - (sb[2] - sb[0]), 40), stamp, font=f_body, fill=black)
+    sb = draw.textbbox((0, 0), stamp, font=f_sub)
+    draw.text((IMAGE_WIDTH - 46 - (sb[2] - sb[0]), 42), stamp, font=f_sub, fill=dark)
 
-    draw.rounded_rectangle((24, 112, IMAGE_WIDTH - 24, 430), radius=22, fill=white, outline=border, width=2)
+    # Top stat pills
+    pills = [
+        ("Stock", short_symbol(setup.get("symbol")), blue_soft, blue),
+        ("Pattern", str(setup.get("pattern", "")), blue_soft, blue),
+        ("Status", str(setup.get("status", "")), green_soft if str(setup.get("status","")).lower()=="entry_found" else orange_soft, green if str(setup.get("status","")).lower()=="entry_found" else orange),
+    ]
+    px = 42
+    py = 128 + 18
+    for label, value, fill, color in pills:
+        txt = f"{label}: {value}"
+        bb = draw.textbbox((0, 0), txt, font=f_small)
+        w = (bb[2] - bb[0]) + 34
+        draw.rounded_rectangle((px, py, px + w, py + 42), radius=18, fill=fill, outline=fill, width=1)
+        draw.text((px + 16, py + 8), txt, font=f_small, fill=color)
+        px += w + 14
+
+    strong_zone_text = "-"
+    strong_zone_low = ensure_float(setup.get("strong_zone_low"), 0.0)
+    strong_zone_high = ensure_float(setup.get("strong_zone_high"), 0.0)
+    strong_zone_count = int(ensure_float(setup.get("strong_zone_count"), 0))
+    if strong_zone_low > 0 and strong_zone_high > 0 and strong_zone_count >= 2:
+        strong_zone_text = f"{strong_zone_low:.2f} - {strong_zone_high:.2f} ({strong_zone_count})"
+
     left = [
-        ("Stock", short_symbol(setup.get("symbol"))),
-        ("Pattern", str(setup.get("pattern", ""))),
-        ("Status", str(setup.get("status", ""))),
         ("D Source", str(setup.get("touched_d_source") or setup.get("which_extension_active") or "Active D")),
         ("Touched D", f"{ensure_float(setup.get('touched_d_price') or setup.get('active_d')):.2f}"),
+        ("Entry", f"{entry_price:.2f}"),
+        ("LTP", f"{ltp:.2f}"),
+        ("Entry Time", str(entry_time).replace("T", " ")[:19]),
     ]
     sl_price = ensure_float(setup.get("sl_price"))
     target_price = ensure_float(setup.get("target_price"))
     conf = int(setup.get("confidence_score", 0))
     right = [
-        ("Entry", f"{entry_price:.2f}"),
-        ("LTP", f"{ltp:.2f}"),
         ("SL", f"{sl_price:.2f}" if sl_price > 0 else "-"),
         ("Target", f"{target_price:.2f}" if target_price > 0 else "-"),
         ("OI Bias", oi_bias),
         ("Confidence", f"{conf}%"),
+        ("Strong Zone", strong_zone_text),
     ]
-    y = 138
-    for lab, val in left:
-        draw.text((52, y), f"{lab}:", font=f_head, fill=black)
-        draw.text((260, y), val, font=f_body, fill=black)
-        y += 52
-    y = 138
-    for lab, val in right:
-        color = green if lab in {"Entry", "Target"} else red if lab == "SL" else green if ("Bullish" in val) else red if ("Bearish" in val) else black
-        draw.text((700, y), f"{lab}:", font=f_head, fill=black)
-        draw.text((915, y), val, font=f_body, fill=color)
-        y += 44
 
-    draw.rounded_rectangle((24, 454, IMAGE_WIDTH - 24, IMAGE_HEIGHT - 24), radius=22, fill=white, outline=border, width=2)
-    draw.text((48, 474), "OI TABLE (5 STRIKES)", font=f_head, fill=black)
+    # Info columns
+    y = 128 + 86
+    for lab, val in left:
+        draw.text((52, y), f"{lab}:", font=f_head, fill=dark)
+        col = green if lab == "Entry" else black
+        draw.text((280, y), val, font=f_body, fill=col)
+        y += 58
+
+    y = 128 + 86
+    for lab, val in right:
+        if lab == "SL":
+            color = red
+        elif lab == "Target":
+            color = green
+        elif lab == "OI Bias":
+            color = green if "Bullish" in val else red if "Bearish" in val else dark
+        elif lab == "Strong Zone" and strong_zone_text != "-":
+            color = orange
+        elif lab == "Confidence":
+            color = blue
+        else:
+            color = black
+        draw.text((740, y), f"{lab}:", font=f_head, fill=dark)
+        draw.text((980, y), val, font=f_body, fill=color)
+        y += 58
+
+    # OI title
+    draw.text((48, 560), "OI TABLE (5 STRIKES)", font=f_head, fill=dark)
+    subtitle = "1 stock per image • CE/PE change highlights • ATM-centered"
+    draw.text((48, 596), subtitle, font=f_small, fill=gray)
 
     headers = ["Strike", "CE LTP", "CE OI", "CE Chg", "PE LTP", "PE OI", "PE Chg"]
-    widths = [150, 160, 180, 160, 160, 180, 160]
+    widths = [155, 170, 185, 170, 170, 185, 170]
     xs = [48]
     for w in widths:
         xs.append(xs[-1] + w)
-    row_h = 58
-    y0 = 520
+    row_h = 70
+    y0 = 640
+
     for j, h in enumerate(headers):
-        draw.rectangle((xs[j], y0, xs[j + 1], y0 + row_h), fill=head_fill, outline=border, width=1)
+        draw.rounded_rectangle((xs[j], y0, xs[j + 1], y0 + row_h), radius=10, fill=head_fill, outline=border, width=1)
         bbox = draw.textbbox((0, 0), h, font=f_tbl_h)
         tw = bbox[2] - bbox[0]
-        draw.text((xs[j] + (widths[j] - tw) / 2, y0 + 16), h, font=f_tbl_h, fill=blue)
+        draw.text((xs[j] + (widths[j] - tw) / 2, y0 + 20), h, font=f_tbl_h, fill=blue)
 
-    base_y = y0 + row_h
+    base_y = y0 + row_h + 8
     for i, r in enumerate(oi_rows[:5]):
         y1 = base_y + i * row_h
-        y2 = y1 + row_h
+        y2 = y1 + row_h - 6
         vals = [
             f"{ensure_float(r.get('strike')):.0f}",
             f"{ensure_float(r.get('ce_ltp')):.2f}",
@@ -621,17 +690,17 @@ def build_stock_alert_image(setup: Dict[str, Any], ltp: float, entry_price: floa
             black,
             black,
             black,
-            green if ensure_float(r.get("ce_chg")) > 0 else red if ensure_float(r.get("ce_chg")) < 0 else black,
+            green if ensure_float(r.get("ce_chg")) > 0 else red if ensure_float(r.get("ce_chg")) < 0 else dark,
             black,
             black,
-            green if ensure_float(r.get("pe_chg")) > 0 else red if ensure_float(r.get("pe_chg")) < 0 else black,
+            green if ensure_float(r.get("pe_chg")) > 0 else red if ensure_float(r.get("pe_chg")) < 0 else dark,
         ]
-        fill = (252, 252, 252) if i % 2 == 0 else white
+        fill = (250, 252, 255) if i % 2 == 0 else white
         for j, v in enumerate(vals):
-            draw.rectangle((xs[j], y1, xs[j + 1], y2), fill=fill, outline=border, width=1)
+            draw.rounded_rectangle((xs[j], y1, xs[j + 1], y2), radius=8, fill=fill, outline=border, width=1)
             bbox = draw.textbbox((0, 0), v, font=f_tbl_b)
             tw = bbox[2] - bbox[0]
-            draw.text((xs[j] + (widths[j] - tw) / 2, y1 + 17), v, font=f_tbl_b, fill=colors[j])
+            draw.text((xs[j] + (widths[j] - tw) / 2, y1 + 18), v, font=f_tbl_b, fill=colors[j])
 
     bio = io.BytesIO()
     img.save(bio, format="PNG")
@@ -774,50 +843,18 @@ def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]
         updated.append(s)
     return updated
 
-def send_startup_sample():
-    setup = {
-        "symbol": "NSE:HDFCLIFE-EQ",
-        "pattern": "Bullish",
-        "status": "entry_found",
-        "touched_d_source": "Fib",
-        "touched_d_price": 558.40,
-        "active_d": 552.10,
-        "sl_price": 552.10,
-        "target_price": 571.46,
-        "confidence_score": 82
-    }
-
-    ltp = 560.25
-    entry_price = 560.25
-    entry_time = now_ist().strftime("%Y-%m-%d %H:%M")
-
-    # Dummy OI (sample)
-    oi_rows = [
-        {"strike":550,"ce_ltp":14.2,"ce_oi":4200,"ce_chg":-1200,"pe_ltp":4.1,"pe_oi":6300,"pe_chg":1800},
-        {"strike":555,"ce_ltp":10.8,"ce_oi":5100,"ce_chg":-900,"pe_ltp":5.6,"pe_oi":7400,"pe_chg":2200},
-        {"strike":560,"ce_ltp":7.4,"ce_oi":6800,"ce_chg":-450,"pe_ltp":7.9,"pe_oi":8900,"pe_chg":2600},
-        {"strike":565,"ce_ltp":4.8,"ce_oi":3500,"ce_chg":200,"pe_ltp":11.7,"pe_oi":5600,"pe_chg":1500},
-        {"strike":570,"ce_ltp":3.1,"ce_oi":2100,"ce_chg":600,"pe_ltp":16.4,"pe_oi":3900,"pe_chg":900},
-    ]
-
-    oi_bias = "Bullish"
-
-    img = build_stock_alert_image(
-        setup, ltp, entry_price, entry_time, oi_rows, oi_bias
-    )
-
-    caption = f"🔥 TEST ALERT\n{short_symbol(setup['symbol'])}\nEntry: {entry_price}"
-
-    send_telegram_photo(img, caption)
-
 
 def main() -> None:
     if not UPSTOX_ACCESS_TOKEN:
         raise RuntimeError("Missing UPSTOX_ACCESS_TOKEN")
     log("N Pattern Upstox Final V4 Auto Expiry started")
+    try:
+        print("WORKING DIR:", os.getcwd())
+        print("FILES:", os.listdir())
+        print("FONTS:", os.listdir("fonts") if os.path.exists("fonts") else "NO FONTS DIR")
+    except Exception as e:
+        print("FONT DEBUG ERROR:", e)
     load_instrument_master()
-    log("N Pattern Upstox Final V4 Auto Expiry started")
-    send_startup_sample()   # 👈 ADD THIS LINE  
 
     sent_zone_keys: set = set()
 
@@ -837,8 +874,19 @@ def main() -> None:
                 if is_completed_without_entry(s):
                     s["status"] = "completed_without_entry"
 
+            zones = find_strong_reversal_zones(setups)
+            for s in setups:
+                z = zones.get(str(s.get("symbol") or ""))
+                if z:
+                    s["strong_zone_low"] = round(float(z["low"]), 2)
+                    s["strong_zone_high"] = round(float(z["high"]), 2)
+                    s["strong_zone_count"] = int(z["count"])
+                else:
+                    s["strong_zone_low"] = None
+                    s["strong_zone_high"] = None
+                    s["strong_zone_count"] = 0
+
             if USE_STRONG_ZONE_ALERTS:
-                zones = find_strong_reversal_zones(setups)
                 for sym, z in zones.items():
                     key = f"{sym}|{z['low']:.2f}|{z['high']:.2f}|{z['count']}"
                     if key not in sent_zone_keys:
