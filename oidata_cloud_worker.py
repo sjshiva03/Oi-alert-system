@@ -30,6 +30,8 @@ ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", str(6 * 60 * 60
 STRONG_ZONE_PCT = float(os.getenv("STRONG_ZONE_PCT", "0.5"))
 ONLY_MARKET_HOURS = os.getenv("ONLY_MARKET_HOURS", "true").strip().lower() == "true"
 USE_STRONG_ZONE_ALERTS = os.getenv("USE_STRONG_ZONE_ALERTS", "true").strip().lower() == "true"
+SEND_REAL_STARTUP_SAMPLE = os.getenv("SEND_REAL_STARTUP_SAMPLE", "false").strip().lower() == "true"
+REAL_STARTUP_SAMPLE_SENT_FILE = os.getenv("REAL_STARTUP_SAMPLE_SENT_FILE", ".real_startup_sample_sent")
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RATE_LIMIT_SLEEP = float(os.getenv("RATE_LIMIT_SLEEP", "0.8"))
@@ -844,6 +846,82 @@ def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]
     return updated
 
 
+
+def send_real_startup_sample_once() -> None:
+    if not SEND_REAL_STARTUP_SAMPLE:
+        return
+    if os.path.exists(REAL_STARTUP_SAMPLE_SENT_FILE):
+        return
+    try:
+        setups = load_setups()
+        if not setups:
+            log("No setups for real startup sample")
+            return
+
+        # prefer active setups first
+        chosen = None
+        preferred_status = {"waiting", "touched", "shifted_to_next_d", "entry_found"}
+        for s in setups:
+            st = str(s.get("status") or "").strip().lower()
+            if st in preferred_status:
+                chosen = s
+                break
+        if chosen is None:
+            chosen = setups[0]
+
+        symbol = str(chosen.get("symbol") or "")
+        instrument_key = symbol_to_instrument_key(symbol)
+        if not instrument_key:
+            log(f"Real startup sample skipped: instrument key missing for {symbol}")
+            return
+
+        ltps = batch_fetch_ltps([chosen])
+        ltp = ensure_float(ltps.get(symbol), ensure_float(chosen.get("ltp"), 0.0))
+        if ltp <= 0:
+            log(f"Real startup sample skipped: LTP missing for {symbol}")
+            return
+
+        entry_price = ensure_float(chosen.get("entry_price"), 0.0)
+        if entry_price <= 0:
+            entry_price = ltp
+
+        entry_time = str(chosen.get("entry_time") or now_ist().strftime("%Y-%m-%d %H:%M:%S"))
+        oi_rows, oi_bias = get_option_chain_5_strikes(chosen, instrument_key, ltp)
+
+        zones = find_strong_reversal_zones(setups)
+        z = zones.get(symbol)
+        if z:
+            chosen["strong_zone_low"] = round(float(z["low"]), 2)
+            chosen["strong_zone_high"] = round(float(z["high"]), 2)
+            chosen["strong_zone_count"] = int(z["count"])
+
+        if ensure_float(chosen.get("sl_price"), 0.0) <= 0:
+            chosen["sl_price"] = round(ensure_float(chosen.get("active_d") or chosen.get("touched_d_price")), 2)
+        if ensure_float(chosen.get("target_price"), 0.0) <= 0:
+            if str(chosen.get("pattern", "")).lower() == "bullish":
+                chosen["target_price"] = round(entry_price * 1.02, 2)
+            else:
+                chosen["target_price"] = round(entry_price * 0.98, 2)
+
+        if ensure_float(chosen.get("confidence_score"), 0.0) <= 0:
+            chosen["confidence_score"] = confidence_score(chosen, ltp, oi_bias)
+
+        image_bytes = build_stock_alert_image(chosen, ltp, entry_price, entry_time, oi_rows, oi_bias)
+        caption = (
+            f"🧪 REAL STARTUP SAMPLE\n"
+            f"Stock: {short_symbol(symbol)}\n"
+            f"Status: {chosen.get('status', '')}\n"
+            f"LTP: {ltp:.2f}"
+        )
+        send_telegram_photo(image_bytes, caption)
+
+        with open(REAL_STARTUP_SAMPLE_SENT_FILE, "w", encoding="utf-8") as f:
+            f.write(now_ist().strftime("%Y-%m-%d %H:%M:%S"))
+        log(f"Real startup sample sent for {symbol}")
+    except Exception as e:
+        log(f"Real startup sample failed: {e}")
+
+
 def main() -> None:
     if not UPSTOX_ACCESS_TOKEN:
         raise RuntimeError("Missing UPSTOX_ACCESS_TOKEN")
@@ -854,6 +932,7 @@ def main() -> None:
         print("FONTS:", os.listdir("fonts") if os.path.exists("fonts") else "NO FONTS DIR")
     except Exception as e:
         print("FONT DEBUG ERROR:", e)
+    send_real_startup_sample_once()
     load_instrument_master()
 
     sent_zone_keys: set = set()
