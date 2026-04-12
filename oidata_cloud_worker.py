@@ -1193,6 +1193,26 @@ def track_open_positions(setups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def main() -> None:
     log("N Pattern Railway live monitor with OI + dashboard image started")
     maybe_send_startup_sample()
+
+    # Read JSON and send one summary message immediately, even on weekends/off-market hours.
+    try:
+        local_items = []
+        if os.path.exists(JSON_FILE):
+            try:
+                with open(JSON_FILE, "r", encoding="utf-8") as f:
+                    local_items = json.load(f)
+            except Exception:
+                local_items = []
+        incoming = load_setups()
+        initial_setups = merge_state(local_items, incoming) if incoming else local_items
+        for s in initial_setups:
+            if is_completed_without_entry(s):
+                s["status"] = "completed_without_entry"
+        if initial_setups:
+            send_json_read_sample(initial_setups)
+    except Exception as e:
+        log(f"Initial JSON read sample failed: {e}")
+
     wait_until_market_start()
     last_symbols: List[str] = []
     while True:
