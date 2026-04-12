@@ -659,7 +659,7 @@ def build_stock_alert_image(setup: Dict[str, Any], ltp: float, entry_price: floa
         draw.text((px + 16, py + 8), txt, font=f_small, fill=color)
         px += w + 14
 
-    strong_zone_text = "-"
+    strong_zone_text = "N/A"
     strong_zone_low = ensure_float(setup.get("strong_zone_low"), 0.0)
     strong_zone_high = ensure_float(setup.get("strong_zone_high"), 0.0)
     strong_zone_count = int(ensure_float(setup.get("strong_zone_count"), 0))
