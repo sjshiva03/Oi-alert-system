@@ -307,10 +307,12 @@ def should_process_setup(setup: Dict[str, Any]) -> bool:
     return True
 
 
+
 def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
     debug_log(f"batch_fetch_ltps start | setups={len(setups)}")
     key_to_symbol: Dict[str, str] = {}
     keys: List[str] = []
+
     for s in setups:
         sym = str(s.get("symbol") or "")
         key = symbol_to_instrument_key(sym)
@@ -319,12 +321,15 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
             key_to_symbol[key] = sym
         else:
             log(f"Instrument key missing for {sym}")
-    if not keys:
+
+    unique_keys = sorted(set(keys))
+    if not unique_keys:
         debug_log("batch_fetch_ltps no instrument keys resolved")
         return {}
 
-    joined = ",".join(sorted(set(keys)))
-    debug_log(f"LTP request | keys={len(set(keys))} | joined={joined[:250]}")
+    joined = ",".join(unique_keys)
+    debug_log(f"LTP request | keys={len(unique_keys)} | joined={joined[:500]}")
+
     try:
         data = upstox_get("https://api.upstox.com/v3/market-quote/ltp", params={"instrument_key": joined})
     except Exception as e:
@@ -332,24 +337,96 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
         debug_log(f"LTP request failed | error={e}")
         return {}
 
-    out: Dict[str, float] = {}
-    payload = data.get("data", {}) if isinstance(data, dict) else {}
-    for key, row in payload.items():
-        sym = key_to_symbol.get(key)
-        if not sym:
-            continue
-        ltp = row.get("last_price")
-        if ltp is None:
-            ltp = row.get("ltp")
-        try:
-            out[sym] = float(ltp)
-            debug_log(f"LTP fetched | symbol={sym} | key={key} | ltp={out[sym]}")
-        except Exception:
-            debug_log(f"LTP parse failed | symbol={sym} | key={key} | raw={ltp}")
-            pass
-    debug_log(f"batch_fetch_ltps done | returned={len(out)}")
-    return out
+    try:
+        if isinstance(data, dict):
+            debug_log(f"LTP raw top keys = {list(data.keys())}")
+            debug_log(f"LTP raw response = {str(data)[:3000]}")
+        else:
+            debug_log(f"LTP raw non-dict response type = {type(data).__name__} | value = {str(data)[:3000]}")
+    except Exception as e:
+        debug_log(f"LTP raw response print failed: {e}")
 
+    out: Dict[str, float] = {}
+
+    def try_pick_ltp(row: Any) -> Optional[float]:
+        if not isinstance(row, dict):
+            return None
+        candidates: List[Any] = [
+            row.get("last_price"),
+            row.get("ltp"),
+            row.get("lastPrice"),
+            row.get("close"),
+        ]
+        market_data = row.get("market_data")
+        if isinstance(market_data, dict):
+            candidates.extend([
+                market_data.get("ltp"),
+                market_data.get("last_price"),
+                market_data.get("lastPrice"),
+                market_data.get("close"),
+            ])
+        quote = row.get("quote")
+        if isinstance(quote, dict):
+            candidates.extend([
+                quote.get("ltp"),
+                quote.get("last_price"),
+                quote.get("lastPrice"),
+                quote.get("close"),
+            ])
+        for val in candidates:
+            try:
+                if val not in (None, ""):
+                    return float(val)
+            except Exception:
+                continue
+        return None
+
+    payload = data.get("data", {}) if isinstance(data, dict) else {}
+
+    # Support multiple payload shapes
+    payload_candidates: List[Tuple[str, Any]] = [("data", payload)]
+    if isinstance(payload, dict):
+        for alt_key in ("quotes", "ltp", "items", "results"):
+            if alt_key in payload:
+                payload_candidates.append((f"data.{alt_key}", payload.get(alt_key)))
+    if isinstance(data, dict):
+        for alt_key in ("quotes", "ltp", "items", "results"):
+            if alt_key in data:
+                payload_candidates.append((alt_key, data.get(alt_key)))
+
+    seen_payload_ids = set()
+    for payload_name, candidate in payload_candidates:
+        if id(candidate) in seen_payload_ids:
+            continue
+        seen_payload_ids.add(id(candidate))
+        if not isinstance(candidate, dict):
+            debug_log(f"LTP payload skipped | source={payload_name} | type={type(candidate).__name__}")
+            continue
+
+        debug_log(f"LTP payload scan | source={payload_name} | keys={list(candidate.keys())[:30]}")
+        for key, row in candidate.items():
+            sym = key_to_symbol.get(str(key))
+            if not sym and isinstance(row, dict):
+                # Sometimes instrument key may come as a field inside the row
+                row_key = row.get("instrument_key") or row.get("instrumentKey") or row.get("symbol")
+                if row_key:
+                    sym = key_to_symbol.get(str(row_key))
+                    if sym:
+                        debug_log(f"LTP payload matched by row field | outer_key={key} | row_key={row_key} | symbol={sym}")
+            if not sym:
+                debug_log(f"LTP payload unmatched key | source={payload_name} | key={key}")
+                continue
+
+            ltp_val = try_pick_ltp(row)
+            if ltp_val is None:
+                debug_log(f"LTP parse failed | source={payload_name} | symbol={sym} | key={key} | row={str(row)[:1000]}")
+                continue
+
+            out[sym] = float(ltp_val)
+            debug_log(f"LTP parsed | source={payload_name} | symbol={sym} | key={key} | ltp={out[sym]}")
+
+    debug_log(f"batch_fetch_ltps done | returned={len(out)} | symbols={list(out.keys())}")
+    return out
 
 def fetch_history_15m(instrument_key: str) -> Optional[pd.DataFrame]:
     debug_log(f"fetch_history_15m start | key={instrument_key}")
