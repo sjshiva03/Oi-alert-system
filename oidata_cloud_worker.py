@@ -1,78 +1,42 @@
-"""
-npattern_upstox_final_v4_auto_expiry.py
-
-Final version with:
-- nearest expiry auto-detection from Upstox option contracts
-- 5-strike OI table
-- 1 stock per image
-- state-aware JSON processing
-"""
-
 import os
 import io
 import gzip
 import json
 import time
-import ssl
-import uuid
-import json as pyjson
-import threading
-import importlib.util
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 from PIL import Image, ImageDraw, ImageFont
-try:
-    from google.protobuf.json_format import MessageToDict
-except Exception:
-    MessageToDict = None
-
-try:
-    import websocket
-except Exception:
-    websocket = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# =========================
+# ENV / SETTINGS
+# =========================
 UPSTOX_ACCESS_TOKEN = (os.getenv("UPSTOX_ACCESS_TOKEN") or "").strip()
 JSON_FILE = os.getenv("JSON_FILE", "npattern_selected.json")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
-ENTRY_ZONE_PERCENT = float(os.getenv("ENTRY_ZONE_PERCENT", "2.0"))
-ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", str(6 * 60 * 60)))
-STRONG_ZONE_PCT = float(os.getenv("STRONG_ZONE_PCT", "0.5"))
 ONLY_MARKET_HOURS = os.getenv("ONLY_MARKET_HOURS", "true").strip().lower() == "true"
-USE_STRONG_ZONE_ALERTS = os.getenv("USE_STRONG_ZONE_ALERTS", "true").strip().lower() == "true"
-SEND_REAL_STARTUP_SAMPLE = os.getenv("SEND_REAL_STARTUP_SAMPLE", "false").strip().lower() == "true"
-REAL_STARTUP_SAMPLE_SENT_FILE = os.getenv("REAL_STARTUP_SAMPLE_SENT_FILE", ".real_startup_sample_sent")
+DE_BUG = os.getenv("DE_BUG", "false").strip().lower() == "true"
+
+ENTRY_LIMIT_PERCENT = float(os.getenv("ENTRY_LIMIT_PERCENT", os.getenv("ENTRY_DISTANCE_PERCENT", "2.0")))
+ENTRY_BUFFER_PERCENT = float(os.getenv("ENTRY_BUFFER_PERCENT", "0.2"))
+HA_BODY_PERCENT = float(os.getenv("HA_BODY_PERCENT", "30"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-RATE_LIMIT_SLEEP = float(os.getenv("RATE_LIMIT_SLEEP", "0.8"))
-HA_BODY_PERCENT = float(os.getenv("HA_BODY_PERCENT", "30"))
-ENTRY_DISTANCE_PERCENT = float(os.getenv("ENTRY_DISTANCE_PERCENT", "0.5"))
-ENTRY_BUFFER_PERCENT = float(os.getenv("ENTRY_BUFFER_PERCENT", "0.1"))
-ENTRY_MUST_BE_TODAY = os.getenv("ENTRY_MUST_BE_TODAY", "true").strip().lower() == "true"
-ENTRY_AFTER_TOUCH_ONLY = os.getenv("ENTRY_AFTER_TOUCH_ONLY", "true").strip().lower() == "true"
-REQUIRE_OI_CONFIRM = os.getenv("REQUIRE_OI_CONFIRM", "true").strip().lower() == "true"
-STRONG_ZONE_REQUIRED = os.getenv("STRONG_ZONE_REQUIRED", "false").strip().lower() == "true"
-IMAGE_WIDTH = int(os.getenv("IMAGE_WIDTH", "1300"))
+ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", str(6 * 60 * 60)))
+HISTORICAL_RUN_ONCE = os.getenv("HISTORICAL_RUN_ONCE", "true").strip().lower() == "true"
+LOOKBACK_DAYS_MINUTE = int(os.getenv("LOOKBACK_DAYS_MINUTE", "60"))
+LOOKBACK_DAYS_DAILY = int(os.getenv("LOOKBACK_DAYS_DAILY", "365"))
+IMAGE_WIDTH = int(os.getenv("IMAGE_WIDTH", "1500"))
 IMAGE_HEIGHT = int(os.getenv("IMAGE_HEIGHT", "1100"))
-
-UPSTOX_WS_ENABLED = os.getenv("UPSTOX_WS_ENABLED", "false").strip().lower() == "true"
-UPSTOX_WS_MODE = (os.getenv("UPSTOX_WS_MODE", "ltpc") or "ltpc").strip().lower()
-UPSTOX_WS_REST_FALLBACK = os.getenv("UPSTOX_WS_REST_FALLBACK", "true").strip().lower() == "true"
-UPSTOX_WS_STALE_SECONDS = int(os.getenv("UPSTOX_WS_STALE_SECONDS", "15"))
-UPSTOX_WS_RECONNECT_SECONDS = int(os.getenv("UPSTOX_WS_RECONNECT_SECONDS", "8"))
-UPSTOX_WS_DEBUG_FRAMES = os.getenv("UPSTOX_WS_DEBUG_FRAMES", "false").strip().lower() == "true"
-
-De_bug = os.getenv("DE_BUG", "false").strip().lower() == "true"
+CARDS_PER_IMAGE = int(os.getenv("CARDS_PER_IMAGE", "6"))
+TARGET_PERCENT = float(os.getenv("TARGET_PERCENT", "2.0"))
 
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-
-MARKET_START = (9, 15)
-MARKET_END = (15, 30)
 
 HEADERS = {
     "Accept": "application/json",
@@ -80,21 +44,14 @@ HEADERS = {
 }
 
 INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+MARKET_START = (9, 15)
+MARKET_END = (15, 30)
 
 _INSTRUMENT_MAP: Dict[str, Dict[str, Any]] = {}
-_EXPIRY_CACHE: Dict[str, Dict[str, str]] = {}
-_WS_LTP_CACHE: Dict[str, Dict[str, Any]] = {}
-_WS_SUBSCRIBED_KEYS: set = set()
-_WS_DESIRED_KEYS: set = set()
-_WS_LOCK = threading.Lock()
-_WS_THREAD: Optional[threading.Thread] = None
-_WS_STOP_EVENT = threading.Event()
-_WS_CONNECTED = False
-_WS_LAST_CONNECT_TS = 0.0
-_WS_LAST_MSG_TS = 0.0
-_WS_PROTO_MODULE = None
 
-
+# =========================
+# BASICS
+# =========================
 def now_ist() -> datetime:
     return datetime.now(IST)
 
@@ -102,16 +59,10 @@ def now_ist() -> datetime:
 def log(msg: str) -> None:
     print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] {msg}", flush=True)
 
-def debug_log(msg: str) -> None:
-    if De_bug:
+
+def debug(msg: str) -> None:
+    if DE_BUG:
         log(f"[DE_BUG] {msg}")
-
-
-def short_symbol(symbol: str) -> str:
-    s = str(symbol or "").replace("NSE:", "").replace("BSE:", "")
-    for suf in ["-EQ", "-BE", "-BZ", "-BL", "-SM", "-INDEX"]:
-        s = s.replace(suf, "")
-    return s.strip()
 
 
 def ensure_float(x: Any, default: float = 0.0) -> float:
@@ -121,6 +72,13 @@ def ensure_float(x: Any, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return default
+
+
+def short_symbol(symbol: str) -> str:
+    s = str(symbol or "").replace("NSE:", "").replace("BSE:", "")
+    for suf in ["-EQ", "-BE", "-BZ", "-BL", "-SM", "-INDEX"]:
+        s = s.replace(suf, "")
+    return s.strip()
 
 
 def compact_num(v: Any) -> str:
@@ -133,29 +91,49 @@ def compact_num(v: Any) -> str:
         return f"{sign}{n/1e5:.2f}L"
     if n >= 1e3:
         return f"{sign}{n/1e3:.1f}K"
-    return f"{sign}{n:.0f}"
+    return f"{sign}{n:.2f}"
 
 
-def get_current_d_from_levels(setup: Dict[str, Any]) -> Tuple[float, str]:
-    d_levels = setup.get("d_levels") or []
-    current_idx = int(ensure_float(setup.get("current_d_index"), 0))
-    if isinstance(d_levels, list) and d_levels:
-        if current_idx < 0:
-            current_idx = 0
-        if current_idx >= len(d_levels):
-            current_idx = len(d_levels) - 1
-        item = d_levels[current_idx] or {}
-        value = ensure_float(item.get("value"), 0.0)
-        label = str(item.get("level") or setup.get("which_extension_active") or "Active D")
-        if value > 0:
-            return value, label
-    active_d = ensure_float(setup.get("active_d"), 0.0)
-    if active_d > 0:
-        return active_d, str(setup.get("which_extension_active") or "Active D")
-    return 0.0, ""
+def parse_any_datetime(x: Any) -> Optional[datetime]:
+    if x in (None, ""):
+        return None
+    if isinstance(x, datetime):
+        return x.astimezone(IST) if x.tzinfo else x.replace(tzinfo=IST)
+    s = str(x).strip()
+    if not s:
+        return None
+    formats = [
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.replace(tzinfo=IST) if dt.tzinfo is None else dt.astimezone(IST)
+        except Exception:
+            pass
+    try:
+        ts = pd.to_datetime(s, utc=False, errors="coerce")
+        if pd.isna(ts):
+            return None
+        if ts.tzinfo is None:
+            return ts.to_pydatetime().replace(tzinfo=IST)
+        return ts.tz_convert("Asia/Kolkata").to_pydatetime()
+    except Exception:
+        return None
 
 
-def in_market_hours() -> bool:
+def format_dt(dt: Optional[datetime]) -> str:
+    if not dt:
+        return ""
+    return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def is_market_hours() -> bool:
     if not ONLY_MARKET_HOURS:
         return True
     n = now_ist()
@@ -168,58 +146,25 @@ def in_market_hours() -> bool:
 
 def wait_until_market_start() -> None:
     while True:
-        if in_market_hours():
+        if is_market_hours():
             return
         n = now_ist()
         if n.weekday() >= 5:
             log("Weekend; waiting for next market session")
             time.sleep(600)
+            continue
+        start = n.replace(hour=MARKET_START[0], minute=MARKET_START[1], second=0, microsecond=0)
+        if n < start:
+            mins = int((start - n).total_seconds() // 60)
+            log(f"Waiting for market start; {mins} min left")
+            time.sleep(min(300, max(30, mins * 30)))
         else:
-            start = n.replace(hour=MARKET_START[0], minute=MARKET_START[1], second=0, microsecond=0)
-            if n < start:
-                mins = int((start - n).total_seconds() // 60)
-                log(f"Waiting for market start; {mins} min left")
-                time.sleep(min(300, max(30, mins * 30)))
-            else:
-                time.sleep(60)
+            time.sleep(60)
 
 
-def _load_font(size: int, bold: bool = False):
-    from PIL import ImageFont
-    import os
-
-    font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    fallback_name = "LiberationSans-Bold.ttf" if bold else "LiberationSans-Regular.ttf"
-
-    base_paths = [
-        os.getcwd(),
-        os.path.dirname(os.path.abspath(__file__)),
-    ]
-
-    candidates = []
-    for base in base_paths:
-        candidates.append(os.path.join(base, "fonts", font_name))
-        candidates.append(os.path.join(base, "fonts", fallback_name))
-        candidates.append(os.path.join(base, font_name))
-        candidates.append(os.path.join(base, fallback_name))
-
-    candidates += [
-        f"/usr/share/fonts/truetype/dejavu/{font_name}",
-        f"/usr/share/fonts/truetype/liberation2/{fallback_name}",
-    ]
-
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                print(f"[FONT LOADED] {path}")
-                return ImageFont.truetype(path, size)
-        except Exception as e:
-            print(f"[FONT SKIP] {path} | {e}")
-
-    print("[FONT ERROR] Using default font")
-    return ImageFont.load_default()
-
-
+# =========================
+# TELEGRAM
+# =========================
 def send_telegram_text(message: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log("Telegram credentials missing; skipping text")
@@ -238,8 +183,8 @@ def send_telegram_photo(image_bytes: bytes, caption: str) -> None:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
-        files = {"photo": ("npattern_alert.png", image_bytes, "image/png")}
-        data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+        files = {"photo": ("status.png", image_bytes, "image/png")}
+        data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1024]}
         resp = requests.post(url, files=files, data=data, timeout=max(HTTP_TIMEOUT, 30))
         resp.raise_for_status()
     except Exception as e:
@@ -247,6 +192,9 @@ def send_telegram_photo(image_bytes: bytes, caption: str) -> None:
         send_telegram_text(caption)
 
 
+# =========================
+# HTTP / MASTER
+# =========================
 def upstox_get(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -256,7 +204,7 @@ def upstox_get(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, A
             return resp.json()
         except Exception as e:
             last_err = e
-            log(f"GET retry {attempt}/{MAX_RETRIES} failed: {url} | {e}")
+            debug(f"GET retry {attempt}/{MAX_RETRIES} failed | url={url} | params={params} | error={e}")
             time.sleep(min(2.0 * attempt, 5.0))
     raise RuntimeError(f"Upstox GET failed: {url} | {last_err}")
 
@@ -291,292 +239,17 @@ def load_instrument_master() -> Dict[str, Dict[str, Any]]:
 
 
 def symbol_to_instrument_key(symbol: str) -> Optional[str]:
-    symbol_clean = short_symbol(symbol).upper()
-    rec = load_instrument_master().get(symbol_clean)
-    if rec:
-        key = str(rec.get("instrument_key", "")).strip()
-        debug_log(f"Instrument key mapped | symbol={symbol} | cleaned={symbol_clean} | key={key}")
-        return key
-    debug_log(f"Instrument key missing | symbol={symbol} | cleaned={symbol_clean}")
-    return None
-
-
-def _load_ws_proto_module():
-    global _WS_PROTO_MODULE
-    if _WS_PROTO_MODULE is not None:
-        return _WS_PROTO_MODULE
-
-    if MessageToDict is None:
-        debug_log("WS protobuf package google.protobuf is missing; REST fallback only")
-        _WS_PROTO_MODULE = False
-        return _WS_PROTO_MODULE
-
-    candidates = [
-        os.getenv("UPSTOX_WS_PROTO_MODULE", "").strip(),
-        "MarketDataFeedV3_pb2",
-        "MarketDataFeed_pb2",
-        "upstox_client.feeder.proto.MarketDataFeedV3_pb2",
-    ]
-    for mod_name in candidates:
-        if not mod_name:
-            continue
-        try:
-            spec = importlib.util.find_spec(mod_name)
-            if spec is None:
-                continue
-            module = __import__(mod_name, fromlist=['*'])
-            _WS_PROTO_MODULE = module
-            debug_log(f"WS proto loaded | module={mod_name}")
-            return _WS_PROTO_MODULE
-        except Exception as e:
-            debug_log(f"WS proto load failed | module={mod_name} | error={e}")
-    debug_log("WS proto not available; websocket will fall back to REST only")
-    _WS_PROTO_MODULE = False
-    return _WS_PROTO_MODULE
-
-
-def _ws_message_to_dict(message: Any) -> Optional[Dict[str, Any]]:
-    if message is None:
-        return None
-    if MessageToDict is None:
-        return None
-    if isinstance(message, str):
-        try:
-            return pyjson.loads(message)
-        except Exception:
-            return None
-
-    proto_mod = _load_ws_proto_module()
-    if not proto_mod or proto_mod is False:
-        return None
-
-    msg_cls = getattr(proto_mod, "FeedResponse", None)
-    if msg_cls is None:
-        debug_log("WS proto module missing FeedResponse class")
-        return None
-    try:
-        feed_response = msg_cls()
-        feed_response.ParseFromString(message)
-        return MessageToDict(feed_response, preserving_proto_field_name=True)
-    except Exception as e:
-        debug_log(f"WS protobuf decode failed | error={e}")
-        return None
-
-
-def _extract_ltp_from_feed_dict(feed_item: Dict[str, Any]) -> Optional[float]:
-    candidates: List[Any] = []
-    if not isinstance(feed_item, dict):
-        return None
-    candidates.append(feed_item.get("ltpc"))
-    first_level = feed_item.get("firstLevelWithGreeks")
-    if isinstance(first_level, dict):
-        candidates.append(first_level.get("ltpc"))
-    full_feed = feed_item.get("fullFeed")
-    if isinstance(full_feed, dict):
-        for key in ("marketFF", "indexFF", "firstLevelWithGreeks"):
-            block = full_feed.get(key)
-            if isinstance(block, dict):
-                candidates.append(block.get("ltpc"))
-                candidates.append(block)
-    market_ff = feed_item.get("marketFF")
-    if isinstance(market_ff, dict):
-        candidates.append(market_ff.get("ltpc"))
-    for candidate in candidates:
-        if isinstance(candidate, dict):
-            for field in ("ltp", "last_price", "lastPrice"):
-                try:
-                    val = candidate.get(field)
-                    if val not in (None, ""):
-                        return float(val)
-                except Exception:
-                    continue
-    return None
-
-
-def _update_ws_cache_from_dict(data: Dict[str, Any]) -> None:
-    global _WS_LAST_MSG_TS
-    if not isinstance(data, dict):
-        return
-    _WS_LAST_MSG_TS = time.time()
-    msg_type = str(data.get("type") or "")
-    if UPSTOX_WS_DEBUG_FRAMES:
-        debug_log(f"WS frame type | type={msg_type} | keys={list(data.keys())[:20]}")
-    feeds = data.get("feeds") or {}
-    if not isinstance(feeds, dict):
-        return
-    now_ts = time.time()
-    with _WS_LOCK:
-        for instrument_key, feed_item in feeds.items():
-            ltp_val = _extract_ltp_from_feed_dict(feed_item)
-            if ltp_val is None:
-                continue
-            _WS_LTP_CACHE[str(instrument_key)] = {
-                "ltp": float(ltp_val),
-                "ts": now_ts,
-                "raw_type": msg_type,
-            }
-            if UPSTOX_WS_DEBUG_FRAMES:
-                debug_log(f"WS LTP cached | instrument_key={instrument_key} | ltp={ltp_val}")
-
-
-def _get_ws_authorized_url() -> str:
-    data = upstox_get(
-        "https://api.upstox.com/v3/feed/market-data-feed/authorize",
-        params=None,
-    )
-    if not isinstance(data, dict):
-        raise RuntimeError("WS authorize response not dict")
-    payload = data.get("data") or {}
-    url = payload.get("authorized_redirect_uri") or payload.get("authorizedRedirectUri")
-    if not url:
-        raise RuntimeError(f"WS authorize URL missing: {data}")
-    return str(url)
-
-
-def _build_ws_subscribe_payload(keys: List[str]) -> bytes:
-    payload = {
-        "guid": uuid.uuid4().hex[:20],
-        "method": "sub",
-        "data": {
-            "mode": UPSTOX_WS_MODE,
-            "instrumentKeys": keys,
-        },
-    }
-    return pyjson.dumps(payload).encode("utf-8")
-
-
-def _ws_send_subscriptions(ws_app) -> None:
-    keys = []
-    with _WS_LOCK:
-        keys = sorted(_WS_DESIRED_KEYS - _WS_SUBSCRIBED_KEYS)
-    if not keys:
-        return
-    try:
-        payload = _build_ws_subscribe_payload(keys)
-        ws_app.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
-        with _WS_LOCK:
-            _WS_SUBSCRIBED_KEYS.update(keys)
-        debug_log(f"WS subscribed | keys={len(keys)}")
-    except Exception as e:
-        debug_log(f"WS subscribe failed | error={e}")
-
-
-def _ws_on_open(ws_app):
-    global _WS_CONNECTED, _WS_LAST_CONNECT_TS
-    _WS_CONNECTED = True
-    _WS_LAST_CONNECT_TS = time.time()
-    with _WS_LOCK:
-        _WS_SUBSCRIBED_KEYS.clear()
-    debug_log("WS connected")
-    _ws_send_subscriptions(ws_app)
-
-
-def _ws_on_message(ws_app, message):
-    data = _ws_message_to_dict(message)
-    if data is None:
-        if UPSTOX_WS_DEBUG_FRAMES:
-            debug_log(f"WS message ignored | type={type(message).__name__}")
-        return
-    _update_ws_cache_from_dict(data)
-    _ws_send_subscriptions(ws_app)
-
-
-def _ws_on_error(ws_app, error):
-    debug_log(f"WS error | error={error}")
-
-
-def _ws_on_close(ws_app, status_code, msg):
-    global _WS_CONNECTED
-    _WS_CONNECTED = False
-    with _WS_LOCK:
-        _WS_SUBSCRIBED_KEYS.clear()
-    debug_log(f"WS closed | code={status_code} | msg={msg}")
-
-
-def _ws_loop_worker() -> None:
-    global _WS_CONNECTED
-    sslopt = {"cert_reqs": ssl.CERT_NONE}
-    while not _WS_STOP_EVENT.is_set():
-        if not UPSTOX_WS_ENABLED:
-            return
-        if websocket is None:
-            debug_log("WS library websocket-client not available; REST fallback only")
-            return
-        proto_mod = _load_ws_proto_module()
-        if proto_mod is False:
-            debug_log("WS disabled because protobuf module is unavailable; REST fallback only")
-            return
-        try:
-            ws_url = _get_ws_authorized_url()
-            debug_log(f"WS authorize success | url={ws_url[:140]}")
-            app = websocket.WebSocketApp(
-                ws_url,
-                on_open=_ws_on_open,
-                on_message=_ws_on_message,
-                on_error=_ws_on_error,
-                on_close=_ws_on_close,
-            )
-            app.run_forever(sslopt=sslopt, ping_interval=20, ping_timeout=10, skip_utf8_validation=True)
-        except Exception as e:
-            _WS_CONNECTED = False
-            debug_log(f"WS loop exception | error={e}")
-        if _WS_STOP_EVENT.is_set():
-            break
-        time.sleep(max(2, UPSTOX_WS_RECONNECT_SECONDS))
-
-
-def ensure_ws_started() -> None:
-    global _WS_THREAD
-    if not UPSTOX_WS_ENABLED:
-        return
-    if _WS_THREAD and _WS_THREAD.is_alive():
-        return
-    _WS_STOP_EVENT.clear()
-    _WS_THREAD = threading.Thread(target=_ws_loop_worker, name="upstox-ws-ltp", daemon=True)
-    _WS_THREAD.start()
-    debug_log("WS thread started")
-
-
-def refresh_ws_subscriptions(keys: List[str]) -> None:
-    if not UPSTOX_WS_ENABLED:
-        return
-    ensure_ws_started()
-    with _WS_LOCK:
-        _WS_DESIRED_KEYS.update([k for k in keys if k])
-    debug_log(f"WS desired keys updated | total={len(_WS_DESIRED_KEYS)}")
-
-
-def get_ws_ltps_for_keys(keys: List[str]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    if not UPSTOX_WS_ENABLED:
-        return out
-    now_ts = time.time()
-    with _WS_LOCK:
-        for key in keys:
-            row = _WS_LTP_CACHE.get(key)
-            if not row:
-                continue
-            age = now_ts - float(row.get("ts", 0))
-            if age <= UPSTOX_WS_STALE_SECONDS:
-                out[key] = float(row.get("ltp", 0.0))
-    if out:
-        debug_log(f"WS cache hit | count={len(out)} | keys={list(out.keys())[:10]}")
-    return out
-
-
-def stop_ws() -> None:
-    _WS_STOP_EVENT.set()
+    rec = load_instrument_master().get(short_symbol(symbol).upper())
+    return str(rec.get("instrument_key", "")).strip() if rec else None
 
 
 def load_setups() -> List[Dict[str, Any]]:
     if not os.path.exists(JSON_FILE):
         log(f"JSON file not found: {JSON_FILE}")
-        debug_log(f"JSON missing | path={JSON_FILE}")
         return []
     with open(JSON_FILE, "r", encoding="utf-8") as f:
-        items = json.load(f)
-    debug_log(f"Loaded setups | path={JSON_FILE} | count={len(items)}")
-    return items
+        data = json.load(f)
+    return data if isinstance(data, list) else []
 
 
 def save_setups(items: List[Dict[str, Any]]) -> None:
@@ -584,224 +257,188 @@ def save_setups(items: List[Dict[str, Any]]) -> None:
         json.dump(items, f, indent=2, ensure_ascii=False)
 
 
-def is_completed_without_entry(setup: Dict[str, Any]) -> bool:
-    status = str(setup.get("status") or "").strip().lower()
-    target_status = str(setup.get("target_status") or "").strip().lower()
-    pattern_active = str(setup.get("pattern_active") or "").strip().lower()
-    return (
-        status == "completed_without_entry"
-        or "completed without entry" in target_status
-        or (status == "touched" and pattern_active == "no" and not setup.get("entry_found"))
-    )
-
-
-def should_process_setup(setup: Dict[str, Any]) -> bool:
-    status = str(setup.get("status") or "waiting").strip().lower()
-    if status in {"target_hit", "sl_hit", "completed_without_entry"}:
-        return False
-    if is_completed_without_entry(setup):
-        setup["status"] = "completed_without_entry"
-        return False
-    if bool(setup.get("entry_found")) or status in {"entry_found", "open"}:
-        return False
-    return True
-
-
-
+# =========================
+# PRICE / HISTORY
+# =========================
 def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
-    debug_log(f"batch_fetch_ltps start | setups={len(setups)}")
     key_to_symbol: Dict[str, str] = {}
     keys: List[str] = []
-
     for s in setups:
         sym = str(s.get("symbol") or "")
         key = symbol_to_instrument_key(sym)
         if key:
-            keys.append(key)
             key_to_symbol[key] = sym
-        else:
-            log(f"Instrument key missing for {sym}")
-
-    unique_keys = sorted(set(keys))
-    if not unique_keys:
-        debug_log("batch_fetch_ltps no instrument keys resolved")
+            keys.append(key)
+    joined = ",".join(sorted(set(keys)))
+    if not joined:
         return {}
 
+    data = upstox_get("https://api.upstox.com/v3/market-quote/ltp", params={"instrument_key": joined})
     out: Dict[str, float] = {}
-
-    # Prefer websocket cache when enabled; fall back to REST only for missing/stale keys.
-    if UPSTOX_WS_ENABLED:
-        refresh_ws_subscriptions(unique_keys)
-        ws_hits = get_ws_ltps_for_keys(unique_keys)
-        for key, ltp in ws_hits.items():
-            sym = key_to_symbol.get(key)
-            if sym:
-                out[sym] = float(ltp)
-        missing_keys = [k for k in unique_keys if k not in ws_hits]
-        debug_log(f"batch_fetch_ltps ws stage | hits={len(ws_hits)} | missing={len(missing_keys)} | connected={_WS_CONNECTED}")
-        if not missing_keys and out:
-            debug_log(f"batch_fetch_ltps final from ws only | returned={len(out)}")
-            return out
-        if not UPSTOX_WS_REST_FALLBACK and out:
-            debug_log(f"batch_fetch_ltps ws only mode active | returned={len(out)}")
-            return out
-    else:
-        missing_keys = unique_keys
-
-    joined = ",".join(missing_keys)
-    debug_log(f"LTP request | keys={len(missing_keys)} | joined={joined[:500]}")
-
-    try:
-        data = upstox_get("https://api.upstox.com/v3/market-quote/ltp", params={"instrument_key": joined})
-    except Exception as e:
-        log(f"Batch LTP failed: {e}")
-        debug_log(f"LTP request failed | error={e}")
+    payload = data.get("data", {}) if isinstance(data, dict) else {}
+    if not isinstance(payload, dict):
         return out
 
-    try:
-        if isinstance(data, dict):
-            debug_log(f"LTP raw top keys = {list(data.keys())}")
-            debug_log(f"LTP raw response = {str(data)[:3000]}")
-        else:
-            debug_log(f"LTP raw non-dict response type = {type(data).__name__} | value = {str(data)[:3000]}")
-    except Exception as e:
-        debug_log(f"LTP raw response print failed: {e}")
-
-    def try_pick_ltp(row: Any) -> Optional[float]:
+    for outer_key, row in payload.items():
         if not isinstance(row, dict):
-            return None
-        candidates: List[Any] = [
-            row.get("last_price"),
-            row.get("ltp"),
-            row.get("lastPrice"),
-            row.get("close"),
-        ]
-        market_data = row.get("market_data")
-        if isinstance(market_data, dict):
-            candidates.extend([
-                market_data.get("ltp"),
-                market_data.get("last_price"),
-                market_data.get("lastPrice"),
-                market_data.get("close"),
-            ])
-        quote = row.get("quote")
-        if isinstance(quote, dict):
-            candidates.extend([
-                quote.get("ltp"),
-                quote.get("last_price"),
-                quote.get("lastPrice"),
-                quote.get("close"),
-            ])
-        for val in candidates:
-            try:
-                if val not in (None, ""):
-                    return float(val)
-            except Exception:
-                continue
-        return None
-
-    payload = data.get("data", {}) if isinstance(data, dict) else {}
-    payload_candidates: List[Tuple[str, Any]] = [("data", payload)]
-    if isinstance(payload, dict):
-        for alt_key in ("quotes", "ltp", "items", "results"):
-            if alt_key in payload:
-                payload_candidates.append((f"data.{alt_key}", payload.get(alt_key)))
-    if isinstance(data, dict):
-        for alt_key in ("quotes", "ltp", "items", "results"):
-            if alt_key in data:
-                payload_candidates.append((alt_key, data.get(alt_key)))
-
-    seen_payload_ids = set()
-    for payload_name, candidate in payload_candidates:
-        if id(candidate) in seen_payload_ids:
             continue
-        seen_payload_ids.add(id(candidate))
-        if not isinstance(candidate, dict):
-            debug_log(f"LTP payload skipped | source={payload_name} | type={type(candidate).__name__}")
+        sym = key_to_symbol.get(str(outer_key))
+        if not sym:
+            row_key = row.get("instrument_token") or row.get("instrument_key") or row.get("symbol")
+            if row_key:
+                sym = key_to_symbol.get(str(row_key))
+        if not sym:
             continue
-
-        debug_log(f"LTP payload scan | source={payload_name} | keys={list(candidate.keys())[:30]}")
-        for key, row in candidate.items():
-            sym = key_to_symbol.get(str(key))
-            if not sym and isinstance(row, dict):
-                row_key = (
-                    row.get("instrument_token")
-                    or row.get("instrumentToken")
-                    or row.get("instrument_key")
-                    or row.get("instrumentKey")
-                    or row.get("symbol")
-                )
-                if row_key:
-                    sym = key_to_symbol.get(str(row_key))
-                    if sym:
-                        debug_log(f"LTP payload matched by row field | outer_key={key} | row_key={row_key} | symbol={sym}")
-            if not sym:
-                debug_log(f"LTP payload unmatched key | source={payload_name} | key={key}")
-                continue
-
-            ltp_val = try_pick_ltp(row)
-            if ltp_val is None:
-                debug_log(f"LTP parse failed | source={payload_name} | symbol={sym} | key={key} | row={str(row)[:1000]}")
-                continue
-
-            out[sym] = float(ltp_val)
-            debug_log(f"LTP parsed | source={payload_name} | symbol={sym} | key={key} | ltp={out[sym]}")
-
-    debug_log(f"batch_fetch_ltps done | returned={len(out)} | symbols={list(out.keys())}")
+        ltp = row.get("last_price")
+        if ltp is None:
+            ltp = row.get("ltp")
+        try:
+            out[sym] = float(ltp)
+        except Exception:
+            pass
+    debug(f"batch_fetch_ltps done | returned={len(out)} | symbols={list(out.keys())[:20]}")
     return out
 
-def fetch_history_15m(instrument_key: str) -> Optional[pd.DataFrame]:
-    debug_log(f"fetch_history_15m start | key={instrument_key}")
-    to_date = now_ist().strftime("%Y-%m-%d")
-    from_date = (now_ist() - timedelta(days=5)).strftime("%Y-%m-%d")
-    urls = [
-        f"https://api.upstox.com/v3/historical-candle/{instrument_key}/minutes/15/{to_date}/{from_date}",
-        f"https://api.upstox.com/v2/historical-candle/{instrument_key}/15minute/{to_date}/{from_date}",
-    ]
+
+def _parse_candles(candles: List[Any]) -> pd.DataFrame:
+    rows = []
+    for row in candles:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        rows.append({
+            "ts": row[0], "o": row[1], "h": row[2], "l": row[3], "c": row[4], "v": row[5]
+        })
+    if not rows:
+        return pd.DataFrame(columns=["datetime", "o", "h", "l", "c", "v"])
+    df = pd.DataFrame(rows)
+    df["datetime"] = pd.to_datetime(df["ts"], utc=True, errors="coerce").dt.tz_convert("Asia/Kolkata")
+    for col in ["o", "h", "l", "c", "v"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df[["datetime", "o", "h", "l", "c", "v"]].dropna(subset=["datetime", "o", "h", "l", "c"]).reset_index(drop=True)
+
+
+def fetch_history(instrument_key: str, resolution_minutes: int, lookback_days: Optional[int] = None) -> pd.DataFrame:
+    today = now_ist().strftime("%Y-%m-%d")
+    if lookback_days is None:
+        lookback_days = LOOKBACK_DAYS_DAILY if resolution_minutes >= 1440 else LOOKBACK_DAYS_MINUTE
+    from_date = (now_ist() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    urls: List[str] = []
+    if resolution_minutes >= 1440:
+        urls.extend([
+            f"https://api.upstox.com/v3/historical-candle/{instrument_key}/days/1/{today}/{from_date}",
+            f"https://api.upstox.com/v2/historical-candle/{instrument_key}/day/{today}/{from_date}",
+        ])
+    else:
+        res = str(int(resolution_minutes))
+        urls.extend([
+            f"https://api.upstox.com/v3/historical-candle/{instrument_key}/minutes/{res}/{today}/{from_date}",
+            f"https://api.upstox.com/v2/historical-candle/{instrument_key}/{res}minute/{today}/{from_date}",
+        ])
     for url in urls:
         try:
             data = upstox_get(url)
             candles = ((data.get("data") or {}).get("candles")) or data.get("candles") or []
-            if not candles:
-                debug_log(f"fetch_history_15m empty candles | key={instrument_key} | url={url}")
-                continue
-
-            rows: List[Dict[str, Any]] = []
-            for row in candles:
-                if not isinstance(row, (list, tuple)) or len(row) < 6:
-                    continue
-                rows.append({
-                    "ts": row[0],
-                    "o": row[1],
-                    "h": row[2],
-                    "l": row[3],
-                    "c": row[4],
-                    "v": row[5],
-                    "extra": row[6:] if len(row) > 6 else [],
-                })
-
-            if not rows:
-                debug_log(f"fetch_history_15m no usable rows | key={instrument_key} | url={url} | raw_cols={len(candles[0]) if candles else 0}")
-                continue
-
-            df = pd.DataFrame(rows)
-            df["datetime"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
-            for col in ["o", "h", "l", "c", "v"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            out_df = df[["datetime", "o", "h", "l", "c"]].dropna().reset_index(drop=True)
-            if out_df.empty:
-                debug_log(f"fetch_history_15m parsed empty dataframe | key={instrument_key} | url={url}")
-                continue
-            debug_log(f"fetch_history_15m success | key={instrument_key} | candles={len(out_df)} | raw_cols={len(candles[0]) if candles else 0} | url={url}")
-            return out_df
+            df = _parse_candles(candles)
+            if not df.empty:
+                debug(f"fetch_history success | key={instrument_key} | tf={resolution_minutes} | candles={len(df)} | url={url}")
+                return df
         except Exception as e:
-            debug_log(f"fetch_history_15m failed on url | key={instrument_key} | url={url} | error={e}")
-            continue
-    debug_log(f"fetch_history_15m failed all urls | key={instrument_key}")
-    return None
+            debug(f"fetch_history failed | key={instrument_key} | tf={resolution_minutes} | url={url} | error={e}")
+    return pd.DataFrame(columns=["datetime", "o", "h", "l", "c", "v"])
+
+
+# =========================
+# TF / PATTERN HELPERS
+# =========================
+def infer_pattern_tf_minutes(setup: Dict[str, Any]) -> int:
+    a = parse_any_datetime(setup.get("a_time"))
+    b = parse_any_datetime(setup.get("b_time"))
+    c = parse_any_datetime(setup.get("c_time"))
+    diffs = []
+    for x, y in [(a, b), (b, c)]:
+        if x and y:
+            mins = abs((y - x).total_seconds()) / 60.0
+            if mins >= 1:
+                diffs.append(mins)
+    if not diffs:
+        return 240
+    avg = sum(diffs) / len(diffs)
+    known = [15, 30, 45, 60, 120, 240, 1440]
+    return min(known, key=lambda k: abs(k - avg))
+
+
+def tf_delta(minutes: int) -> timedelta:
+    return timedelta(minutes=minutes)
+
+
+def current_d_candidates(setup: Dict[str, Any]) -> List[Tuple[str, float]]:
+    vals: List[Tuple[str, float]] = []
+    seen = set()
+    for item in (setup.get("d_levels") or []):
+        label = str(item.get("level") or "")
+        value = ensure_float(item.get("value"), 0.0)
+        if value > 0 and value not in seen:
+            vals.append((label or f"D{len(vals)+1}", value))
+            seen.add(value)
+    for label, field in [("Fib", "fib_d"), ("Trend", "trend_d"), ("Active D", "active_d")]:
+        value = ensure_float(setup.get(field), 0.0)
+        if value > 0 and value not in seen:
+            vals.append((label, value))
+            seen.add(value)
+    vals = sorted(vals, key=lambda x: x[1])
+    return vals
+
+
+def lowest_d(setup: Dict[str, Any]) -> float:
+    vals = [v for _, v in current_d_candidates(setup)]
+    return min(vals) if vals else 0.0
+
+
+def highest_d(setup: Dict[str, Any]) -> float:
+    vals = [v for _, v in current_d_candidates(setup)]
+    return max(vals) if vals else 0.0
+
+
+def touch_match_from_candle(setup: Dict[str, Any], row: pd.Series) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    levels = current_d_candidates(setup)
+    if not levels:
+        return None, None, None
+    low = ensure_float(row.get("l"))
+    high = ensure_float(row.get("h"))
+    touched = [(lab, val) for lab, val in levels if low <= val <= high]
+    if not touched:
+        return None, None, None
+    if pattern == "bullish":
+        lab, val = max(touched, key=lambda x: x[1])
+    else:
+        lab, val = min(touched, key=lambda x: x[1])
+    return lab, val, low if pattern == "bullish" else high
+
+
+def touch_match_from_ltp(setup: Dict[str, Any], ltp: float) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    levels = current_d_candidates(setup)
+    if not levels:
+        return None, None, None
+    if pattern == "bullish":
+        touched = [(lab, val) for lab, val in levels if ltp <= val]
+        if not touched:
+            return None, None, None
+        lab, val = max(touched, key=lambda x: x[1])
+        return lab, val, ltp
+    else:
+        touched = [(lab, val) for lab, val in levels if ltp >= val]
+        if not touched:
+            return None, None, None
+        lab, val = min(touched, key=lambda x: x[1])
+        return lab, val, ltp
+
 
 def to_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
     ha = df.copy().reset_index(drop=True)
+    if ha.empty:
+        return ha
     ha["ha_close"] = (ha["o"] + ha["h"] + ha["l"] + ha["c"]) / 4.0
     ha["ha_open"] = 0.0
     ha.loc[0, "ha_open"] = (ha.loc[0, "o"] + ha.loc[0, "c"]) / 2.0
@@ -812,820 +449,456 @@ def to_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
     return ha
 
 
-def is_doji(row: pd.Series, max_body_ratio: Optional[float] = None) -> bool:
+def is_doji(row: pd.Series) -> bool:
     rng = float(row["ha_high"] - row["ha_low"])
     if rng <= 0:
         return False
     body = abs(float(row["ha_close"] - row["ha_open"]))
-    ratio_limit = (HA_BODY_PERCENT / 100.0) if max_body_ratio is None else max_body_ratio
-    return (body / rng) <= ratio_limit
-
-
-
-def distance_percent(price_a: float, price_b: float) -> float:
-    if price_b == 0:
-        return 999.0
-    return abs(price_a - price_b) / abs(price_b) * 100.0
-
-
-def oi_filter_allows(pattern: str, oi_bias: str) -> bool:
-    if not REQUIRE_OI_CONFIRM:
-        return True
-    p = str(pattern or "").strip().lower()
-    b = str(oi_bias or "").strip().lower()
-    if p == "bullish":
-        return "bullish" in b
-    if p == "bearish":
-        return "bearish" in b
-    return True
-
-
-def entry_filter_allows(setup: Dict[str, Any], ltp: float, d_price: float, oi_bias: str) -> Tuple[bool, str]:
-    dist_pct = distance_percent(ltp, d_price)
-    if dist_pct > ENTRY_DISTANCE_PERCENT:
-        return False, f"Distance too far ({dist_pct:.2f}% > {ENTRY_DISTANCE_PERCENT:.2f}%)"
-
-    if STRONG_ZONE_REQUIRED:
-        strong_zone_count = int(ensure_float(setup.get("strong_zone_count"), 0))
-        if strong_zone_count < 2:
-            return False, "Strong zone required"
-
-    if not oi_filter_allows(str(setup.get("pattern", "")), oi_bias):
-        return False, f"OI mismatch ({oi_bias})"
-
-    return True, "OK"
+    return (body / rng) <= (HA_BODY_PERCENT / 100.0)
 
 
 def is_open_low_pct(open_p: float, low_p: float) -> bool:
     if low_p == 0:
         return False
-    diff_pct = abs(open_p - low_p) / abs(low_p) * 100.0
-    return diff_pct <= ENTRY_BUFFER_PERCENT
+    return (abs(open_p - low_p) / abs(low_p) * 100.0) <= ENTRY_BUFFER_PERCENT
+
 
 def is_open_high_pct(open_p: float, high_p: float) -> bool:
     if high_p == 0:
         return False
-    diff_pct = abs(open_p - high_p) / abs(high_p) * 100.0
-    return diff_pct <= ENTRY_BUFFER_PERCENT
-
-def check_entry_after_touch(
-    df: pd.DataFrame,
-    d_price: float,
-    pattern: str,
-    max_entry_percent: float = 2.0,
-    not_before_dt: Optional[datetime] = None,
-) -> Tuple[Optional[float], Optional[str], str]:
-    if df is None or df.empty or len(df) < 2:
-        debug_log(f"check_entry_after_touch no candles | pattern={pattern} | d_price={d_price}")
-        return None, None, "No candles"
-
-    work = df.copy()
-    if "datetime" not in work.columns:
-        debug_log(f"check_entry_after_touch missing datetime column | pattern={pattern} | d_price={d_price}")
-        return None, None, "No datetime"
-
-    work["datetime"] = pd.to_datetime(work["datetime"], utc=True, errors="coerce")
-    work = work.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
-    if work.empty or len(work) < 2:
-        debug_log(f"check_entry_after_touch empty after datetime cleanup | pattern={pattern} | d_price={d_price}")
-        return None, None, "No candles"
-
-    if not_before_dt is not None:
-        ndt = not_before_dt.astimezone(IST)
-        ndt_utc = pd.Timestamp(ndt).tz_convert("UTC")
-        before_count = len(work)
-        work = work[work["datetime"] >= ndt_utc].reset_index(drop=True)
-        debug_log(f"check_entry_after_touch filtered by not_before | pattern={pattern} | d_price={d_price} | not_before={ndt.isoformat()} | before={before_count} | after={len(work)}")
-
-    if ENTRY_MUST_BE_TODAY:
-        today_ist = now_ist().date()
-        before_count = len(work)
-        work = work[work["datetime"].dt.tz_convert("Asia/Kolkata").dt.date == today_ist].reset_index(drop=True)
-        debug_log(f"check_entry_after_touch filtered to today | pattern={pattern} | d_price={d_price} | today={today_ist} | before={before_count} | after={len(work)}")
-
-    if work.empty or len(work) < 2:
-        debug_log(f"check_entry_after_touch no same-session candles | pattern={pattern} | d_price={d_price}")
-        return None, None, "No same-session candles"
-
-    ha = to_heikin_ashi(work)
-
-    for i in range(len(ha) - 1):
-        first = ha.iloc[i]
-        second = ha.iloc[i + 1]
-
-        first_dt = parse_any_datetime(first.get("datetime"))
-        second_dt = parse_any_datetime(second.get("datetime"))
-        if not_before_dt is not None and first_dt and first_dt < not_before_dt.astimezone(IST):
-            continue
-        if not_before_dt is not None and second_dt and second_dt < not_before_dt.astimezone(IST):
-            continue
-
-        if pattern.lower() == "bullish":
-            nearest_scan_price = min(float(first["ha_open"]), float(first["ha_close"]), float(first["ha_low"]))
-        else:
-            nearest_scan_price = max(float(first["ha_open"]), float(first["ha_close"]), float(first["ha_high"]))
-
-        if abs(nearest_scan_price - d_price) > abs(d_price) * (ENTRY_DISTANCE_PERCENT / 100.0):
-            continue
-
-        if not is_doji(first):
-            continue
-
-        if pattern.lower() == "bullish":
-            confirm_ok = is_open_low_pct(float(second["ha_open"]), float(second["ha_low"]))
-            if confirm_ok:
-                entry_val = float(second["ha_high"])
-                entry_dt = str(second["datetime"])
-                debug_log(f"check_entry_after_touch bullish entry | entry={entry_val} | entry_time={entry_dt} | d_price={d_price}")
-                return entry_val, entry_dt, f"Bullish doji + open=low within {ENTRY_BUFFER_PERCENT:.2f}%"
-        else:
-            confirm_ok = is_open_high_pct(float(second["ha_open"]), float(second["ha_high"]))
-            if confirm_ok:
-                entry_val = float(second["ha_low"])
-                entry_dt = str(second["datetime"])
-                debug_log(f"check_entry_after_touch bearish entry | entry={entry_val} | entry_time={entry_dt} | d_price={d_price}")
-                return entry_val, entry_dt, f"Bearish doji + open=high within {ENTRY_BUFFER_PERCENT:.2f}%"
-
-    debug_log(f"check_entry_after_touch no valid entry | pattern={pattern} | d_price={d_price}")
-    return None, None, "No valid same-session entry"
-
-def get_nearest_expiry(instrument_key: str) -> Optional[str]:
-    try:
-        data = upstox_get("https://api.upstox.com/v2/option/contract", params={"instrument_key": instrument_key})
-        rows = data.get("data", []) if isinstance(data, dict) else []
-        expiries = set()
-        today = now_ist().date()
-
-        for row in rows:
-            exp = str(row.get("expiry") or "").strip()
-            if not exp:
-                continue
-            try:
-                exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
-            except Exception:
-                continue
-            if exp_date >= today:
-                expiries.add(exp_date)
-
-        if not expiries:
-            return None
-        nearest = min(expiries)
-        return nearest.strftime("%Y-%m-%d")
-    except Exception as e:
-        log(f"Nearest expiry fetch failed for {instrument_key}: {e}")
-        return None
+    return (abs(open_p - high_p) / abs(high_p) * 100.0) <= ENTRY_BUFFER_PERCENT
 
 
-def get_cached_nearest_expiry(instrument_key: str) -> Optional[str]:
-    today = now_ist().strftime("%Y-%m-%d")
-    cached = _EXPIRY_CACHE.get(instrument_key)
-    if cached and cached.get("asof") == today:
-        return cached.get("expiry")
-    expiry = get_nearest_expiry(instrument_key)
-    if expiry:
-        _EXPIRY_CACHE[instrument_key] = {"asof": today, "expiry": expiry}
-    return expiry
-
-
-def get_option_chain_5_strikes(setup: Dict[str, Any], instrument_key: str, ltp: float) -> Tuple[List[Dict[str, Any]], str]:
-    debug_log(f"get_option_chain_5_strikes start | symbol={setup.get('symbol')} | key={instrument_key} | ltp={ltp}")
-    expiry = get_cached_nearest_expiry(instrument_key)
-    if not expiry:
-        debug_log(f"get_option_chain_5_strikes no expiry | symbol={setup.get('symbol')} | key={instrument_key}")
-        return [], "NA"
-
-    try:
-        data = upstox_get("https://api.upstox.com/v2/option/chain", params={"instrument_key": instrument_key, "expiry_date": expiry})
-    except Exception as e:
-        log(f"Option chain failed for {setup.get('symbol')}: {e}")
-        debug_log(f"get_option_chain_5_strikes request failed | symbol={setup.get('symbol')} | error={e}")
-        return [], "NA"
-
-    rows = data.get("data", []) if isinstance(data, dict) else []
-    if not rows:
-        debug_log(f"get_option_chain_5_strikes empty rows | symbol={setup.get('symbol')} | expiry={expiry}")
-        return [], "NA"
-
-    normalized: List[Dict[str, Any]] = []
-    for x in rows:
-        strike = ensure_float(x.get("strike_price"))
-        ce = x.get("call_options", {}) or {}
-        pe = x.get("put_options", {}) or {}
-        if strike <= 0:
-            continue
-        ce_md = ce.get("market_data", {}) or {}
-        pe_md = pe.get("market_data", {}) or {}
-        ce_oi = ensure_float(ce_md.get("oi"))
-        pe_oi = ensure_float(pe_md.get("oi"))
-        ce_prev = ensure_float(ce_md.get("prev_oi"))
-        pe_prev = ensure_float(pe_md.get("prev_oi"))
-        normalized.append({
-            "strike": strike,
-            "ce_oi": ce_oi,
-            "ce_chg": ce_oi - ce_prev,
-            "pe_oi": pe_oi,
-            "pe_chg": pe_oi - pe_prev,
-            "ce_ltp": ensure_float(ce_md.get("ltp")),
-            "pe_ltp": ensure_float(pe_md.get("ltp")),
-            "ce_vol": ensure_float(ce_md.get("volume")),
-            "pe_vol": ensure_float(pe_md.get("volume")),
-        })
-
-    normalized = sorted(normalized, key=lambda r: r["strike"])
-    if not normalized:
-        return [], "NA"
-
-    atm_index = min(range(len(normalized)), key=lambda i: abs(normalized[i]["strike"] - ltp))
-    start = max(0, atm_index - 2)
-    end = min(len(normalized), atm_index + 3)
-    view = normalized[start:end]
-
-    ce_sum = sum(r["ce_chg"] for r in view)
-    pe_sum = sum(r["pe_chg"] for r in view)
-    bias = "Bullish" if pe_sum > ce_sum else "Bearish" if ce_sum > pe_sum else "Neutral"
-    debug_log(f"get_option_chain_5_strikes done | symbol={setup.get('symbol')} | expiry={expiry} | rows={len(view)} | bias={bias} | ce_sum={ce_sum} | pe_sum={pe_sum}")
-    return view, bias
-
-
-def find_strong_reversal_zones(setups: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    grouped: Dict[str, List[float]] = {}
-    for s in setups:
-        d = ensure_float(s.get("active_d") or s.get("fib_d") or 0.0)
-        if d <= 0:
-            continue
-        grouped.setdefault(str(s.get("symbol") or ""), []).append(d)
-
-    zones: Dict[str, Dict[str, Any]] = {}
-    for sym, vals in grouped.items():
-        vals = sorted(vals)
-        if len(vals) < 2:
-            continue
-        clusters: List[List[float]] = []
-        current = [vals[0]]
-        for v in vals[1:]:
-            if abs(v - current[-1]) <= current[-1] * (STRONG_ZONE_PCT / 100.0):
-                current.append(v)
-            else:
-                if len(current) >= 2:
-                    clusters.append(current)
-                current = [v]
-        if len(current) >= 2:
-            clusters.append(current)
-        if not clusters:
-            continue
-        best = max(clusters, key=len)
-        zones[sym] = {"low": min(best), "high": max(best), "count": len(best)}
-    return zones
-
-
-def in_cooldown(setup: Dict[str, Any]) -> bool:
-    last_alert_at = str(setup.get("last_alert_at") or "").strip()
-    if not last_alert_at:
+def within_entry_limit(price: float, d_ref: float) -> bool:
+    if d_ref <= 0:
         return False
-    try:
-        dt = pd.to_datetime(last_alert_at)
-        if dt.tzinfo is None:
-            dt = dt.tz_localize(IST)
-        else:
-            dt = dt.tz_convert(IST)
-        seconds = (now_ist() - dt.to_pydatetime()).total_seconds()
-        return seconds < ALERT_COOLDOWN_SECONDS
-    except Exception:
-        return False
+    return abs(price - d_ref) / abs(d_ref) * 100.0 <= ENTRY_LIMIT_PERCENT
 
 
-def confidence_score(setup: Dict[str, Any], ltp: float, bias: str) -> int:
-    score = 50
-    current_d_value, _ = get_current_d_from_levels(setup)
-    d_price = ensure_float(setup.get("touched_d_price") or current_d_value or setup.get("current_fib_d") or setup.get("fib_d"))
-    if d_price > 0:
-        diff_pct = abs(ltp - d_price) / d_price * 100.0
-        if diff_pct <= 0.25:
-            score += 20
-        elif diff_pct <= 0.50:
-            score += 12
-        elif diff_pct <= ENTRY_ZONE_PERCENT:
-            score += 6
-    p = str(setup.get("pattern", "")).lower()
-    b = bias.lower()
-    if p == "bullish" and "bullish" in b:
-        score += 15
-    if p == "bearish" and "bearish" in b:
-        score += 15
-    if str(setup.get("which_extension_active") or "").lower().startswith("1st"):
-        score += 5
-    return max(1, min(99, int(score)))
-
-
-def build_stock_alert_image(setup: Dict[str, Any], ltp: float, entry_price: float, entry_time: str, oi_rows: List[Dict[str, Any]], oi_bias: str) -> bytes:
-    img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (242, 245, 249))
-    draw = ImageDraw.Draw(img)
-
-    black = (18, 18, 18)
-    dark = (44, 62, 80)
-    blue = (41, 98, 255)
-    blue_soft = (232, 240, 255)
-    green = (22, 163, 74)
-    green_soft = (230, 244, 234)
-    red = (220, 38, 38)
-    red_soft = (254, 242, 242)
-    orange = (234, 88, 12)
-    orange_soft = (255, 237, 213)
-    white = (255, 255, 255)
-    border = (220, 226, 232)
-    head_fill = (240, 244, 248)
-    gray = (99, 115, 129)
-
-    f_title = _load_font(54, True)
-    f_sub = _load_font(26, False)
-    f_head = _load_font(28, True)
-    f_body = _load_font(28, False)
-    f_small = _load_font(22, False)
-    f_tbl_h = _load_font(24, True)
-    f_tbl_b = _load_font(23, False)
-
-    # Background panels
-    draw.rounded_rectangle((24, 18, IMAGE_WIDTH - 24, 110), radius=26, fill=white, outline=border, width=2)
-    draw.rounded_rectangle((24, 128, IMAGE_WIDTH - 24, 520), radius=26, fill=white, outline=border, width=2)
-    draw.rounded_rectangle((24, 540, IMAGE_WIDTH - 24, IMAGE_HEIGHT - 24), radius=26, fill=white, outline=border, width=2)
-
-    # Header
-    draw.text((46, 30), "N PATTERN ENTRY ALERT", font=f_title, fill=blue)
-    stamp = now_ist().strftime("%d-%m-%Y %H:%M IST")
-    sb = draw.textbbox((0, 0), stamp, font=f_sub)
-    draw.text((IMAGE_WIDTH - 46 - (sb[2] - sb[0]), 42), stamp, font=f_sub, fill=dark)
-
-    # Top stat pills
-    pills = [
-        ("Stock", short_symbol(setup.get("symbol")), blue_soft, blue),
-        ("Pattern", str(setup.get("pattern", "")), blue_soft, blue),
-        ("Status", str(setup.get("status", "")), green_soft if str(setup.get("status","")).lower()=="entry_found" else orange_soft, green if str(setup.get("status","")).lower()=="entry_found" else orange),
+# =========================
+# STATUS / IMAGE
+# =========================
+def load_font(size: int, bold: bool = False):
+    name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    candidates = [
+        os.path.join(os.getcwd(), "fonts", name),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", name),
+        f"/usr/share/fonts/truetype/dejavu/{name}",
     ]
-    px = 42
-    py = 128 + 18
-    for label, value, fill, color in pills:
-        txt = f"{label}: {value}"
-        bb = draw.textbbox((0, 0), txt, font=f_small)
-        w = (bb[2] - bb[0]) + 34
-        draw.rounded_rectangle((px, py, px + w, py + 42), radius=18, fill=fill, outline=fill, width=1)
-        draw.text((px + 16, py + 8), txt, font=f_small, fill=color)
-        px += w + 14
-
-    strong_zone_text = "N/A"
-    strong_zone_low = ensure_float(setup.get("strong_zone_low"), 0.0)
-    strong_zone_high = ensure_float(setup.get("strong_zone_high"), 0.0)
-    strong_zone_count = int(ensure_float(setup.get("strong_zone_count"), 0))
-    if strong_zone_low > 0 and strong_zone_high > 0 and strong_zone_count >= 2:
-        strong_zone_text = f"{strong_zone_low:.2f} - {strong_zone_high:.2f} ({strong_zone_count})"
-
-    left = [
-        ("D Source", str(setup.get("touched_d_source") or setup.get("which_extension_active") or "Active D")),
-        ("Touched D", f"{ensure_float(setup.get('touched_d_price') or setup.get('active_d')):.2f}"),
-        ("Entry", f"{entry_price:.2f}"),
-        ("LTP", f"{ltp:.2f}"),
-        ("Entry Time", str(entry_time).replace("T", " ")[:19]),
-    ]
-    sl_price = ensure_float(setup.get("sl_price"))
-    target_price = ensure_float(setup.get("target_price"))
-    conf = int(setup.get("confidence_score", 0))
-    right = [
-        ("SL", f"{sl_price:.2f}" if sl_price > 0 else "-"),
-        ("Target", f"{target_price:.2f}" if target_price > 0 else "-"),
-        ("OI Bias", oi_bias),
-        ("Confidence", f"{conf}%"),
-        ("Strong Zone", strong_zone_text),
-    ]
-
-    # Info columns
-    y = 128 + 86
-    for lab, val in left:
-        draw.text((52, y), f"{lab}:", font=f_head, fill=dark)
-        col = green if lab == "Entry" else black
-        draw.text((280, y), val, font=f_body, fill=col)
-        y += 58
-
-    y = 128 + 86
-    for lab, val in right:
-        if lab == "SL":
-            color = red
-        elif lab == "Target":
-            color = green
-        elif lab == "OI Bias":
-            color = green if "Bullish" in val else red if "Bearish" in val else dark
-        elif lab == "Strong Zone" and strong_zone_text != "-":
-            color = orange
-        elif lab == "Confidence":
-            color = blue
-        else:
-            color = black
-        draw.text((740, y), f"{lab}:", font=f_head, fill=dark)
-        draw.text((980, y), val, font=f_body, fill=color)
-        y += 58
-
-    # OI title
-    draw.text((48, 560), "OI TABLE (5 STRIKES)", font=f_head, fill=dark)
-    subtitle = "1 stock per image • CE/PE change highlights • ATM-centered"
-    draw.text((48, 596), subtitle, font=f_small, fill=gray)
-
-    headers = ["Strike", "CE LTP", "CE OI", "CE Chg", "PE LTP", "PE OI", "PE Chg"]
-    widths = [155, 170, 185, 170, 170, 185, 170]
-    xs = [48]
-    for w in widths:
-        xs.append(xs[-1] + w)
-    row_h = 70
-    y0 = 640
-
-    for j, h in enumerate(headers):
-        draw.rounded_rectangle((xs[j], y0, xs[j + 1], y0 + row_h), radius=10, fill=head_fill, outline=border, width=1)
-        bbox = draw.textbbox((0, 0), h, font=f_tbl_h)
-        tw = bbox[2] - bbox[0]
-        draw.text((xs[j] + (widths[j] - tw) / 2, y0 + 20), h, font=f_tbl_h, fill=blue)
-
-    base_y = y0 + row_h + 8
-    for i, r in enumerate(oi_rows[:5]):
-        y1 = base_y + i * row_h
-        y2 = y1 + row_h - 6
-        vals = [
-            f"{ensure_float(r.get('strike')):.0f}",
-            f"{ensure_float(r.get('ce_ltp')):.2f}",
-            compact_num(r.get("ce_oi")),
-            compact_num(r.get("ce_chg")),
-            f"{ensure_float(r.get('pe_ltp')):.2f}",
-            compact_num(r.get("pe_oi")),
-            compact_num(r.get("pe_chg")),
-        ]
-        colors = [
-            black,
-            black,
-            black,
-            green if ensure_float(r.get("ce_chg")) > 0 else red if ensure_float(r.get("ce_chg")) < 0 else dark,
-            black,
-            black,
-            green if ensure_float(r.get("pe_chg")) > 0 else red if ensure_float(r.get("pe_chg")) < 0 else dark,
-        ]
-        fill = (250, 252, 255) if i % 2 == 0 else white
-        for j, v in enumerate(vals):
-            draw.rounded_rectangle((xs[j], y1, xs[j + 1], y2), radius=8, fill=fill, outline=border, width=1)
-            bbox = draw.textbbox((0, 0), v, font=f_tbl_b)
-            tw = bbox[2] - bbox[0]
-            draw.text((xs[j] + (widths[j] - tw) / 2, y1 + 18), v, font=f_tbl_b, fill=colors[j])
-
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    return bio.getvalue()
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
 
 
-def detect_touch(setup: Dict[str, Any], ltp: float) -> Tuple[Optional[float], str]:
-    current_d_value, current_d_label = get_current_d_from_levels(setup)
-    debug_log(f"detect_touch start | symbol={setup.get('symbol')} | ltp={ltp} | active_d={current_d_value} | active_label={current_d_label} | fib_d={setup.get('current_fib_d') or setup.get('fib_d')} | trend_d={setup.get('trend_d')}")
-    fib_d = ensure_float(setup.get("current_fib_d") or setup.get("fib_d"))
-    trend_d = ensure_float(setup.get("trend_d"))
+def build_status_board(title: str, records: List[Dict[str, Any]]) -> List[bytes]:
+    if not records:
+        return []
+    pages: List[bytes] = []
+    per_page = max(1, CARDS_PER_IMAGE)
+    font_title = load_font(48, True)
+    font_head = load_font(24, True)
+    font_body = load_font(22, False)
+    for start in range(0, len(records), per_page):
+        chunk = records[start:start+per_page]
+        img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (243, 246, 250))
+        draw = ImageDraw.Draw(img)
+        draw.text((40, 22), title, font=font_title, fill=(20, 40, 90))
+        stamp = now_ist().strftime("%d-%m-%Y %H:%M IST")
+        draw.text((IMAGE_WIDTH - 340, 34), stamp, font=font_body, fill=(60, 70, 80))
+        cols = 2
+        rows = max(1, (per_page + cols - 1) // cols)
+        card_w = (IMAGE_WIDTH - 60) // cols - 20
+        card_h = (IMAGE_HEIGHT - 120) // rows - 20
+        for i, rec in enumerate(chunk):
+            r = i // cols
+            c = i % cols
+            x1 = 30 + c * (card_w + 20)
+            y1 = 100 + r * (card_h + 20)
+            x2 = x1 + card_w
+            y2 = y1 + card_h
+            draw.rounded_rectangle((x1, y1, x2, y2), radius=24, fill=(255, 255, 255), outline=(216, 224, 232), width=2)
+            sym = rec.get("display_symbol") or short_symbol(rec.get("symbol"))
+            draw.text((x1 + 18, y1 + 14), str(sym), font=font_head, fill=(18, 18, 18))
+            status = str(rec.get("status") or "")
+            draw.text((x1 + 18, y1 + 48), status, font=font_body, fill=(30, 100, 180))
+            lines = [
+                f"Pattern: {rec.get('pattern', '')}",
+                f"D: {rec.get('touched_d_source', '')} {ensure_float(rec.get('touched_d_price'), 0.0):.2f}" if ensure_float(rec.get('touched_d_price'), 0.0) else f"D: {ensure_float(rec.get('active_d'), 0.0):.2f}",
+                f"Touch Px: {ensure_float(rec.get('touched_price'), 0.0):.2f}" if ensure_float(rec.get('touched_price'), 0.0) else "Touch Px: -",
+                f"Touch Time: {str(rec.get('touched_at') or '')[:19]}",
+                f"Entry: {ensure_float(rec.get('entry_price'), 0.0):.2f}" if rec.get('entry_price') not in (None, '') else "Entry: -",
+                f"Entry Time: {str(rec.get('entry_time') or '')[:19]}",
+                f"SL: {ensure_float(rec.get('sl_price'), 0.0):.2f}" if rec.get('sl_price') not in (None, '') else "SL: -",
+                f"Target: {ensure_float(rec.get('target_price'), 0.0):.2f}" if rec.get('target_price') not in (None, '') else "Target: -",
+                f"LTP: {ensure_float(rec.get('ltp'), 0.0):.2f}" if rec.get('ltp') not in (None, '') else "LTP: -",
+                f"Reason: {str(rec.get('entry_reason') or rec.get('last_debug_reason') or '')[:60]}",
+            ]
+            yy = y1 + 84
+            for line in lines:
+                draw.text((x1 + 18, yy), line, font=font_body, fill=(65, 74, 84))
+                yy += 32
+        bio = io.BytesIO()
+        img.save(bio, format="PNG")
+        pages.append(bio.getvalue())
+    return pages
 
-    if current_d_value > 0:
-        allowed = abs(current_d_value) * (ENTRY_ZONE_PERCENT / 100.0)
-        if abs(ltp - current_d_value) <= allowed:
-            debug_log(f"detect_touch matched active D | symbol={setup.get('symbol')} | ltp={ltp} | d={current_d_value} | allowed={allowed}")
-            return current_d_value, current_d_label or "Active D"
 
-    if fib_d:
-        allowed = abs(fib_d) * (ENTRY_ZONE_PERCENT / 100.0)
-        if abs(ltp - fib_d) <= allowed:
-            debug_log(f"detect_touch matched fib D | symbol={setup.get('symbol')} | ltp={ltp} | d={fib_d} | allowed={allowed}")
-            return fib_d, "Fib"
-
-    if trend_d:
-        allowed = abs(trend_d) * (ENTRY_ZONE_PERCENT / 100.0)
-        if abs(ltp - trend_d) <= allowed:
-            debug_log(f"detect_touch matched trend D | symbol={setup.get('symbol')} | ltp={ltp} | d={trend_d} | allowed={allowed}")
-            return trend_d, "Trend"
-
-    debug_log(f"detect_touch no match | symbol={setup.get('symbol')} | ltp={ltp}")
-    return None, ""
+def send_status_boards(events: Dict[str, List[Dict[str, Any]]]) -> None:
+    mapping = {
+        "touched": "D TOUCHED",
+        "entry": "ENTRY TRIGGERED",
+        "status": "STATUS DATA",
+    }
+    for key, title in mapping.items():
+        items = events.get(key) or []
+        if not items:
+            continue
+        for idx, page in enumerate(build_status_board(title, items), 1):
+            caption = f"{title} ({idx}) | Count: {len(items)}"
+            send_telegram_photo(page, caption)
 
 
-def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
-    setup["last_checked_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
-    ensure_touch_state_is_current(setup)
-    debug_log(f"process_setup start | symbol={setup.get('symbol')} | status={setup.get('status')} | entry_found={setup.get('entry_found')} | ltp={ltp}")
-    if not should_process_setup(setup):
-        debug_log(f"process_setup skipped should_process_setup | symbol={setup.get('symbol')} | status={setup.get('status')}")
-        return setup
-    if setup.get("alert_sent") and in_cooldown(setup):
-        debug_log(f"process_setup skipped cooldown | symbol={setup.get('symbol')} | last_alert_at={setup.get('last_alert_at')}")
-        return setup
-
-    d_price, source = detect_touch(setup, ltp)
-    if d_price is None:
-        setup["last_debug_reason"] = f"No D touch | LTP={ltp}"
-        debug_log(f"process_setup no D touch | symbol={setup.get('symbol')} | ltp={ltp}")
-        return setup
-
-    setup["touched_d_source"] = source
-    setup["touched_d_price"] = round(float(d_price), 2)
-    setup["active_d"] = round(float(d_price), 2)
-    if not setup.get("touched_at"):
-        setup["touched_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
-    setup["touched_session_date"] = now_ist().strftime("%Y-%m-%d")
-
-    instrument_key = symbol_to_instrument_key(str(setup.get("symbol") or ""))
-    if not instrument_key:
-        setup["last_debug_reason"] = "Instrument key missing"
-        debug_log(f"process_setup instrument key missing | symbol={setup.get('symbol')}")
-        return setup
-
-    df = fetch_history_15m(instrument_key)
-    not_before_dt = None
-    if ENTRY_AFTER_TOUCH_ONLY:
-        not_before_dt = parse_any_datetime(setup.get("touched_at")) or current_market_start_ist()
-    elif ENTRY_MUST_BE_TODAY:
-        not_before_dt = current_market_start_ist()
-    entry_price, entry_time, reason = check_entry_after_touch(
-        df,
-        d_price,
-        str(setup.get("pattern", "")),
-        ENTRY_ZONE_PERCENT,
-        not_before_dt=not_before_dt,
-    )
-    setup["last_debug_reason"] = reason
-    debug_log(f"process_setup entry check | symbol={setup.get('symbol')} | d_price={d_price} | reason={reason} | entry_price={entry_price} | entry_time={entry_time}")
-
-    if not entry_price or not entry_time:
-        setup["status"] = "touched"
-        if is_completed_without_entry(setup):
-            setup["status"] = "completed_without_entry"
-        debug_log(f"process_setup no entry found | symbol={setup.get('symbol')} | status={setup.get('status')} | reason={reason}")
-        return setup
-
-    oi_rows, oi_bias = get_option_chain_5_strikes(setup, instrument_key, ltp)
-    setup["oi_bias"] = oi_bias
-
-    allowed_entry, filter_reason = entry_filter_allows(setup, float(ltp), float(d_price), oi_bias)
-    debug_log(f"process_setup entry filter | symbol={setup.get('symbol')} | allowed={allowed_entry} | reason={filter_reason} | oi_bias={oi_bias}")
-    if not allowed_entry:
-        setup["status"] = "touched"
-        setup["last_debug_reason"] = filter_reason
-        debug_log(f"process_setup blocked after filter | symbol={setup.get('symbol')} | reason={filter_reason}")
-        return setup
-
-    setup["entry_found"] = True
-    setup["alert_sent"] = True
-    setup["entry_price"] = round(float(entry_price), 2)
-    setup["entry_time"] = entry_time
-    setup["ltp_at_alert"] = round(float(ltp), 2)
-    setup["last_alert_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
-    setup["confidence_score"] = confidence_score(setup, float(ltp), oi_bias)
-    setup["status"] = "entry_found"
-
-    if str(setup.get("pattern", "")).lower() == "bullish":
-        setup["sl_price"] = round(float(d_price), 2)
-        setup["target_price"] = round(float(entry_price) * 1.02, 2)
-    else:
-        setup["sl_price"] = round(float(d_price), 2)
-        setup["target_price"] = round(float(entry_price) * 0.98, 2)
-
+# =========================
+# STATE MACHINE
+# =========================
+def reset_runtime_state(setup: Dict[str, Any]) -> Dict[str, Any]:
+    setup = dict(setup)
+    setup["d_hit"] = "No"
+    setup["touched_d_price"] = 0.0
+    setup["touched_d_source"] = ""
+    setup["touched_price"] = 0.0
+    setup["touched_at"] = ""
+    setup["entry_found"] = False
+    setup["entry_price"] = None
+    setup["entry_time"] = ""
+    setup["entry_reason"] = ""
+    setup["sl_price"] = None
+    setup["target_price"] = None
     setup["target_hit"] = False
     setup["sl_hit"] = False
-    debug_log(f"process_setup ENTRY FOUND | symbol={setup.get('symbol')} | entry_price={setup.get('entry_price')} | sl={setup.get('sl_price')} | target={setup.get('target_price')} | confidence={setup.get('confidence_score')}")
-
-    caption = (
-        f"🔥 N PATTERN ENTRY\n"
-        f"Stock: {short_symbol(setup.get('symbol'))}\n"
-        f"Pattern: {setup.get('pattern', '')}\n"
-        f"D: {source} ({d_price:.2f})\n"
-        f"Entry: {entry_price:.2f}\n"
-        f"SL: {ensure_float(setup.get('sl_price')):.2f}\n"
-        f"Target: {ensure_float(setup.get('target_price')):.2f}\n"
-        f"OI Bias: {oi_bias}\n"
-        f"Confidence: {int(setup.get('confidence_score', 0))}%\n"
-        f"HA Body%: {HA_BODY_PERCENT:.0f} | Dist%: {ENTRY_DISTANCE_PERCENT:.2f}"
-    )
-    image_bytes = build_stock_alert_image(setup, ltp, float(entry_price), entry_time, oi_rows, oi_bias)
-    send_telegram_photo(image_bytes, caption)
+    setup["status"] = "waiting"
+    setup["alert_sent"] = False
+    setup["ltp_at_alert"] = None
+    setup["last_alert_at"] = ""
+    setup["pattern_active"] = "Yes"
+    setup["target_status"] = ""
     return setup
 
 
-def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]) -> List[Dict[str, Any]]:
-    debug_log(f"track_open_positions start | setups={len(setups)} | ltp_map={len(ltp_map)}")
-    updated = []
-    for s in setups:
-        if is_completed_without_entry(s):
-            s["status"] = "completed_without_entry"
-            updated.append(s)
-            continue
-        if not s.get("entry_found") or str(s.get("status", "")) not in {"entry_found", "open"}:
-            updated.append(s)
-            continue
-        if s.get("target_hit") or s.get("sl_hit"):
-            updated.append(s)
-            continue
+def update_touch_state(setup: Dict[str, Any], source: str, d_price: float, touch_price: float, touch_dt: datetime) -> None:
+    setup["d_hit"] = "Yes"
+    setup["touched_d_source"] = source
+    setup["touched_d_price"] = round(float(d_price), 2)
+    setup["touched_price"] = round(float(touch_price), 2)
+    setup["touched_at"] = format_dt(touch_dt)
+    setup["status"] = "touched"
+    setup["active_d"] = round(float(d_price), 2)
 
-        symbol = str(s.get("symbol") or "")
-        ltp = ltp_map.get(symbol)
-        if ltp is None:
-            debug_log(f"track_open_positions no ltp | symbol={symbol}")
-            updated.append(s)
+
+def mark_pattern_failure(setup: Dict[str, Any], fail_dt: datetime, reason: str) -> None:
+    setup["status"] = "pattern_failed"
+    setup["pattern_active"] = "No"
+    setup["target_status"] = reason
+    setup["last_debug_reason"] = reason
+    setup["failure_time"] = format_dt(fail_dt)
+
+
+def mark_entry(setup: Dict[str, Any], entry_price: float, entry_time: datetime, reason: str) -> None:
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    sl_ref = lowest_d(setup) if pattern == "bullish" else highest_d(setup)
+    setup["entry_found"] = True
+    setup["entry_price"] = round(float(entry_price), 2)
+    setup["entry_time"] = format_dt(entry_time)
+    setup["entry_reason"] = reason
+    setup["status"] = "entry_found"
+    setup["sl_price"] = round(float(sl_ref), 2) if sl_ref > 0 else None
+    if pattern == "bullish":
+        setup["target_price"] = round(float(entry_price) * (1 + TARGET_PERCENT / 100.0), 2)
+    else:
+        setup["target_price"] = round(float(entry_price) * (1 - TARGET_PERCENT / 100.0), 2)
+
+
+def mark_stoploss(setup: Dict[str, Any], hit_dt: datetime, reason: str) -> None:
+    setup["sl_hit"] = True
+    setup["status"] = "sl_hit"
+    setup["target_status"] = reason
+    setup["sl_time"] = format_dt(hit_dt)
+
+
+def maybe_mark_target(setup: Dict[str, Any], pattern_df: pd.DataFrame, entry_dt: datetime) -> None:
+    if pattern_df.empty or not setup.get("entry_found"):
+        return
+    target = ensure_float(setup.get("target_price"), 0.0)
+    if target <= 0:
+        return
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    later = pattern_df[pattern_df["datetime"] >= entry_dt]
+    for _, row in later.iterrows():
+        high = ensure_float(row["h"])
+        low = ensure_float(row["l"])
+        dt = row["datetime"].to_pydatetime() if hasattr(row["datetime"], 'to_pydatetime') else row["datetime"]
+        if pattern == "bullish" and high >= target:
+            setup["target_hit"] = True
+            setup["status"] = "target_hit"
+            setup["target_status"] = "Target hit"
+            setup["target_time"] = format_dt(dt)
+            return
+        if pattern == "bearish" and low <= target:
+            setup["target_hit"] = True
+            setup["status"] = "target_hit"
+            setup["target_status"] = "Target hit"
+            setup["target_time"] = format_dt(dt)
+            return
+
+
+def find_failure_before_entry(setup: Dict[str, Any], pattern_df: pd.DataFrame, start_dt: datetime, tf_minutes: int) -> Optional[datetime]:
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    c_price = ensure_float(setup.get("c_price"), 0.0)
+    if c_price <= 0 or pattern_df.empty:
+        return None
+    window = pattern_df[pattern_df["datetime"] >= start_dt]
+    for _, row in window.iterrows():
+        close = ensure_float(row["c"], 0.0)
+        row_start = row["datetime"].to_pydatetime() if hasattr(row["datetime"], 'to_pydatetime') else row["datetime"]
+        row_close_dt = row_start + tf_delta(tf_minutes)
+        if pattern == "bullish" and close > c_price:
+            return row_close_dt
+        if pattern == "bearish" and close < c_price:
+            return row_close_dt
+    return None
+
+
+def find_touch_historical(setup: Dict[str, Any], pattern_df: pd.DataFrame, start_dt: datetime, tf_minutes: int) -> Tuple[Optional[str], Optional[float], Optional[float], Optional[datetime]]:
+    window = pattern_df[pattern_df["datetime"] >= start_dt]
+    for _, row in window.iterrows():
+        source, d_price, touch_px = touch_match_from_candle(setup, row)
+        if source and d_price is not None and touch_px is not None:
+            row_start = row["datetime"].to_pydatetime() if hasattr(row["datetime"], 'to_pydatetime') else row["datetime"]
+            touch_dt = row_start + tf_delta(tf_minutes)
+            return source, d_price, touch_px, touch_dt
+    return None, None, None, None
+
+
+def find_entry_15m(setup: Dict[str, Any], df15: pd.DataFrame, touch_dt: datetime, cutoff_dt: Optional[datetime]) -> Tuple[Optional[float], Optional[datetime], str]:
+    if df15.empty or len(df15) < 2:
+        return None, None, "No 15m candles"
+    work = df15.copy()
+    work = work[work["datetime"] >= touch_dt].sort_values("datetime").reset_index(drop=True)
+    if cutoff_dt is not None:
+        work = work[work["datetime"] < cutoff_dt].reset_index(drop=True)
+    if len(work) < 2:
+        return None, None, "No post-touch 15m candles"
+    ha = to_heikin_ashi(work)
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    d_ref = lowest_d(setup) if pattern == "bullish" else highest_d(setup)
+    for i in range(len(ha) - 1):
+        doji = ha.iloc[i]
+        nxt = ha.iloc[i + 1]
+        if not is_doji(doji):
             continue
-
-        pattern = str(s.get("pattern", "")).lower()
-        sl_price = ensure_float(s.get("sl_price"))
-        target_price = ensure_float(s.get("target_price"))
-        hit_text = None
-
+        doji_dt = doji["datetime"].to_pydatetime() if hasattr(doji["datetime"], 'to_pydatetime') else doji["datetime"]
+        next_dt = nxt["datetime"].to_pydatetime() if hasattr(nxt["datetime"], 'to_pydatetime') else nxt["datetime"]
+        if doji_dt < touch_dt:
+            continue
+        if cutoff_dt is not None and next_dt >= cutoff_dt:
+            break
         if pattern == "bullish":
-            if ltp >= target_price > 0:
-                s["target_hit"] = True
-                s["status"] = "target_hit"
-                hit_text = f"✅ TARGET HIT\n{short_symbol(symbol)}\nLTP: {ltp:.2f}\nTarget: {target_price:.2f}"
-            elif ltp <= sl_price and sl_price > 0:
-                s["sl_hit"] = True
-                s["status"] = "sl_hit"
-                hit_text = f"❌ STOPLOSS HIT\n{short_symbol(symbol)}\nLTP: {ltp:.2f}\nSL: {sl_price:.2f}"
+            if is_open_low_pct(float(nxt["ha_open"]), float(nxt["ha_low"])):
+                entry_price = float(doji["ha_high"])
+                if within_entry_limit(entry_price, d_ref):
+                    return entry_price, next_dt, f"Bullish doji + next HA open=low within {ENTRY_BUFFER_PERCENT:.2f}%"
+                return None, None, f"Entry beyond {ENTRY_LIMIT_PERCENT:.2f}% from D"
         else:
-            if ltp <= target_price and target_price > 0:
-                s["target_hit"] = True
-                s["status"] = "target_hit"
-                hit_text = f"✅ TARGET HIT\n{short_symbol(symbol)}\nLTP: {ltp:.2f}\nTarget: {target_price:.2f}"
-            elif ltp >= sl_price > 0:
-                s["sl_hit"] = True
-                s["status"] = "sl_hit"
-                hit_text = f"❌ STOPLOSS HIT\n{short_symbol(symbol)}\nLTP: {ltp:.2f}\nSL: {sl_price:.2f}"
-
-        if hit_text:
-            debug_log(f"track_open_positions hit | symbol={symbol} | status={s.get('status')} | ltp={ltp} | target={target_price} | sl={sl_price}")
-            s["last_alert_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
-            send_telegram_text(hit_text)
-        updated.append(s)
-    return updated
+            if is_open_high_pct(float(nxt["ha_open"]), float(nxt["ha_high"])):
+                entry_price = float(doji["ha_low"])
+                if within_entry_limit(entry_price, d_ref):
+                    return entry_price, next_dt, f"Bearish doji + next HA open=high within {ENTRY_BUFFER_PERCENT:.2f}%"
+                return None, None, f"Entry beyond {ENTRY_LIMIT_PERCENT:.2f}% from D"
+    return None, None, "No valid 15m next-candle entry"
 
 
-
-def send_real_startup_sample_once() -> None:
-    if not SEND_REAL_STARTUP_SAMPLE:
+def apply_pattern_tf_post_entry_rules(setup: Dict[str, Any], pattern_df: pd.DataFrame, entry_dt: datetime, tf_minutes: int) -> None:
+    if pattern_df.empty:
         return
-    if os.path.exists(REAL_STARTUP_SAMPLE_SENT_FILE):
+    pattern = str(setup.get("pattern") or "").strip().lower()
+    sl_ref = lowest_d(setup) if pattern == "bullish" else highest_d(setup)
+    if sl_ref <= 0:
         return
-    try:
-        setups = load_setups()
-        if not setups:
-            log("No setups for real startup sample")
+    later = pattern_df[pattern_df["datetime"] >= entry_dt]
+    for _, row in later.iterrows():
+        close = ensure_float(row["c"], 0.0)
+        row_start = row["datetime"].to_pydatetime() if hasattr(row["datetime"], 'to_pydatetime') else row["datetime"]
+        close_dt = row_start + tf_delta(tf_minutes)
+        if pattern == "bullish" and close < sl_ref:
+            mark_stoploss(setup, close_dt, f"Pattern TF close below lowest D ({sl_ref:.2f})")
             return
-
-        # prefer active setups first
-        chosen = None
-        preferred_status = {"waiting", "touched", "shifted_to_next_d", "entry_found"}
-        for s in setups:
-            st = str(s.get("status") or "").strip().lower()
-            if st in preferred_status:
-                chosen = s
-                break
-        if chosen is None:
-            chosen = setups[0]
-
-        symbol = str(chosen.get("symbol") or "")
-        instrument_key = symbol_to_instrument_key(symbol)
-        if not instrument_key:
-            log(f"Real startup sample skipped: instrument key missing for {symbol}")
+        if pattern == "bearish" and close > sl_ref:
+            mark_stoploss(setup, close_dt, f"Pattern TF close above highest D ({sl_ref:.2f})")
             return
-
-        ltps = batch_fetch_ltps([chosen])
-        ltp = ensure_float(ltps.get(symbol), ensure_float(chosen.get("ltp"), 0.0))
-        if ltp <= 0:
-            log(f"Real startup sample skipped: LTP missing for {symbol}")
-            return
-
-        entry_price = ensure_float(chosen.get("entry_price"), 0.0)
-        if entry_price <= 0:
-            entry_price = ltp
-
-        entry_time = str(chosen.get("entry_time") or now_ist().strftime("%Y-%m-%d %H:%M:%S"))
-        oi_rows, oi_bias = get_option_chain_5_strikes(chosen, instrument_key, ltp)
-
-        zones = find_strong_reversal_zones(setups)
-        z = zones.get(symbol)
-        if z:
-            chosen["strong_zone_low"] = round(float(z["low"]), 2)
-            chosen["strong_zone_high"] = round(float(z["high"]), 2)
-            chosen["strong_zone_count"] = int(z["count"])
-
-        if ensure_float(chosen.get("sl_price"), 0.0) <= 0:
-            chosen["sl_price"] = round(ensure_float(chosen.get("active_d") or chosen.get("touched_d_price")), 2)
-        if ensure_float(chosen.get("target_price"), 0.0) <= 0:
-            if str(chosen.get("pattern", "")).lower() == "bullish":
-                chosen["target_price"] = round(entry_price * 1.02, 2)
-            else:
-                chosen["target_price"] = round(entry_price * 0.98, 2)
-
-        if ensure_float(chosen.get("confidence_score"), 0.0) <= 0:
-            chosen["confidence_score"] = confidence_score(chosen, ltp, oi_bias)
-
-        image_bytes = build_stock_alert_image(chosen, ltp, entry_price, entry_time, oi_rows, oi_bias)
-        caption = (
-            f"🧪 REAL STARTUP SAMPLE\n"
-            f"Stock: {short_symbol(symbol)}\n"
-            f"Status: {chosen.get('status', '')}\n"
-            f"LTP: {ltp:.2f}"
-        )
-        send_telegram_photo(image_bytes, caption)
-
-        with open(REAL_STARTUP_SAMPLE_SENT_FILE, "w", encoding="utf-8") as f:
-            f.write(now_ist().strftime("%Y-%m-%d %H:%M:%S"))
-        log(f"Real startup sample sent for {symbol}")
-    except Exception as e:
-        log(f"Real startup sample failed: {e}")
+    maybe_mark_target(setup, later, entry_dt)
 
 
+def process_one_setup(setup: Dict[str, Any], ltp_map: Dict[str, float], historical_mode: bool) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    events: List[Dict[str, Any]] = []
+    s = dict(setup)
+    s["last_checked_at"] = format_dt(now_ist())
+    symbol = str(s.get("symbol") or "")
+    pattern = str(s.get("pattern") or "").strip().lower()
+    instrument_key = symbol_to_instrument_key(symbol)
+    if not instrument_key:
+        s["last_debug_reason"] = "Instrument key missing"
+        return s, events
+
+    tf_minutes = infer_pattern_tf_minutes(s)
+    s["pattern_tf_minutes"] = tf_minutes
+    c_time = parse_any_datetime(s.get("c_time"))
+    if not c_time:
+        s["last_debug_reason"] = "C time missing"
+        return s, events
+    scan_start = c_time + tf_delta(tf_minutes)
+
+    pattern_df = fetch_history(instrument_key, tf_minutes)
+    if pattern_df.empty:
+        s["last_debug_reason"] = "Pattern timeframe history missing"
+        return s, events
+
+    # Historical/off-market recalculates from data.
+    if historical_mode:
+        s = reset_runtime_state(s)
+
+    # Failure before touch/entry.
+    fail_dt = find_failure_before_entry(s, pattern_df, scan_start, tf_minutes)
+
+    # Touch detection.
+    touch_source = None
+    touch_d = None
+    touch_px = None
+    touch_dt = None
+
+    if s.get("d_hit") == "Yes" and s.get("touched_at"):
+        touch_source = str(s.get("touched_d_source") or "")
+        touch_d = ensure_float(s.get("touched_d_price"), 0.0)
+        touch_px = ensure_float(s.get("touched_price"), 0.0)
+        touch_dt = parse_any_datetime(s.get("touched_at"))
+
+    if not touch_dt:
+        if historical_mode:
+            touch_source, touch_d, touch_px, touch_dt = find_touch_historical(s, pattern_df, scan_start, tf_minutes)
+        else:
+            ltp = ltp_map.get(symbol)
+            if ltp is not None:
+                touch_source, touch_d, touch_px = touch_match_from_ltp(s, ltp)
+                if touch_source:
+                    touch_dt = now_ist()
+        if touch_dt and touch_source and touch_d is not None and touch_px is not None:
+            update_touch_state(s, touch_source, touch_d, touch_px, touch_dt)
+            events.append(dict(s))
+            events[-1]["_event_type"] = "touched"
+            debug(f"touch found | symbol={symbol} | source={touch_source} | d={touch_d} | price={touch_px} | dt={format_dt(touch_dt)}")
+
+    if not touch_dt:
+        if fail_dt:
+            mark_pattern_failure(s, fail_dt, f"Pattern TF close beyond C before touch")
+            events.append(dict(s))
+            events[-1]["_event_type"] = "status"
+        return s, events
+
+    if fail_dt and fail_dt <= touch_dt:
+        mark_pattern_failure(s, fail_dt, "Pattern TF close beyond C before touch")
+        events.append(dict(s))
+        events[-1]["_event_type"] = "status"
+        return s, events
+
+    # Entry search after touch, before failure.
+    df15 = fetch_history(instrument_key, 15)
+    entry_price = None
+    entry_dt = None
+    entry_reason = ""
+    if not s.get("entry_found"):
+        entry_price, entry_dt, entry_reason = find_entry_15m(s, df15, touch_dt, fail_dt)
+        s["last_debug_reason"] = entry_reason
+        if entry_price and entry_dt:
+            mark_entry(s, entry_price, entry_dt, entry_reason)
+            events.append(dict(s))
+            events[-1]["_event_type"] = "entry"
+            debug(f"entry found | symbol={symbol} | entry={entry_price} | dt={format_dt(entry_dt)}")
+        elif fail_dt:
+            mark_pattern_failure(s, fail_dt, "Pattern TF close beyond C before entry")
+            events.append(dict(s))
+            events[-1]["_event_type"] = "status"
+            return s, events
+        else:
+            s["status"] = "touched"
+            return s, events
+    else:
+        entry_dt = parse_any_datetime(s.get("entry_time"))
+
+    if s.get("entry_found") and entry_dt:
+        apply_pattern_tf_post_entry_rules(s, pattern_df, entry_dt, tf_minutes)
+        if s.get("sl_hit") or s.get("target_hit"):
+            events.append(dict(s))
+            events[-1]["_event_type"] = "status"
+
+    return s, events
+
+
+# =========================
+# MAIN
+# =========================
 def main() -> None:
     if not UPSTOX_ACCESS_TOKEN:
         raise RuntimeError("Missing UPSTOX_ACCESS_TOKEN")
-    log("N Pattern Upstox Final V4 Auto Expiry started")
-    debug_log(f"Startup env | DE_BUG={De_bug} | JSON_FILE={JSON_FILE} | POLL_SECONDS={POLL_SECONDS} | RATE_LIMIT_SLEEP={RATE_LIMIT_SLEEP} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS} | UPSTOX_WS_ENABLED={UPSTOX_WS_ENABLED} | UPSTOX_WS_MODE={UPSTOX_WS_MODE} | UPSTOX_WS_REST_FALLBACK={UPSTOX_WS_REST_FALLBACK}")
-    try:
-        print("WORKING DIR:", os.getcwd())
-        print("FILES:", os.listdir())
-        print("FONTS:", os.listdir("fonts") if os.path.exists("fonts") else "NO FONTS DIR")
-    except Exception as e:
-        print("FONT DEBUG ERROR:", e)
-    send_real_startup_sample_once()
-    log(f"Smart filters | HA_BODY_PERCENT={HA_BODY_PERCENT} | ENTRY_DISTANCE_PERCENT={ENTRY_DISTANCE_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT} | ENTRY_MUST_BE_TODAY={ENTRY_MUST_BE_TODAY} | ENTRY_AFTER_TOUCH_ONLY={ENTRY_AFTER_TOUCH_ONLY} | REQUIRE_OI_CONFIRM={REQUIRE_OI_CONFIRM} | STRONG_ZONE_REQUIRED={STRONG_ZONE_REQUIRED}")
+    log("Strict pattern-state scanner started")
+    debug(f"Startup env | JSON_FILE={JSON_FILE} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS} | ENTRY_LIMIT_PERCENT={ENTRY_LIMIT_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT} | HA_BODY_PERCENT={HA_BODY_PERCENT}")
     load_instrument_master()
-    ensure_ws_started()
-
-    sent_zone_keys: set = set()
 
     while True:
         try:
-            if ONLY_MARKET_HOURS and not in_market_hours():
+            historical_mode = not ONLY_MARKET_HOURS
+            if ONLY_MARKET_HOURS and not is_market_hours():
                 wait_until_market_start()
                 continue
 
             setups = load_setups()
-            debug_log(f"Main loop loaded setups | count={len(setups)}")
-            if De_bug and setups:
-                for i, s in enumerate(setups[:10], start=1):
-                    debug_log(f"Setup[{i}] | symbol={s.get('symbol')} | status={s.get('status')} | entry_found={s.get('entry_found')} | active_d={s.get('active_d')} | fib_d={s.get('fib_d')}")
+            debug(f"Loaded setups | count={len(setups)}")
             if not setups:
-                log("No setups found")
                 time.sleep(max(POLL_SECONDS, 30))
                 continue
 
+            ltp_map = {} if historical_mode else batch_fetch_ltps(setups)
+            updated: List[Dict[str, Any]] = []
+            all_events: Dict[str, List[Dict[str, Any]]] = {"touched": [], "entry": [], "status": []}
+
             for s in setups:
-                ensure_touch_state_is_current(s)
-                if is_completed_without_entry(s):
-                    s["status"] = "completed_without_entry"
+                ns, events = process_one_setup(s, ltp_map, historical_mode=historical_mode)
+                if ns.get("symbol") in ltp_map:
+                    ns["ltp"] = round(float(ltp_map[ns["symbol"]]), 2)
+                updated.append(ns)
+                for ev in events:
+                    kind = ev.pop("_event_type", "status")
+                    if kind == "touched":
+                        all_events["touched"].append(ev)
+                    elif kind == "entry":
+                        all_events["entry"].append(ev)
+                    else:
+                        all_events["status"].append(ev)
 
-            zones = find_strong_reversal_zones(setups)
-            for s in setups:
-                z = zones.get(str(s.get("symbol") or ""))
-                if z:
-                    s["strong_zone_low"] = round(float(z["low"]), 2)
-                    s["strong_zone_high"] = round(float(z["high"]), 2)
-                    s["strong_zone_count"] = int(z["count"])
-                else:
-                    s["strong_zone_low"] = None
-                    s["strong_zone_high"] = None
-                    s["strong_zone_count"] = 0
-
-            if USE_STRONG_ZONE_ALERTS:
-                for sym, z in zones.items():
-                    key = f"{sym}|{z['low']:.2f}|{z['high']:.2f}|{z['count']}"
-                    if key not in sent_zone_keys:
-                        msg = (
-                            f"🔥 STRONG REVERSAL ZONE\n"
-                            f"Stock: {short_symbol(sym)}\n"
-                            f"Zone: {z['low']:.2f} - {z['high']:.2f}\n"
-                            f"Patterns: {z['count']}"
-                        )
-                        send_telegram_text(msg)
-                        sent_zone_keys.add(key)
-
-            ltp_map = batch_fetch_ltps(setups)
-            debug_log(f"Main loop LTP map ready | count={len(ltp_map)} | symbols={list(ltp_map.keys())[:10]}")
-
-            updated = []
-            for s in setups:
-                sym = str(s.get("symbol") or "")
-                ltp = ltp_map.get(sym)
-                if ltp is not None:
-                    s["ltp"] = round(float(ltp), 2)
-                    debug_log(f"Main loop processing setup | symbol={sym} | ltp={ltp} | status_before={s.get('status')}")
-                    s = process_setup(s, ltp)
-                else:
-                    debug_log(f"Main loop missing LTP for setup | symbol={sym}")
-                updated.append(s)
-                time.sleep(RATE_LIMIT_SLEEP)
-
-            updated = track_open_positions(updated, ltp_map)
             save_setups(updated)
+            send_status_boards(all_events)
+
+            if historical_mode and HISTORICAL_RUN_ONCE:
+                log("Historical mode run completed once; exiting")
+                return
 
         except Exception as e:
             log(f"Main loop error: {e}")
-            debug_log(f"Main loop exception detail | error={e}")
 
         time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        stop_ws()
+    main()
