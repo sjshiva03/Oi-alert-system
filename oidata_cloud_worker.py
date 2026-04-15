@@ -43,6 +43,8 @@ STRONG_ZONE_REQUIRED = os.getenv("STRONG_ZONE_REQUIRED", "false").strip().lower(
 IMAGE_WIDTH = int(os.getenv("IMAGE_WIDTH", "1300"))
 IMAGE_HEIGHT = int(os.getenv("IMAGE_HEIGHT", "1100"))
 
+De_bug = os.getenv("DE_BUG", "false").strip().lower() == "true"
+
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
@@ -66,6 +68,10 @@ def now_ist() -> datetime:
 
 def log(msg: str) -> None:
     print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S IST')}] {msg}", flush=True)
+
+def debug_log(msg: str) -> None:
+    if De_bug:
+        log(f"[DE_BUG] {msg}")
 
 
 def short_symbol(symbol: str) -> str:
@@ -255,16 +261,22 @@ def symbol_to_instrument_key(symbol: str) -> Optional[str]:
     symbol_clean = short_symbol(symbol).upper()
     rec = load_instrument_master().get(symbol_clean)
     if rec:
-        return str(rec.get("instrument_key", "")).strip()
+        key = str(rec.get("instrument_key", "")).strip()
+        debug_log(f"Instrument key mapped | symbol={symbol} | cleaned={symbol_clean} | key={key}")
+        return key
+    debug_log(f"Instrument key missing | symbol={symbol} | cleaned={symbol_clean}")
     return None
 
 
 def load_setups() -> List[Dict[str, Any]]:
     if not os.path.exists(JSON_FILE):
         log(f"JSON file not found: {JSON_FILE}")
+        debug_log(f"JSON missing | path={JSON_FILE}")
         return []
     with open(JSON_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        items = json.load(f)
+    debug_log(f"Loaded setups | path={JSON_FILE} | count={len(items)}")
+    return items
 
 
 def save_setups(items: List[Dict[str, Any]]) -> None:
@@ -296,6 +308,7 @@ def should_process_setup(setup: Dict[str, Any]) -> bool:
 
 
 def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
+    debug_log(f"batch_fetch_ltps start | setups={len(setups)}")
     key_to_symbol: Dict[str, str] = {}
     keys: List[str] = []
     for s in setups:
@@ -307,13 +320,16 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
         else:
             log(f"Instrument key missing for {sym}")
     if not keys:
+        debug_log("batch_fetch_ltps no instrument keys resolved")
         return {}
 
     joined = ",".join(sorted(set(keys)))
+    debug_log(f"LTP request | keys={len(set(keys))} | joined={joined[:250]}")
     try:
         data = upstox_get("https://api.upstox.com/v3/market-quote/ltp", params={"instrument_key": joined})
     except Exception as e:
         log(f"Batch LTP failed: {e}")
+        debug_log(f"LTP request failed | error={e}")
         return {}
 
     out: Dict[str, float] = {}
@@ -327,12 +343,16 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
             ltp = row.get("ltp")
         try:
             out[sym] = float(ltp)
+            debug_log(f"LTP fetched | symbol={sym} | key={key} | ltp={out[sym]}")
         except Exception:
+            debug_log(f"LTP parse failed | symbol={sym} | key={key} | raw={ltp}")
             pass
+    debug_log(f"batch_fetch_ltps done | returned={len(out)}")
     return out
 
 
 def fetch_history_15m(instrument_key: str) -> Optional[pd.DataFrame]:
+    debug_log(f"fetch_history_15m start | key={instrument_key}")
     to_date = now_ist().strftime("%Y-%m-%d")
     from_date = (now_ist() - timedelta(days=5)).strftime("%Y-%m-%d")
     urls = [
@@ -344,6 +364,7 @@ def fetch_history_15m(instrument_key: str) -> Optional[pd.DataFrame]:
             data = upstox_get(url)
             candles = ((data.get("data") or {}).get("candles")) or data.get("candles") or []
             if not candles:
+                debug_log(f"fetch_history_15m empty candles | key={instrument_key} | url={url}")
                 continue
             cols = ["ts", "o", "h", "l", "c", "v"]
             df = pd.DataFrame(candles, columns=cols[:len(candles[0])])
@@ -354,9 +375,13 @@ def fetch_history_15m(instrument_key: str) -> Optional[pd.DataFrame]:
             if "ts" not in df.columns or not {"o", "h", "l", "c"}.issubset(df.columns):
                 continue
             df["datetime"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
-            return df[["datetime", "o", "h", "l", "c"]].dropna().reset_index(drop=True)
-        except Exception:
+            out_df = df[["datetime", "o", "h", "l", "c"]].dropna().reset_index(drop=True)
+            debug_log(f"fetch_history_15m success | key={instrument_key} | candles={len(out_df)} | url={url}")
+            return out_df
+        except Exception as e:
+            debug_log(f"fetch_history_15m failed on url | key={instrument_key} | url={url} | error={e}")
             continue
+    debug_log(f"fetch_history_15m failed all urls | key={instrument_key}")
     return None
 
 
@@ -430,6 +455,7 @@ def is_open_high_pct(open_p: float, high_p: float) -> bool:
 
 def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_entry_percent: float = 2.0) -> Tuple[Optional[float], Optional[str], str]:
     if df is None or df.empty or len(df) < 2:
+        debug_log(f"check_entry_after_touch no candles | pattern={pattern} | d_price={d_price}")
         return None, None, "No candles"
     ha = to_heikin_ashi(df)
 
@@ -443,6 +469,7 @@ def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_
             nearest_scan_price = max(float(first["ha_open"]), float(first["ha_close"]), float(first["ha_high"]))
 
         if abs(nearest_scan_price - d_price) > abs(d_price) * (ENTRY_DISTANCE_PERCENT / 100.0):
+            debug_log(f"check_entry_after_touch moved beyond D | pattern={pattern} | nearest_scan_price={nearest_scan_price} | d_price={d_price} | limit_pct={ENTRY_DISTANCE_PERCENT}")
             return None, None, f"Moved beyond {ENTRY_DISTANCE_PERCENT:.2f}% from D"
 
         # Keep body/doji condition
@@ -453,12 +480,19 @@ def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_
         if pattern.lower() == "bullish":
             confirm_ok = is_open_low_pct(float(second["ha_open"]), float(second["ha_low"]))
             if confirm_ok:
-                return float(second["ha_high"]), str(second["datetime"]), f"Bullish doji + open=low within {ENTRY_BUFFER_PERCENT:.2f}%"
+                entry_val = float(second["ha_high"])
+                entry_dt = str(second["datetime"])
+                debug_log(f"check_entry_after_touch bullish entry | entry={entry_val} | entry_time={entry_dt} | d_price={d_price}")
+                return entry_val, entry_dt, f"Bullish doji + open=low within {ENTRY_BUFFER_PERCENT:.2f}%"
         else:
             confirm_ok = is_open_high_pct(float(second["ha_open"]), float(second["ha_high"]))
             if confirm_ok:
-                return float(second["ha_low"]), str(second["datetime"]), f"Bearish doji + open=high within {ENTRY_BUFFER_PERCENT:.2f}%"
+                entry_val = float(second["ha_low"])
+                entry_dt = str(second["datetime"])
+                debug_log(f"check_entry_after_touch bearish entry | entry={entry_val} | entry_time={entry_dt} | d_price={d_price}")
+                return entry_val, entry_dt, f"Bearish doji + open=high within {ENTRY_BUFFER_PERCENT:.2f}%"
 
+    debug_log(f"check_entry_after_touch no valid entry | pattern={pattern} | d_price={d_price}")
     return None, None, "No valid entry"
 
 
@@ -501,18 +535,22 @@ def get_cached_nearest_expiry(instrument_key: str) -> Optional[str]:
 
 
 def get_option_chain_5_strikes(setup: Dict[str, Any], instrument_key: str, ltp: float) -> Tuple[List[Dict[str, Any]], str]:
+    debug_log(f"get_option_chain_5_strikes start | symbol={setup.get('symbol')} | key={instrument_key} | ltp={ltp}")
     expiry = get_cached_nearest_expiry(instrument_key)
     if not expiry:
+        debug_log(f"get_option_chain_5_strikes no expiry | symbol={setup.get('symbol')} | key={instrument_key}")
         return [], "NA"
 
     try:
         data = upstox_get("https://api.upstox.com/v2/option/chain", params={"instrument_key": instrument_key, "expiry_date": expiry})
     except Exception as e:
         log(f"Option chain failed for {setup.get('symbol')}: {e}")
+        debug_log(f"get_option_chain_5_strikes request failed | symbol={setup.get('symbol')} | error={e}")
         return [], "NA"
 
     rows = data.get("data", []) if isinstance(data, dict) else []
     if not rows:
+        debug_log(f"get_option_chain_5_strikes empty rows | symbol={setup.get('symbol')} | expiry={expiry}")
         return [], "NA"
 
     normalized: List[Dict[str, Any]] = []
@@ -552,6 +590,7 @@ def get_option_chain_5_strikes(setup: Dict[str, Any], instrument_key: str, ltp: 
     ce_sum = sum(r["ce_chg"] for r in view)
     pe_sum = sum(r["pe_chg"] for r in view)
     bias = "Bullish" if pe_sum > ce_sum else "Bearish" if ce_sum > pe_sum else "Neutral"
+    debug_log(f"get_option_chain_5_strikes done | symbol={setup.get('symbol')} | expiry={expiry} | rows={len(view)} | bias={bias} | ce_sum={ce_sum} | pe_sum={pe_sum}")
     return view, bias
 
 
@@ -785,37 +824,46 @@ def build_stock_alert_image(setup: Dict[str, Any], ltp: float, entry_price: floa
 
 def detect_touch(setup: Dict[str, Any], ltp: float) -> Tuple[Optional[float], str]:
     current_d_value, current_d_label = get_current_d_from_levels(setup)
+    debug_log(f"detect_touch start | symbol={setup.get('symbol')} | ltp={ltp} | active_d={current_d_value} | active_label={current_d_label} | fib_d={setup.get('current_fib_d') or setup.get('fib_d')} | trend_d={setup.get('trend_d')}")
     fib_d = ensure_float(setup.get("current_fib_d") or setup.get("fib_d"))
     trend_d = ensure_float(setup.get("trend_d"))
 
     if current_d_value > 0:
         allowed = abs(current_d_value) * (ENTRY_ZONE_PERCENT / 100.0)
         if abs(ltp - current_d_value) <= allowed:
+            debug_log(f"detect_touch matched active D | symbol={setup.get('symbol')} | ltp={ltp} | d={current_d_value} | allowed={allowed}")
             return current_d_value, current_d_label or "Active D"
 
     if fib_d:
         allowed = abs(fib_d) * (ENTRY_ZONE_PERCENT / 100.0)
         if abs(ltp - fib_d) <= allowed:
+            debug_log(f"detect_touch matched fib D | symbol={setup.get('symbol')} | ltp={ltp} | d={fib_d} | allowed={allowed}")
             return fib_d, "Fib"
 
     if trend_d:
         allowed = abs(trend_d) * (ENTRY_ZONE_PERCENT / 100.0)
         if abs(ltp - trend_d) <= allowed:
+            debug_log(f"detect_touch matched trend D | symbol={setup.get('symbol')} | ltp={ltp} | d={trend_d} | allowed={allowed}")
             return trend_d, "Trend"
 
+    debug_log(f"detect_touch no match | symbol={setup.get('symbol')} | ltp={ltp}")
     return None, ""
 
 
 def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
     setup["last_checked_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    debug_log(f"process_setup start | symbol={setup.get('symbol')} | status={setup.get('status')} | entry_found={setup.get('entry_found')} | ltp={ltp}")
     if not should_process_setup(setup):
+        debug_log(f"process_setup skipped should_process_setup | symbol={setup.get('symbol')} | status={setup.get('status')}")
         return setup
     if setup.get("alert_sent") and in_cooldown(setup):
+        debug_log(f"process_setup skipped cooldown | symbol={setup.get('symbol')} | last_alert_at={setup.get('last_alert_at')}")
         return setup
 
     d_price, source = detect_touch(setup, ltp)
     if d_price is None:
         setup["last_debug_reason"] = f"No D touch | LTP={ltp}"
+        debug_log(f"process_setup no D touch | symbol={setup.get('symbol')} | ltp={ltp}")
         return setup
 
     setup["touched_d_source"] = source
@@ -825,25 +873,30 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
     instrument_key = symbol_to_instrument_key(str(setup.get("symbol") or ""))
     if not instrument_key:
         setup["last_debug_reason"] = "Instrument key missing"
+        debug_log(f"process_setup instrument key missing | symbol={setup.get('symbol')}")
         return setup
 
     df = fetch_history_15m(instrument_key)
     entry_price, entry_time, reason = check_entry_after_touch(df, d_price, str(setup.get("pattern", "")), ENTRY_ZONE_PERCENT)
     setup["last_debug_reason"] = reason
+    debug_log(f"process_setup entry check | symbol={setup.get('symbol')} | d_price={d_price} | reason={reason} | entry_price={entry_price} | entry_time={entry_time}")
 
     if not entry_price or not entry_time:
         setup["status"] = "touched"
         if is_completed_without_entry(setup):
             setup["status"] = "completed_without_entry"
+        debug_log(f"process_setup no entry found | symbol={setup.get('symbol')} | status={setup.get('status')} | reason={reason}")
         return setup
 
     oi_rows, oi_bias = get_option_chain_5_strikes(setup, instrument_key, ltp)
     setup["oi_bias"] = oi_bias
 
     allowed_entry, filter_reason = entry_filter_allows(setup, float(ltp), float(d_price), oi_bias)
+    debug_log(f"process_setup entry filter | symbol={setup.get('symbol')} | allowed={allowed_entry} | reason={filter_reason} | oi_bias={oi_bias}")
     if not allowed_entry:
         setup["status"] = "touched"
         setup["last_debug_reason"] = filter_reason
+        debug_log(f"process_setup blocked after filter | symbol={setup.get('symbol')} | reason={filter_reason}")
         return setup
 
     setup["entry_found"] = True
@@ -864,6 +917,7 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
 
     setup["target_hit"] = False
     setup["sl_hit"] = False
+    debug_log(f"process_setup ENTRY FOUND | symbol={setup.get('symbol')} | entry_price={setup.get('entry_price')} | sl={setup.get('sl_price')} | target={setup.get('target_price')} | confidence={setup.get('confidence_score')}")
 
     caption = (
         f"🔥 N PATTERN ENTRY\n"
@@ -883,6 +937,7 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
 
 
 def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]) -> List[Dict[str, Any]]:
+    debug_log(f"track_open_positions start | setups={len(setups)} | ltp_map={len(ltp_map)}")
     updated = []
     for s in setups:
         if is_completed_without_entry(s):
@@ -899,6 +954,7 @@ def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]
         symbol = str(s.get("symbol") or "")
         ltp = ltp_map.get(symbol)
         if ltp is None:
+            debug_log(f"track_open_positions no ltp | symbol={symbol}")
             updated.append(s)
             continue
 
@@ -927,6 +983,7 @@ def track_open_positions(setups: List[Dict[str, Any]], ltp_map: Dict[str, float]
                 hit_text = f"❌ STOPLOSS HIT\n{short_symbol(symbol)}\nLTP: {ltp:.2f}\nSL: {sl_price:.2f}"
 
         if hit_text:
+            debug_log(f"track_open_positions hit | symbol={symbol} | status={s.get('status')} | ltp={ltp} | target={target_price} | sl={sl_price}")
             s["last_alert_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
             send_telegram_text(hit_text)
         updated.append(s)
@@ -1013,6 +1070,7 @@ def main() -> None:
     if not UPSTOX_ACCESS_TOKEN:
         raise RuntimeError("Missing UPSTOX_ACCESS_TOKEN")
     log("N Pattern Upstox Final V4 Auto Expiry started")
+    debug_log(f"Startup env | DE_BUG={De_bug} | JSON_FILE={JSON_FILE} | POLL_SECONDS={POLL_SECONDS} | RATE_LIMIT_SLEEP={RATE_LIMIT_SLEEP} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS}")
     try:
         print("WORKING DIR:", os.getcwd())
         print("FILES:", os.listdir())
@@ -1032,6 +1090,10 @@ def main() -> None:
                 continue
 
             setups = load_setups()
+            debug_log(f"Main loop loaded setups | count={len(setups)}")
+            if De_bug and setups:
+                for i, s in enumerate(setups[:10], start=1):
+                    debug_log(f"Setup[{i}] | symbol={s.get('symbol')} | status={s.get('status')} | entry_found={s.get('entry_found')} | active_d={s.get('active_d')} | fib_d={s.get('fib_d')}")
             if not setups:
                 log("No setups found")
                 time.sleep(max(POLL_SECONDS, 30))
@@ -1067,6 +1129,7 @@ def main() -> None:
                         sent_zone_keys.add(key)
 
             ltp_map = batch_fetch_ltps(setups)
+            debug_log(f"Main loop LTP map ready | count={len(ltp_map)} | symbols={list(ltp_map.keys())[:10]}")
 
             updated = []
             for s in setups:
@@ -1074,7 +1137,10 @@ def main() -> None:
                 ltp = ltp_map.get(sym)
                 if ltp is not None:
                     s["ltp"] = round(float(ltp), 2)
+                    debug_log(f"Main loop processing setup | symbol={sym} | ltp={ltp} | status_before={s.get('status')}")
                     s = process_setup(s, ltp)
+                else:
+                    debug_log(f"Main loop missing LTP for setup | symbol={sym}")
                 updated.append(s)
                 time.sleep(RATE_LIMIT_SLEEP)
 
@@ -1083,6 +1149,7 @@ def main() -> None:
 
         except Exception as e:
             log(f"Main loop error: {e}")
+            debug_log(f"Main loop exception detail | error={e}")
 
         time.sleep(POLL_SECONDS)
 
