@@ -68,6 +68,8 @@ CARDS_PER_IMAGE = env_int("CARDS_PER_IMAGE", 6)
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 DIGEST_FILE = os.getenv("DIGEST_FILE", ".status_digest.json")
+STATE_JSON_FILE = (os.getenv("STATE_JSON_FILE") or "npattern_selected_runtime.json").strip()
+PERSIST_RUNTIME_STATE = env_bool("PERSIST_RUNTIME_STATE", True)
 LIVE_REQUIRE_LTP_NEAR_D = env_bool("LIVE_REQUIRE_LTP_NEAR_D", True)
 USE_GITHUB_STATE_WRITEBACK = env_bool("USE_GITHUB_STATE_WRITEBACK", False)
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
@@ -206,6 +208,9 @@ def requests_post(url: str, **kwargs) -> requests.Response:
 def refresh_json_source() -> None:
     if not JSON_SOURCE_URL:
         return
+    if PERSIST_RUNTIME_STATE and os.path.exists(STATE_JSON_FILE):
+        dbg(f"Runtime state file present; skipping source refresh | path={STATE_JSON_FILE}")
+        return
     if os.path.exists(JSON_FILE) and not REFRESH_JSON_EACH_CYCLE:
         return
     try:
@@ -213,6 +218,9 @@ def refresh_json_source() -> None:
         data = resp.json()
         with open(JSON_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        if PERSIST_RUNTIME_STATE:
+            with open(STATE_JSON_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
         dbg(f"Refreshed JSON from source | url={JSON_SOURCE_URL} | count={len(data) if isinstance(data, list) else 'na'}")
     except Exception as e:
         log(f"JSON source refresh failed: {e}")
@@ -252,20 +260,24 @@ def github_writeback_if_enabled(data: List[Dict[str, Any]]) -> None:
 
 def load_setups() -> List[Dict[str, Any]]:
     refresh_json_source()
-    if not os.path.exists(JSON_FILE):
-        log(f"JSON file not found: {JSON_FILE}")
+    path = STATE_JSON_FILE if (PERSIST_RUNTIME_STATE and os.path.exists(STATE_JSON_FILE)) else JSON_FILE
+    if not os.path.exists(path):
+        log(f"JSON file not found: {path}")
         return []
-    with open(JSON_FILE, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
-        raise RuntimeError("JSON_FILE must contain a list of setups")
-    dbg(f"Loaded setups | path={JSON_FILE} | count={len(data)}")
+        raise RuntimeError("JSON file must contain a list of setups")
+    dbg(f"Loaded setups | path={path} | count={len(data)}")
     return data
 
 
 def save_setups(items: List[Dict[str, Any]]) -> None:
     with open(JSON_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2, ensure_ascii=False)
+    if PERSIST_RUNTIME_STATE:
+        with open(STATE_JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
     github_writeback_if_enabled(items)
 
 
@@ -917,77 +929,132 @@ def save_digest_cache(d: Dict[str, str]) -> None:
         json.dump(d, f, indent=2)
 
 
-def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str) -> bytes:
+def _status_color(status: str) -> Tuple[int, int, int]:
+    s = str(status or "").lower()
+    if "target" in s:
+        return (22, 163, 74)
+    if "stoploss" in s or "failed" in s:
+        return (220, 38, 38)
+    if "shifted" in s or "next" in s:
+        return (234, 88, 12)
+    return (37, 99, 235)
+
+
+def _fmt_num(val: Any) -> str:
+    if val in (None, "", "NA"):
+        return "-"
+    try:
+        return f"{float(val):.2f}"
+    except Exception:
+        return str(val)
+
+
+def _row_text(item: Dict[str, Any]) -> Dict[str, str]:
+    touch_txt = "-"
+    if ensure_float(item.get("touched_d_price")):
+        tp = _fmt_num(item.get("touched_d_price"))
+        tpr = _fmt_num(item.get("touched_price"))
+        tt = str(item.get("touched_at") or "")[:16]
+        touch_txt = f"{tp} @ {tpr}" if tpr != "-" else tp
+        if tt:
+            touch_txt += f" | {tt}"
+    entry_txt = "-"
+    if item.get("entry_price") not in (None, ""):
+        ep = _fmt_num(item.get("entry_price"))
+        et = str(item.get("entry_time") or "")[:16]
+        entry_txt = f"{ep} | {et}" if et else ep
+    level = str(item.get("touched_d_source") or item.get("which_extension_active") or "-")
+    if level.startswith("2nd Active D") or level.startswith("1st Active D") or level.startswith("3rd"):
+        level = str(item.get("which_extension_active") or level)
+    return {
+        "name": short_symbol(str(item.get("symbol"))),
+        "status": str(item.get("status") or "-"),
+        "d": _fmt_num(item.get("active_d")),
+        "touch": touch_txt,
+        "entry": entry_txt,
+        "sl": _fmt_num(item.get("sl_price")),
+        "target": _fmt_num(item.get("target_price")),
+        "level": f"{item.get('current_d_index', '-')} | {level}",
+    }
+
+
+def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str, page_no: int = 1, page_total: int = 1) -> bytes:
     img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (244, 247, 250))
     draw = ImageDraw.Draw(img)
     black = (20, 20, 20)
     blue = (37, 99, 235)
-    red = (220, 38, 38)
-    green = (22, 163, 74)
-    orange = (234, 88, 12)
     gray = (100, 116, 139)
     border = (220, 226, 232)
     white = (255, 255, 255)
     head_fill = (235, 241, 255)
+    alt_fill = (249, 251, 255)
 
-    f_title = _load_font(46, True)
-    f_sub = _load_font(22, False)
-    f_head = _load_font(22, True)
-    f_body = _load_font(18, False)
+    f_title = _load_font(40, True)
+    f_sub = _load_font(20, False)
+    f_tbl_h = _load_font(18, True)
+    f_tbl_b = _load_font(17, False)
+    f_small = _load_font(16, False)
 
-    draw.rounded_rectangle((20, 20, IMAGE_WIDTH - 20, 100), radius=20, fill=white, outline=border, width=2)
-    draw.text((40, 34), title, font=f_title, fill=blue)
-    stamp = f"{mode_label} | {now_ist().strftime('%d-%m-%Y %H:%M IST')}"
-    box = draw.textbbox((0, 0), stamp, font=f_sub)
-    draw.text((IMAGE_WIDTH - 40 - (box[2] - box[0]), 45), stamp, font=f_sub, fill=gray)
+    draw.rounded_rectangle((18, 18, IMAGE_WIDTH - 18, 92), radius=18, fill=white, outline=border, width=2)
+    draw.text((34, 32), title, font=f_title, fill=blue)
+    stamp = f"{mode_label} | {now_ist().strftime('%d-%m-%Y %H:%M IST')} | Page {page_no}/{page_total}"
+    sb = draw.textbbox((0, 0), stamp, font=f_sub)
+    draw.text((IMAGE_WIDTH - 34 - (sb[2] - sb[0]), 42), stamp, font=f_sub, fill=gray)
 
-    cards = chunked(items, max(1, CARDS_PER_IMAGE))
-    page = cards[0] if cards else []
-    cols = 2
-    rows = max(1, math.ceil(len(page) / cols))
-    card_w = (IMAGE_WIDTH - 60) // cols - 10
-    card_h = max(220, (IMAGE_HEIGHT - 140) // rows - 10)
-    y0 = 120
-    for idx, item in enumerate(page):
-        r = idx // cols
-        c = idx % cols
-        x1 = 30 + c * (card_w + 20)
-        y1 = y0 + r * (card_h + 16)
-        x2 = x1 + card_w
-        y2 = y1 + card_h
-        draw.rounded_rectangle((x1, y1, x2, y2), radius=18, fill=white, outline=border, width=2)
-        draw.rounded_rectangle((x1 + 8, y1 + 8, x2 - 8, y1 + 48), radius=12, fill=head_fill, outline=head_fill)
-        sym = short_symbol(str(item.get("symbol")))
-        draw.text((x1 + 18, y1 + 16), sym, font=f_head, fill=black)
-        status = str(item.get("status"))
-        status_color = blue
-        if "target" in status:
-            status_color = green
-        elif "stoploss" in status or "failed" in status:
-            status_color = red
-        elif "shifted" in status or "next" in status:
-            status_color = orange
-        draw.text((x1 + 18, y1 + 60), f"Status: {status}", font=f_body, fill=status_color)
-        lines = [
-            f"Active D: {ensure_float(item.get('active_d')):.2f}",
-            f"Touched D: {ensure_float(item.get('touched_d_price')):.2f} | Price: {ensure_float(item.get('touched_price')):.2f}" if item.get('touched_d_price') else "Touched D: -",
-            f"Touch Time: {str(item.get('touched_at') or '-')[:19]}",
-            f"Entry: {item.get('entry_price') if item.get('entry_price') is not None else '-'} | Time: {str(item.get('entry_time') or '-')[:19]}",
-            f"SL: {item.get('sl_price') if item.get('sl_price') is not None else '-'} | Target: {item.get('target_price') if item.get('target_price') is not None else '-'}",
-            f"Current D Index: {item.get('current_d_index')} | Source: {item.get('touched_d_source') or item.get('which_extension_active') or '-'}",
-        ]
-        if item.get("failure_reason"):
-            lines.append(f"Reason: {item.get('failure_reason')}")
-        elif item.get("entry_reason"):
-            lines.append(f"Reason: {item.get('entry_reason')}")
-        yy = y1 + 90
-        for line in lines[:6]:
-            draw.text((x1 + 18, yy), line, font=f_body, fill=black)
-            yy += 28
+    left = 24
+    top = 112
+    table_w = IMAGE_WIDTH - 48
+    row_h = 50
+    headers = ["NAME", "STATUS", "D POINT", "TOUCH", "ENTRY", "SL", "TARGET", "LEVEL"]
+    col_widths = [170, 180, 110, 270, 250, 100, 110, table_w - (170+180+110+270+250+100+110)]
+    xs = [left]
+    for w in col_widths:
+        xs.append(xs[-1] + w)
+
+    draw.rounded_rectangle((left, top, left + table_w, top + row_h), radius=12, fill=head_fill, outline=border, width=1)
+    for i, h in enumerate(headers):
+        draw.text((xs[i] + 12, top + 14), h, font=f_tbl_h, fill=blue)
+        if i > 0:
+            draw.line((xs[i], top + 6, xs[i], top + row_h - 6), fill=border, width=1)
+
+    y = top + row_h + 10
+    max_rows = max(1, int((IMAGE_HEIGHT - y - 20) // row_h))
+    rows = items[:max_rows]
+    for idx, item in enumerate(rows):
+        fill = white if idx % 2 == 0 else alt_fill
+        draw.rounded_rectangle((left, y, left + table_w, y + row_h - 6), radius=10, fill=fill, outline=border, width=1)
+        row = _row_text(item)
+        vals = [row["name"], row["status"], row["d"], row["touch"], row["entry"], row["sl"], row["target"], row["level"]]
+        for i, val in enumerate(vals):
+            color = _status_color(row["status"]) if i == 1 else black
+            text_val = str(val)
+            # clip long text visually
+            while len(text_val) > 2:
+                bb = draw.textbbox((0, 0), text_val, font=f_tbl_b)
+                if (bb[2] - bb[0]) <= (col_widths[i] - 18):
+                    break
+                text_val = text_val[:-2] + "…"
+            draw.text((xs[i] + 10, y + 13), text_val, font=f_tbl_b, fill=color)
+            if i > 0:
+                draw.line((xs[i], y + 4, xs[i], y + row_h - 10), fill=border, width=1)
+        y += row_h
+
+    footer = f"Count: {len(items)} | Format: NAME | STATUS | D POINT | TOUCH | ENTRY | SL | TARGET | LEVEL"
+    draw.text((left + 6, IMAGE_HEIGHT - 30), footer, font=f_small, fill=gray)
 
     bio = io.BytesIO()
     img.save(bio, format="PNG")
     return bio.getvalue()
+
+
+def build_status_text(title: str, items: List[Dict[str, Any]], limit: int = 30) -> str:
+    lines = [title]
+    for item in items[:limit]:
+        row = _row_text(item)
+        lines.append(f"{row['name']} | D {row['d']} | {row['status']}")
+    if len(items) > limit:
+        lines.append(f"... +{len(items) - limit} more")
+    return "\n".join(lines)
 
 
 def send_status_images(items: List[Dict[str, Any]]) -> None:
@@ -998,11 +1065,15 @@ def send_status_images(items: List[Dict[str, Any]]) -> None:
         "STOPLOSS HIT": [],
         "NEXT D": [],
         "PATTERN FAILED": [],
+        "ACTIVE SUMMARY": [],
     }
     for item in items:
         bucket = str(item.get("result_bucket") or "")
+        status = str(item.get("status") or "")
         if bucket in groups:
             groups[bucket].append(item)
+        if status in {"touched", "entry_waiting", "entry_found", "waiting", "shifted_to_next_d"} and bucket not in {"PATTERN FAILED", "STOPLOSS HIT", "TARGET HIT"}:
+            groups["ACTIVE SUMMARY"].append(item)
 
     cur_digest = digest_for_groups(groups)
     old_digest = load_digest_cache()
@@ -1012,15 +1083,17 @@ def send_status_images(items: List[Dict[str, Any]]) -> None:
             continue
         if old_digest.get(name) == cur_digest.get(name):
             continue
-        img = build_status_image(name, group, mode_label)
-        caption = f"{name}\nMode: {mode_label}\nCount: {len(group)}"
-        send_telegram_photo(img, caption)
+        pages = chunked(group, max(1, CARDS_PER_IMAGE))
+        for i, page in enumerate(pages, start=1):
+            img = build_status_image(name, page, mode_label, i, len(pages))
+            caption = build_status_text(f"{name} ({i}/{len(pages)})", page)
+            send_telegram_photo(img, caption)
     save_digest_cache(cur_digest)
 
 
 def main() -> None:
     log("Strict live/after-market scanner started")
-    dbg(f"Startup env | JSON_FILE={JSON_FILE} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS} | AFTER_MARKET_MODE={AFTER_MARKET_MODE} | PATTERN_TF_MINUTES={PATTERN_TF_MINUTES} | ENTRY_LIMIT_PERCENT={ENTRY_LIMIT_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT}")
+    dbg(f"Startup env | JSON_FILE={JSON_FILE} | STATE_JSON_FILE={STATE_JSON_FILE} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS} | AFTER_MARKET_MODE={AFTER_MARKET_MODE} | PATTERN_TF_MINUTES={PATTERN_TF_MINUTES} | ENTRY_LIMIT_PERCENT={ENTRY_LIMIT_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT}")
     load_instrument_master()
 
     while True:
