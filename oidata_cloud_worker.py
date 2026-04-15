@@ -24,7 +24,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import requests
 from PIL import Image, ImageDraw, ImageFont
-from google.protobuf.json_format import MessageToDict
+try:
+    from google.protobuf.json_format import MessageToDict
+except Exception:
+    MessageToDict = None
 
 try:
     import websocket
@@ -301,6 +304,11 @@ def _load_ws_proto_module():
     if _WS_PROTO_MODULE is not None:
         return _WS_PROTO_MODULE
 
+    if MessageToDict is None:
+        debug_log("WS protobuf package google.protobuf is missing; REST fallback only")
+        _WS_PROTO_MODULE = False
+        return _WS_PROTO_MODULE
+
     candidates = [
         os.getenv("UPSTOX_WS_PROTO_MODULE", "").strip(),
         "MarketDataFeedV3_pb2",
@@ -327,6 +335,8 @@ def _load_ws_proto_module():
 
 def _ws_message_to_dict(message: Any) -> Optional[Dict[str, Any]]:
     if message is None:
+        return None
+    if MessageToDict is None:
         return None
     if isinstance(message, str):
         try:
