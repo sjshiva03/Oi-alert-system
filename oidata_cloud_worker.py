@@ -62,9 +62,9 @@ TARGET_PERCENT = env_float("TARGET_PERCENT", 2.0)
 ALERT_COOLDOWN_SECONDS = env_int("ALERT_COOLDOWN_SECONDS", 21600)
 LOOKBACK_DAYS_PATTERN = env_int("LOOKBACK_DAYS_PATTERN", 180)
 LOOKBACK_DAYS_ENTRY = env_int("LOOKBACK_DAYS_ENTRY", 60)
-IMAGE_WIDTH = env_int("IMAGE_WIDTH", 1400)
-IMAGE_HEIGHT = env_int("IMAGE_HEIGHT", 1200)
-CARDS_PER_IMAGE = env_int("CARDS_PER_IMAGE", 6)
+IMAGE_WIDTH = env_int("IMAGE_WIDTH", 1900)
+IMAGE_HEIGHT = env_int("IMAGE_HEIGHT", 900)
+CARDS_PER_IMAGE = env_int("CARDS_PER_IMAGE", 10)
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 DIGEST_FILE = os.getenv("DIGEST_FILE", ".status_digest.json")
@@ -987,8 +987,6 @@ def _row_text(item: Dict[str, Any]) -> Dict[str, str]:
 
 
 def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str, page_no: int = 1, page_total: int = 1) -> bytes:
-    img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (244, 247, 250))
-    draw = ImageDraw.Draw(img)
     black = (20, 20, 20)
     blue = (37, 99, 235)
     gray = (100, 116, 139)
@@ -997,37 +995,44 @@ def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str,
     head_fill = (235, 241, 255)
     alt_fill = (249, 251, 255)
 
-    f_title = _load_font(56, True)
-    f_sub = _load_font(26, False)
-    f_tbl_h = _load_font(24, True)
-    f_tbl_b = _load_font(22, False)
-    f_small = _load_font(20, False)
-
-    draw.rounded_rectangle((18, 18, IMAGE_WIDTH - 18, 108), radius=18, fill=white, outline=border, width=2)
-    draw.text((34, 28), title, font=f_title, fill=blue)
-    stamp = f"{mode_label} | {now_ist().strftime('%d-%m-%Y %H:%M IST')} | Page {page_no}/{page_total}"
-    sb = draw.textbbox((0, 0), stamp, font=f_sub)
-    draw.text((IMAGE_WIDTH - 34 - (sb[2] - sb[0]), 44), stamp, font=f_sub, fill=gray)
+    f_title = _load_font(64, True)
+    f_sub = _load_font(30, False)
+    f_tbl_h = _load_font(28, True)
+    f_tbl_b = _load_font(26, False)
+    f_small = _load_font(24, False)
 
     left = 24
     top = 128
     table_w = IMAGE_WIDTH - 48
-    row_h = 64
+    row_h = 60
+    header_h = 64
+    footer_h = 42
+    max_rows = max(1, CARDS_PER_IMAGE)
+    rows = items[:max_rows]
+
+    dynamic_height = max(360, min(IMAGE_HEIGHT, top + header_h + 12 + len(rows) * row_h + 24 + footer_h))
+    img = Image.new("RGB", (IMAGE_WIDTH, dynamic_height), (244, 247, 250))
+    draw = ImageDraw.Draw(img)
+
+    draw.rounded_rectangle((18, 18, IMAGE_WIDTH - 18, 108), radius=18, fill=white, outline=border, width=2)
+    draw.text((34, 24), title, font=f_title, fill=blue)
+    stamp = f"{mode_label} | {now_ist().strftime('%d-%m-%Y %H:%M IST')} | Page {page_no}/{page_total}"
+    sb = draw.textbbox((0, 0), stamp, font=f_sub)
+    draw.text((IMAGE_WIDTH - 34 - (sb[2] - sb[0]), 40), stamp, font=f_sub, fill=gray)
+
     headers = ["NAME", "STATUS", "D POINT", "TOUCH", "ENTRY", "SL", "TARGET", "LEVEL"]
-    col_widths = [180, 190, 130, 310, 270, 110, 120, table_w - (180+190+130+310+270+110+120)]
+    col_widths = [240, 260, 170, 430, 360, 145, 165, table_w - (240+260+170+430+360+145+165)]
     xs = [left]
     for w in col_widths:
         xs.append(xs[-1] + w)
 
-    draw.rounded_rectangle((left, top, left + table_w, top + row_h), radius=12, fill=head_fill, outline=border, width=1)
+    draw.rounded_rectangle((left, top, left + table_w, top + header_h), radius=12, fill=head_fill, outline=border, width=1)
     for i, h in enumerate(headers):
-        draw.text((xs[i] + 12, top + 18), h, font=f_tbl_h, fill=blue)
+        draw.text((xs[i] + 12, top + 15), h, font=f_tbl_h, fill=blue)
         if i > 0:
-            draw.line((xs[i], top + 6, xs[i], top + row_h - 6), fill=border, width=1)
+            draw.line((xs[i], top + 6, xs[i], top + header_h - 6), fill=border, width=1)
 
-    y = top + row_h + 10
-    max_rows = max(1, int((IMAGE_HEIGHT - y - 20) // row_h))
-    rows = items[:max_rows]
+    y = top + header_h + 10
     for idx, item in enumerate(rows):
         fill = white if idx % 2 == 0 else alt_fill
         draw.rounded_rectangle((left, y, left + table_w, y + row_h - 6), radius=10, fill=fill, outline=border, width=1)
@@ -1036,19 +1041,18 @@ def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str,
         for i, val in enumerate(vals):
             color = _status_color(row["status"]) if i == 1 else black
             text_val = str(val)
-            # clip long text visually
             while len(text_val) > 2:
                 bb = draw.textbbox((0, 0), text_val, font=f_tbl_b)
                 if (bb[2] - bb[0]) <= (col_widths[i] - 18):
                     break
                 text_val = text_val[:-2] + "…"
-            draw.text((xs[i] + 10, y + 18), text_val, font=f_tbl_b, fill=color)
+            draw.text((xs[i] + 10, y + 14), text_val, font=f_tbl_b, fill=color)
             if i > 0:
                 draw.line((xs[i], y + 4, xs[i], y + row_h - 10), fill=border, width=1)
         y += row_h
 
     footer = f"Count: {len(items)} | Format: NAME | STATUS | D POINT | TOUCH | ENTRY | SL | TARGET | LEVEL"
-    draw.text((left + 6, IMAGE_HEIGHT - 36), footer, font=f_small, fill=gray)
+    draw.text((left + 6, dynamic_height - 34), footer, font=f_small, fill=gray)
 
     bio = io.BytesIO()
     img.save(bio, format="PNG")
