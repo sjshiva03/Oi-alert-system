@@ -407,8 +407,16 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
         for key, row in candidate.items():
             sym = key_to_symbol.get(str(key))
             if not sym and isinstance(row, dict):
-                # Sometimes instrument key may come as a field inside the row
-                row_key = row.get("instrument_key") or row.get("instrumentKey") or row.get("symbol")
+                # Sometimes the response outer key differs from the requested instrument key.
+                # Upstox often returns outer keys like NSE_EQ:SBIN while the row contains
+                # instrument_token / instrument_key like NSE_EQ|INE062A01020.
+                row_key = (
+                    row.get("instrument_token")
+                    or row.get("instrumentToken")
+                    or row.get("instrument_key")
+                    or row.get("instrumentKey")
+                    or row.get("symbol")
+                )
                 if row_key:
                     sym = key_to_symbol.get(str(row_key))
                     if sym:
