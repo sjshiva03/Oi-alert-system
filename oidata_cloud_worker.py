@@ -13,12 +13,23 @@ import io
 import gzip
 import json
 import time
+import ssl
+import uuid
+import json as pyjson
+import threading
+import importlib.util
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 from PIL import Image, ImageDraw, ImageFont
+from google.protobuf.json_format import MessageToDict
+
+try:
+    import websocket
+except Exception:
+    websocket = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -43,6 +54,13 @@ STRONG_ZONE_REQUIRED = os.getenv("STRONG_ZONE_REQUIRED", "false").strip().lower(
 IMAGE_WIDTH = int(os.getenv("IMAGE_WIDTH", "1300"))
 IMAGE_HEIGHT = int(os.getenv("IMAGE_HEIGHT", "1100"))
 
+UPSTOX_WS_ENABLED = os.getenv("UPSTOX_WS_ENABLED", "false").strip().lower() == "true"
+UPSTOX_WS_MODE = (os.getenv("UPSTOX_WS_MODE", "ltpc") or "ltpc").strip().lower()
+UPSTOX_WS_REST_FALLBACK = os.getenv("UPSTOX_WS_REST_FALLBACK", "true").strip().lower() == "true"
+UPSTOX_WS_STALE_SECONDS = int(os.getenv("UPSTOX_WS_STALE_SECONDS", "15"))
+UPSTOX_WS_RECONNECT_SECONDS = int(os.getenv("UPSTOX_WS_RECONNECT_SECONDS", "8"))
+UPSTOX_WS_DEBUG_FRAMES = os.getenv("UPSTOX_WS_DEBUG_FRAMES", "false").strip().lower() == "true"
+
 De_bug = os.getenv("DE_BUG", "false").strip().lower() == "true"
 
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -60,6 +78,16 @@ INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/N
 
 _INSTRUMENT_MAP: Dict[str, Dict[str, Any]] = {}
 _EXPIRY_CACHE: Dict[str, Dict[str, str]] = {}
+_WS_LTP_CACHE: Dict[str, Dict[str, Any]] = {}
+_WS_SUBSCRIBED_KEYS: set = set()
+_WS_DESIRED_KEYS: set = set()
+_WS_LOCK = threading.Lock()
+_WS_THREAD: Optional[threading.Thread] = None
+_WS_STOP_EVENT = threading.Event()
+_WS_CONNECTED = False
+_WS_LAST_CONNECT_TS = 0.0
+_WS_LAST_MSG_TS = 0.0
+_WS_PROTO_MODULE = None
 
 
 def now_ist() -> datetime:
@@ -268,6 +296,266 @@ def symbol_to_instrument_key(symbol: str) -> Optional[str]:
     return None
 
 
+def _load_ws_proto_module():
+    global _WS_PROTO_MODULE
+    if _WS_PROTO_MODULE is not None:
+        return _WS_PROTO_MODULE
+
+    candidates = [
+        os.getenv("UPSTOX_WS_PROTO_MODULE", "").strip(),
+        "MarketDataFeedV3_pb2",
+        "MarketDataFeed_pb2",
+        "upstox_client.feeder.proto.MarketDataFeedV3_pb2",
+    ]
+    for mod_name in candidates:
+        if not mod_name:
+            continue
+        try:
+            spec = importlib.util.find_spec(mod_name)
+            if spec is None:
+                continue
+            module = __import__(mod_name, fromlist=['*'])
+            _WS_PROTO_MODULE = module
+            debug_log(f"WS proto loaded | module={mod_name}")
+            return _WS_PROTO_MODULE
+        except Exception as e:
+            debug_log(f"WS proto load failed | module={mod_name} | error={e}")
+    debug_log("WS proto not available; websocket will fall back to REST only")
+    _WS_PROTO_MODULE = False
+    return _WS_PROTO_MODULE
+
+
+def _ws_message_to_dict(message: Any) -> Optional[Dict[str, Any]]:
+    if message is None:
+        return None
+    if isinstance(message, str):
+        try:
+            return pyjson.loads(message)
+        except Exception:
+            return None
+
+    proto_mod = _load_ws_proto_module()
+    if not proto_mod or proto_mod is False:
+        return None
+
+    msg_cls = getattr(proto_mod, "FeedResponse", None)
+    if msg_cls is None:
+        debug_log("WS proto module missing FeedResponse class")
+        return None
+    try:
+        feed_response = msg_cls()
+        feed_response.ParseFromString(message)
+        return MessageToDict(feed_response, preserving_proto_field_name=True)
+    except Exception as e:
+        debug_log(f"WS protobuf decode failed | error={e}")
+        return None
+
+
+def _extract_ltp_from_feed_dict(feed_item: Dict[str, Any]) -> Optional[float]:
+    candidates: List[Any] = []
+    if not isinstance(feed_item, dict):
+        return None
+    candidates.append(feed_item.get("ltpc"))
+    first_level = feed_item.get("firstLevelWithGreeks")
+    if isinstance(first_level, dict):
+        candidates.append(first_level.get("ltpc"))
+    full_feed = feed_item.get("fullFeed")
+    if isinstance(full_feed, dict):
+        for key in ("marketFF", "indexFF", "firstLevelWithGreeks"):
+            block = full_feed.get(key)
+            if isinstance(block, dict):
+                candidates.append(block.get("ltpc"))
+                candidates.append(block)
+    market_ff = feed_item.get("marketFF")
+    if isinstance(market_ff, dict):
+        candidates.append(market_ff.get("ltpc"))
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            for field in ("ltp", "last_price", "lastPrice"):
+                try:
+                    val = candidate.get(field)
+                    if val not in (None, ""):
+                        return float(val)
+                except Exception:
+                    continue
+    return None
+
+
+def _update_ws_cache_from_dict(data: Dict[str, Any]) -> None:
+    global _WS_LAST_MSG_TS
+    if not isinstance(data, dict):
+        return
+    _WS_LAST_MSG_TS = time.time()
+    msg_type = str(data.get("type") or "")
+    if UPSTOX_WS_DEBUG_FRAMES:
+        debug_log(f"WS frame type | type={msg_type} | keys={list(data.keys())[:20]}")
+    feeds = data.get("feeds") or {}
+    if not isinstance(feeds, dict):
+        return
+    now_ts = time.time()
+    with _WS_LOCK:
+        for instrument_key, feed_item in feeds.items():
+            ltp_val = _extract_ltp_from_feed_dict(feed_item)
+            if ltp_val is None:
+                continue
+            _WS_LTP_CACHE[str(instrument_key)] = {
+                "ltp": float(ltp_val),
+                "ts": now_ts,
+                "raw_type": msg_type,
+            }
+            if UPSTOX_WS_DEBUG_FRAMES:
+                debug_log(f"WS LTP cached | instrument_key={instrument_key} | ltp={ltp_val}")
+
+
+def _get_ws_authorized_url() -> str:
+    data = upstox_get(
+        "https://api.upstox.com/v3/feed/market-data-feed/authorize",
+        params=None,
+    )
+    if not isinstance(data, dict):
+        raise RuntimeError("WS authorize response not dict")
+    payload = data.get("data") or {}
+    url = payload.get("authorized_redirect_uri") or payload.get("authorizedRedirectUri")
+    if not url:
+        raise RuntimeError(f"WS authorize URL missing: {data}")
+    return str(url)
+
+
+def _build_ws_subscribe_payload(keys: List[str]) -> bytes:
+    payload = {
+        "guid": uuid.uuid4().hex[:20],
+        "method": "sub",
+        "data": {
+            "mode": UPSTOX_WS_MODE,
+            "instrumentKeys": keys,
+        },
+    }
+    return pyjson.dumps(payload).encode("utf-8")
+
+
+def _ws_send_subscriptions(ws_app) -> None:
+    keys = []
+    with _WS_LOCK:
+        keys = sorted(_WS_DESIRED_KEYS - _WS_SUBSCRIBED_KEYS)
+    if not keys:
+        return
+    try:
+        payload = _build_ws_subscribe_payload(keys)
+        ws_app.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
+        with _WS_LOCK:
+            _WS_SUBSCRIBED_KEYS.update(keys)
+        debug_log(f"WS subscribed | keys={len(keys)}")
+    except Exception as e:
+        debug_log(f"WS subscribe failed | error={e}")
+
+
+def _ws_on_open(ws_app):
+    global _WS_CONNECTED, _WS_LAST_CONNECT_TS
+    _WS_CONNECTED = True
+    _WS_LAST_CONNECT_TS = time.time()
+    with _WS_LOCK:
+        _WS_SUBSCRIBED_KEYS.clear()
+    debug_log("WS connected")
+    _ws_send_subscriptions(ws_app)
+
+
+def _ws_on_message(ws_app, message):
+    data = _ws_message_to_dict(message)
+    if data is None:
+        if UPSTOX_WS_DEBUG_FRAMES:
+            debug_log(f"WS message ignored | type={type(message).__name__}")
+        return
+    _update_ws_cache_from_dict(data)
+    _ws_send_subscriptions(ws_app)
+
+
+def _ws_on_error(ws_app, error):
+    debug_log(f"WS error | error={error}")
+
+
+def _ws_on_close(ws_app, status_code, msg):
+    global _WS_CONNECTED
+    _WS_CONNECTED = False
+    with _WS_LOCK:
+        _WS_SUBSCRIBED_KEYS.clear()
+    debug_log(f"WS closed | code={status_code} | msg={msg}")
+
+
+def _ws_loop_worker() -> None:
+    global _WS_CONNECTED
+    sslopt = {"cert_reqs": ssl.CERT_NONE}
+    while not _WS_STOP_EVENT.is_set():
+        if not UPSTOX_WS_ENABLED:
+            return
+        if websocket is None:
+            debug_log("WS library websocket-client not available; REST fallback only")
+            return
+        proto_mod = _load_ws_proto_module()
+        if proto_mod is False:
+            debug_log("WS disabled because protobuf module is unavailable; REST fallback only")
+            return
+        try:
+            ws_url = _get_ws_authorized_url()
+            debug_log(f"WS authorize success | url={ws_url[:140]}")
+            app = websocket.WebSocketApp(
+                ws_url,
+                on_open=_ws_on_open,
+                on_message=_ws_on_message,
+                on_error=_ws_on_error,
+                on_close=_ws_on_close,
+            )
+            app.run_forever(sslopt=sslopt, ping_interval=20, ping_timeout=10, skip_utf8_validation=True)
+        except Exception as e:
+            _WS_CONNECTED = False
+            debug_log(f"WS loop exception | error={e}")
+        if _WS_STOP_EVENT.is_set():
+            break
+        time.sleep(max(2, UPSTOX_WS_RECONNECT_SECONDS))
+
+
+def ensure_ws_started() -> None:
+    global _WS_THREAD
+    if not UPSTOX_WS_ENABLED:
+        return
+    if _WS_THREAD and _WS_THREAD.is_alive():
+        return
+    _WS_STOP_EVENT.clear()
+    _WS_THREAD = threading.Thread(target=_ws_loop_worker, name="upstox-ws-ltp", daemon=True)
+    _WS_THREAD.start()
+    debug_log("WS thread started")
+
+
+def refresh_ws_subscriptions(keys: List[str]) -> None:
+    if not UPSTOX_WS_ENABLED:
+        return
+    ensure_ws_started()
+    with _WS_LOCK:
+        _WS_DESIRED_KEYS.update([k for k in keys if k])
+    debug_log(f"WS desired keys updated | total={len(_WS_DESIRED_KEYS)}")
+
+
+def get_ws_ltps_for_keys(keys: List[str]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    if not UPSTOX_WS_ENABLED:
+        return out
+    now_ts = time.time()
+    with _WS_LOCK:
+        for key in keys:
+            row = _WS_LTP_CACHE.get(key)
+            if not row:
+                continue
+            age = now_ts - float(row.get("ts", 0))
+            if age <= UPSTOX_WS_STALE_SECONDS:
+                out[key] = float(row.get("ltp", 0.0))
+    if out:
+        debug_log(f"WS cache hit | count={len(out)} | keys={list(out.keys())[:10]}")
+    return out
+
+
+def stop_ws() -> None:
+    _WS_STOP_EVENT.set()
+
+
 def load_setups() -> List[Dict[str, Any]]:
     if not os.path.exists(JSON_FILE):
         log(f"JSON file not found: {JSON_FILE}")
@@ -327,15 +615,36 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
         debug_log("batch_fetch_ltps no instrument keys resolved")
         return {}
 
-    joined = ",".join(unique_keys)
-    debug_log(f"LTP request | keys={len(unique_keys)} | joined={joined[:500]}")
+    out: Dict[str, float] = {}
+
+    # Prefer websocket cache when enabled; fall back to REST only for missing/stale keys.
+    if UPSTOX_WS_ENABLED:
+        refresh_ws_subscriptions(unique_keys)
+        ws_hits = get_ws_ltps_for_keys(unique_keys)
+        for key, ltp in ws_hits.items():
+            sym = key_to_symbol.get(key)
+            if sym:
+                out[sym] = float(ltp)
+        missing_keys = [k for k in unique_keys if k not in ws_hits]
+        debug_log(f"batch_fetch_ltps ws stage | hits={len(ws_hits)} | missing={len(missing_keys)} | connected={_WS_CONNECTED}")
+        if not missing_keys and out:
+            debug_log(f"batch_fetch_ltps final from ws only | returned={len(out)}")
+            return out
+        if not UPSTOX_WS_REST_FALLBACK and out:
+            debug_log(f"batch_fetch_ltps ws only mode active | returned={len(out)}")
+            return out
+    else:
+        missing_keys = unique_keys
+
+    joined = ",".join(missing_keys)
+    debug_log(f"LTP request | keys={len(missing_keys)} | joined={joined[:500]}")
 
     try:
         data = upstox_get("https://api.upstox.com/v3/market-quote/ltp", params={"instrument_key": joined})
     except Exception as e:
         log(f"Batch LTP failed: {e}")
         debug_log(f"LTP request failed | error={e}")
-        return {}
+        return out
 
     try:
         if isinstance(data, dict):
@@ -345,8 +654,6 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
             debug_log(f"LTP raw non-dict response type = {type(data).__name__} | value = {str(data)[:3000]}")
     except Exception as e:
         debug_log(f"LTP raw response print failed: {e}")
-
-    out: Dict[str, float] = {}
 
     def try_pick_ltp(row: Any) -> Optional[float]:
         if not isinstance(row, dict):
@@ -382,8 +689,6 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
         return None
 
     payload = data.get("data", {}) if isinstance(data, dict) else {}
-
-    # Support multiple payload shapes
     payload_candidates: List[Tuple[str, Any]] = [("data", payload)]
     if isinstance(payload, dict):
         for alt_key in ("quotes", "ltp", "items", "results"):
@@ -407,9 +712,6 @@ def batch_fetch_ltps(setups: List[Dict[str, Any]]) -> Dict[str, float]:
         for key, row in candidate.items():
             sym = key_to_symbol.get(str(key))
             if not sym and isinstance(row, dict):
-                # Sometimes the response outer key differs from the requested instrument key.
-                # Upstox often returns outer keys like NSE_EQ:SBIN while the row contains
-                # instrument_token / instrument_key like NSE_EQ|INE062A01020.
                 row_key = (
                     row.get("instrument_token")
                     or row.get("instrumentToken")
@@ -451,24 +753,40 @@ def fetch_history_15m(instrument_key: str) -> Optional[pd.DataFrame]:
             if not candles:
                 debug_log(f"fetch_history_15m empty candles | key={instrument_key} | url={url}")
                 continue
-            cols = ["ts", "o", "h", "l", "c", "v"]
-            df = pd.DataFrame(candles, columns=cols[:len(candles[0])])
-            rename = {}
-            for old, new in zip(df.columns[:6], ["ts", "o", "h", "l", "c", "v"][:len(df.columns[:6])]):
-                rename[old] = new
-            df = df.rename(columns=rename)
-            if "ts" not in df.columns or not {"o", "h", "l", "c"}.issubset(df.columns):
+
+            rows: List[Dict[str, Any]] = []
+            for row in candles:
+                if not isinstance(row, (list, tuple)) or len(row) < 6:
+                    continue
+                rows.append({
+                    "ts": row[0],
+                    "o": row[1],
+                    "h": row[2],
+                    "l": row[3],
+                    "c": row[4],
+                    "v": row[5],
+                    "extra": row[6:] if len(row) > 6 else [],
+                })
+
+            if not rows:
+                debug_log(f"fetch_history_15m no usable rows | key={instrument_key} | url={url} | raw_cols={len(candles[0]) if candles else 0}")
                 continue
+
+            df = pd.DataFrame(rows)
             df["datetime"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+            for col in ["o", "h", "l", "c", "v"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
             out_df = df[["datetime", "o", "h", "l", "c"]].dropna().reset_index(drop=True)
-            debug_log(f"fetch_history_15m success | key={instrument_key} | candles={len(out_df)} | url={url}")
+            if out_df.empty:
+                debug_log(f"fetch_history_15m parsed empty dataframe | key={instrument_key} | url={url}")
+                continue
+            debug_log(f"fetch_history_15m success | key={instrument_key} | candles={len(out_df)} | raw_cols={len(candles[0]) if candles else 0} | url={url}")
             return out_df
         except Exception as e:
             debug_log(f"fetch_history_15m failed on url | key={instrument_key} | url={url} | error={e}")
             continue
     debug_log(f"fetch_history_15m failed all urls | key={instrument_key}")
     return None
-
 
 def to_heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
     ha = df.copy().reset_index(drop=True)
@@ -1155,7 +1473,7 @@ def main() -> None:
     if not UPSTOX_ACCESS_TOKEN:
         raise RuntimeError("Missing UPSTOX_ACCESS_TOKEN")
     log("N Pattern Upstox Final V4 Auto Expiry started")
-    debug_log(f"Startup env | DE_BUG={De_bug} | JSON_FILE={JSON_FILE} | POLL_SECONDS={POLL_SECONDS} | RATE_LIMIT_SLEEP={RATE_LIMIT_SLEEP} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS}")
+    debug_log(f"Startup env | DE_BUG={De_bug} | JSON_FILE={JSON_FILE} | POLL_SECONDS={POLL_SECONDS} | RATE_LIMIT_SLEEP={RATE_LIMIT_SLEEP} | ONLY_MARKET_HOURS={ONLY_MARKET_HOURS} | UPSTOX_WS_ENABLED={UPSTOX_WS_ENABLED} | UPSTOX_WS_MODE={UPSTOX_WS_MODE} | UPSTOX_WS_REST_FALLBACK={UPSTOX_WS_REST_FALLBACK}")
     try:
         print("WORKING DIR:", os.getcwd())
         print("FILES:", os.listdir())
@@ -1165,6 +1483,7 @@ def main() -> None:
     send_real_startup_sample_once()
     log(f"Smart filters | HA_BODY_PERCENT={HA_BODY_PERCENT} | ENTRY_DISTANCE_PERCENT={ENTRY_DISTANCE_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT} | REQUIRE_OI_CONFIRM={REQUIRE_OI_CONFIRM} | STRONG_ZONE_REQUIRED={STRONG_ZONE_REQUIRED}")
     load_instrument_master()
+    ensure_ws_started()
 
     sent_zone_keys: set = set()
 
@@ -1240,4 +1559,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        stop_ws()
