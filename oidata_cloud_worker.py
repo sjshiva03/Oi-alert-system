@@ -52,6 +52,8 @@ RATE_LIMIT_SLEEP = float(os.getenv("RATE_LIMIT_SLEEP", "0.8"))
 HA_BODY_PERCENT = float(os.getenv("HA_BODY_PERCENT", "30"))
 ENTRY_DISTANCE_PERCENT = float(os.getenv("ENTRY_DISTANCE_PERCENT", "0.5"))
 ENTRY_BUFFER_PERCENT = float(os.getenv("ENTRY_BUFFER_PERCENT", "0.1"))
+ENTRY_MUST_BE_TODAY = os.getenv("ENTRY_MUST_BE_TODAY", "true").strip().lower() == "true"
+ENTRY_AFTER_TOUCH_ONLY = os.getenv("ENTRY_AFTER_TOUCH_ONLY", "true").strip().lower() == "true"
 REQUIRE_OI_CONFIRM = os.getenv("REQUIRE_OI_CONFIRM", "true").strip().lower() == "true"
 STRONG_ZONE_REQUIRED = os.getenv("STRONG_ZONE_REQUIRED", "false").strip().lower() == "true"
 IMAGE_WIDTH = int(os.getenv("IMAGE_WIDTH", "1300"))
@@ -866,15 +868,57 @@ def is_open_high_pct(open_p: float, high_p: float) -> bool:
     diff_pct = abs(open_p - high_p) / abs(high_p) * 100.0
     return diff_pct <= ENTRY_BUFFER_PERCENT
 
-def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_entry_percent: float = 2.0) -> Tuple[Optional[float], Optional[str], str]:
+def check_entry_after_touch(
+    df: pd.DataFrame,
+    d_price: float,
+    pattern: str,
+    max_entry_percent: float = 2.0,
+    not_before_dt: Optional[datetime] = None,
+) -> Tuple[Optional[float], Optional[str], str]:
     if df is None or df.empty or len(df) < 2:
         debug_log(f"check_entry_after_touch no candles | pattern={pattern} | d_price={d_price}")
         return None, None, "No candles"
-    ha = to_heikin_ashi(df)
+
+    work = df.copy()
+    if "datetime" not in work.columns:
+        debug_log(f"check_entry_after_touch missing datetime column | pattern={pattern} | d_price={d_price}")
+        return None, None, "No datetime"
+
+    work["datetime"] = pd.to_datetime(work["datetime"], utc=True, errors="coerce")
+    work = work.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
+    if work.empty or len(work) < 2:
+        debug_log(f"check_entry_after_touch empty after datetime cleanup | pattern={pattern} | d_price={d_price}")
+        return None, None, "No candles"
+
+    if not_before_dt is not None:
+        ndt = not_before_dt.astimezone(IST)
+        ndt_utc = pd.Timestamp(ndt).tz_convert("UTC")
+        before_count = len(work)
+        work = work[work["datetime"] >= ndt_utc].reset_index(drop=True)
+        debug_log(f"check_entry_after_touch filtered by not_before | pattern={pattern} | d_price={d_price} | not_before={ndt.isoformat()} | before={before_count} | after={len(work)}")
+
+    if ENTRY_MUST_BE_TODAY:
+        today_ist = now_ist().date()
+        before_count = len(work)
+        work = work[work["datetime"].dt.tz_convert("Asia/Kolkata").dt.date == today_ist].reset_index(drop=True)
+        debug_log(f"check_entry_after_touch filtered to today | pattern={pattern} | d_price={d_price} | today={today_ist} | before={before_count} | after={len(work)}")
+
+    if work.empty or len(work) < 2:
+        debug_log(f"check_entry_after_touch no same-session candles | pattern={pattern} | d_price={d_price}")
+        return None, None, "No same-session candles"
+
+    ha = to_heikin_ashi(work)
 
     for i in range(len(ha) - 1):
         first = ha.iloc[i]
         second = ha.iloc[i + 1]
+
+        first_dt = parse_any_datetime(first.get("datetime"))
+        second_dt = parse_any_datetime(second.get("datetime"))
+        if not_before_dt is not None and first_dt and first_dt < not_before_dt.astimezone(IST):
+            continue
+        if not_before_dt is not None and second_dt and second_dt < not_before_dt.astimezone(IST):
+            continue
 
         if pattern.lower() == "bullish":
             nearest_scan_price = min(float(first["ha_open"]), float(first["ha_close"]), float(first["ha_low"]))
@@ -882,14 +926,11 @@ def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_
             nearest_scan_price = max(float(first["ha_open"]), float(first["ha_close"]), float(first["ha_high"]))
 
         if abs(nearest_scan_price - d_price) > abs(d_price) * (ENTRY_DISTANCE_PERCENT / 100.0):
-            debug_log(f"check_entry_after_touch moved beyond D | pattern={pattern} | nearest_scan_price={nearest_scan_price} | d_price={d_price} | limit_pct={ENTRY_DISTANCE_PERCENT}")
-            return None, None, f"Moved beyond {ENTRY_DISTANCE_PERCENT:.2f}% from D"
+            continue
 
-        # Keep body/doji condition
         if not is_doji(first):
             continue
 
-        # Add open=low / open=high percentage condition
         if pattern.lower() == "bullish":
             confirm_ok = is_open_low_pct(float(second["ha_open"]), float(second["ha_low"]))
             if confirm_ok:
@@ -906,8 +947,7 @@ def check_entry_after_touch(df: pd.DataFrame, d_price: float, pattern: str, max_
                 return entry_val, entry_dt, f"Bearish doji + open=high within {ENTRY_BUFFER_PERCENT:.2f}%"
 
     debug_log(f"check_entry_after_touch no valid entry | pattern={pattern} | d_price={d_price}")
-    return None, None, "No valid entry"
-
+    return None, None, "No valid same-session entry"
 
 def get_nearest_expiry(instrument_key: str) -> Optional[str]:
     try:
@@ -1265,6 +1305,7 @@ def detect_touch(setup: Dict[str, Any], ltp: float) -> Tuple[Optional[float], st
 
 def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
     setup["last_checked_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    ensure_touch_state_is_current(setup)
     debug_log(f"process_setup start | symbol={setup.get('symbol')} | status={setup.get('status')} | entry_found={setup.get('entry_found')} | ltp={ltp}")
     if not should_process_setup(setup):
         debug_log(f"process_setup skipped should_process_setup | symbol={setup.get('symbol')} | status={setup.get('status')}")
@@ -1282,6 +1323,9 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
     setup["touched_d_source"] = source
     setup["touched_d_price"] = round(float(d_price), 2)
     setup["active_d"] = round(float(d_price), 2)
+    if not setup.get("touched_at"):
+        setup["touched_at"] = now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    setup["touched_session_date"] = now_ist().strftime("%Y-%m-%d")
 
     instrument_key = symbol_to_instrument_key(str(setup.get("symbol") or ""))
     if not instrument_key:
@@ -1290,7 +1334,18 @@ def process_setup(setup: Dict[str, Any], ltp: float) -> Dict[str, Any]:
         return setup
 
     df = fetch_history_15m(instrument_key)
-    entry_price, entry_time, reason = check_entry_after_touch(df, d_price, str(setup.get("pattern", "")), ENTRY_ZONE_PERCENT)
+    not_before_dt = None
+    if ENTRY_AFTER_TOUCH_ONLY:
+        not_before_dt = parse_any_datetime(setup.get("touched_at")) or current_market_start_ist()
+    elif ENTRY_MUST_BE_TODAY:
+        not_before_dt = current_market_start_ist()
+    entry_price, entry_time, reason = check_entry_after_touch(
+        df,
+        d_price,
+        str(setup.get("pattern", "")),
+        ENTRY_ZONE_PERCENT,
+        not_before_dt=not_before_dt,
+    )
     setup["last_debug_reason"] = reason
     debug_log(f"process_setup entry check | symbol={setup.get('symbol')} | d_price={d_price} | reason={reason} | entry_price={entry_price} | entry_time={entry_time}")
 
@@ -1491,7 +1546,7 @@ def main() -> None:
     except Exception as e:
         print("FONT DEBUG ERROR:", e)
     send_real_startup_sample_once()
-    log(f"Smart filters | HA_BODY_PERCENT={HA_BODY_PERCENT} | ENTRY_DISTANCE_PERCENT={ENTRY_DISTANCE_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT} | REQUIRE_OI_CONFIRM={REQUIRE_OI_CONFIRM} | STRONG_ZONE_REQUIRED={STRONG_ZONE_REQUIRED}")
+    log(f"Smart filters | HA_BODY_PERCENT={HA_BODY_PERCENT} | ENTRY_DISTANCE_PERCENT={ENTRY_DISTANCE_PERCENT} | ENTRY_BUFFER_PERCENT={ENTRY_BUFFER_PERCENT} | ENTRY_MUST_BE_TODAY={ENTRY_MUST_BE_TODAY} | ENTRY_AFTER_TOUCH_ONLY={ENTRY_AFTER_TOUCH_ONLY} | REQUIRE_OI_CONFIRM={REQUIRE_OI_CONFIRM} | STRONG_ZONE_REQUIRED={STRONG_ZONE_REQUIRED}")
     load_instrument_master()
     ensure_ws_started()
 
@@ -1514,6 +1569,7 @@ def main() -> None:
                 continue
 
             for s in setups:
+                ensure_touch_state_is_current(s)
                 if is_completed_without_entry(s):
                     s["status"] = "completed_without_entry"
 
