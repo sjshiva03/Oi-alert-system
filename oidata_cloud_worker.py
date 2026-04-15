@@ -880,15 +880,23 @@ def _load_font(size: int, bold: bool = False):
         ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
         ("LiberationSans-Bold.ttf" if bold else "LiberationSans-Regular.ttf"),
     ]
-    search_paths = [os.getcwd(), os.path.dirname(os.path.abspath(__file__)), "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/liberation2"]
-    for base in search_paths:
+    base_paths = [
+        os.getcwd(),
+        os.path.dirname(os.path.abspath(__file__)),
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/liberation2",
+    ]
+    candidates = []
+    for base in base_paths:
         for name in names:
-            path = os.path.join(base, name)
-            if os.path.exists(path):
-                try:
-                    return ImageFont.truetype(path, size)
-                except Exception:
-                    pass
+            candidates.append(os.path.join(base, "fonts", name))
+            candidates.append(os.path.join(base, name))
+    for font_path in candidates:
+        if os.path.exists(font_path):
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                continue
     return ImageFont.load_default()
 
 
@@ -989,31 +997,31 @@ def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str,
     head_fill = (235, 241, 255)
     alt_fill = (249, 251, 255)
 
-    f_title = _load_font(40, True)
-    f_sub = _load_font(20, False)
-    f_tbl_h = _load_font(18, True)
-    f_tbl_b = _load_font(17, False)
-    f_small = _load_font(16, False)
+    f_title = _load_font(56, True)
+    f_sub = _load_font(26, False)
+    f_tbl_h = _load_font(24, True)
+    f_tbl_b = _load_font(22, False)
+    f_small = _load_font(20, False)
 
-    draw.rounded_rectangle((18, 18, IMAGE_WIDTH - 18, 92), radius=18, fill=white, outline=border, width=2)
-    draw.text((34, 32), title, font=f_title, fill=blue)
+    draw.rounded_rectangle((18, 18, IMAGE_WIDTH - 18, 108), radius=18, fill=white, outline=border, width=2)
+    draw.text((34, 28), title, font=f_title, fill=blue)
     stamp = f"{mode_label} | {now_ist().strftime('%d-%m-%Y %H:%M IST')} | Page {page_no}/{page_total}"
     sb = draw.textbbox((0, 0), stamp, font=f_sub)
-    draw.text((IMAGE_WIDTH - 34 - (sb[2] - sb[0]), 42), stamp, font=f_sub, fill=gray)
+    draw.text((IMAGE_WIDTH - 34 - (sb[2] - sb[0]), 44), stamp, font=f_sub, fill=gray)
 
     left = 24
-    top = 112
+    top = 128
     table_w = IMAGE_WIDTH - 48
-    row_h = 50
+    row_h = 64
     headers = ["NAME", "STATUS", "D POINT", "TOUCH", "ENTRY", "SL", "TARGET", "LEVEL"]
-    col_widths = [170, 180, 110, 270, 250, 100, 110, table_w - (170+180+110+270+250+100+110)]
+    col_widths = [180, 190, 130, 310, 270, 110, 120, table_w - (180+190+130+310+270+110+120)]
     xs = [left]
     for w in col_widths:
         xs.append(xs[-1] + w)
 
     draw.rounded_rectangle((left, top, left + table_w, top + row_h), radius=12, fill=head_fill, outline=border, width=1)
     for i, h in enumerate(headers):
-        draw.text((xs[i] + 12, top + 14), h, font=f_tbl_h, fill=blue)
+        draw.text((xs[i] + 12, top + 18), h, font=f_tbl_h, fill=blue)
         if i > 0:
             draw.line((xs[i], top + 6, xs[i], top + row_h - 6), fill=border, width=1)
 
@@ -1034,13 +1042,13 @@ def build_status_image(title: str, items: List[Dict[str, Any]], mode_label: str,
                 if (bb[2] - bb[0]) <= (col_widths[i] - 18):
                     break
                 text_val = text_val[:-2] + "…"
-            draw.text((xs[i] + 10, y + 13), text_val, font=f_tbl_b, fill=color)
+            draw.text((xs[i] + 10, y + 18), text_val, font=f_tbl_b, fill=color)
             if i > 0:
                 draw.line((xs[i], y + 4, xs[i], y + row_h - 10), fill=border, width=1)
         y += row_h
 
     footer = f"Count: {len(items)} | Format: NAME | STATUS | D POINT | TOUCH | ENTRY | SL | TARGET | LEVEL"
-    draw.text((left + 6, IMAGE_HEIGHT - 30), footer, font=f_small, fill=gray)
+    draw.text((left + 6, IMAGE_HEIGHT - 36), footer, font=f_small, fill=gray)
 
     bio = io.BytesIO()
     img.save(bio, format="PNG")
